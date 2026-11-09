@@ -119,6 +119,19 @@ else
   log "systemd پیدا نشد؛ برنامه را دستی اجرا کنید: cd $INSTALL_DIR && ./persianmeet &"
 fi
 
+# ---------- برند پویا (پیش‌فرض: فعال؛ با WITH_BRAND=0 نادیده بگیرید) ----------
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [ "${WITH_BRAND:-1}" = "1" ] && [ -f "$REPO_DIR/branding/install-brand.py" ]; then
+  log "نصب برند پویا (brand-bridge + brand.json)…"
+  python3 "$REPO_DIR/branding/install-brand.py" --dist "$INSTALL_DIR/dist" \
+    ${BRAND_SITE_NAME:+--site-name "$BRAND_SITE_NAME"} \
+    ${BRAND_TAGLINE:+--tagline "$BRAND_TAGLINE"} \
+    ${BRAND_PRIMARY_COLOR:+--primary-color "$BRAND_PRIMARY_COLOR"} \
+    || log "هشدار: نصب برند ناموفق بود؛ بعداً دستی اجرا کنید: python3 $REPO_DIR/branding/install-brand.py --dist $INSTALL_DIR/dist"
+else
+  log "نصب برند رد شد (WITH_BRAND=${WITH_BRAND:-1})."
+fi
+
 # ---------- فایروال ----------
 if [ "$OPEN_UFW" = "1" ] && command -v ufw >/dev/null; then
   log "تنظیم ufw …"

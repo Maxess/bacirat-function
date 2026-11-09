@@ -68,8 +68,15 @@ CREATE TABLE IF NOT EXISTS attendance (
   session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
   student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
   pid TEXT NOT NULL,
+  user_room_id TEXT NOT NULL DEFAULT '',   -- همان ID داخل UserRoom محصول (برای تطبیق دقیق با Connection)
   entered_at TEXT NOT NULL,
   exited_at TEXT,
+  -- اسنپ‌شات دقیق حضور که لحظه‌ی بستن کلاس (قبل از حذف اتاق) از جدول Connection محصول گرفته می‌شود.
+  -- اگر DeleteMeet رکوردهای Connection را پاک کند، این مقادیر منبع نهایی خروجی CSV/صفحه هستند.
+  snap_seconds INTEGER,
+  snap_first_join INTEGER NOT NULL DEFAULT 0,
+  snap_last_exit INTEGER NOT NULL DEFAULT 0,
+  snap_intervals INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (session_id, student_id)
 );
 
@@ -89,10 +96,23 @@ def connect(path: str) -> sqlite3.Connection:
     return conn
 
 
+def _migrate(conn: sqlite3.Connection) -> None:
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(attendance)")}
+    if "user_room_id" not in cols:
+        conn.execute("ALTER TABLE attendance ADD COLUMN user_room_id TEXT NOT NULL DEFAULT ''")
+    for col, ddl in [("snap_seconds", "ALTER TABLE attendance ADD COLUMN snap_seconds INTEGER"),
+                     ("snap_first_join", "ALTER TABLE attendance ADD COLUMN snap_first_join INTEGER NOT NULL DEFAULT 0"),
+                     ("snap_last_exit", "ALTER TABLE attendance ADD COLUMN snap_last_exit INTEGER NOT NULL DEFAULT 0"),
+                     ("snap_intervals", "ALTER TABLE attendance ADD COLUMN snap_intervals INTEGER NOT NULL DEFAULT 0")]:
+        if col not in cols:
+            conn.execute(ddl)
+
+
 def init_db(path: str) -> None:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with connect(path) as conn:
         conn.executescript(SCHEMA)
+        _migrate(conn)
 
 
 def new_token(nbytes: int = 18) -> str:

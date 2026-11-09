@@ -49,6 +49,9 @@ python3 run.py serve --host 127.0.0.1 --port 8090     # یا با systemd: class
 | `PM_MANAGER_CLOSE_STRATEGY` | `delete` | `delete` = حذف اتاق هنگام بستن (خروج واقعی همه) / `keep` = فقط بستن محلی |
 | `PM_MANAGER_DB` | `./data/classroom_manager.db` | مسیر SQLite |
 | `PM_MANAGER_SECRET` | auto | کلید امضای کوکی (خودکار ساخته می‌شود) |
+| `PERSIANMEET_DIST_DIR` | `$PERSIANMEET_INSTALL_DIR/dist` (یا `/opt/persianmeet/dist`) | مسیر `dist` محصول — برای «برند پویا» (نوشتن `brand.json` و آیکون/لوگو) |
+| `PERSIANMEET_INSTALL_DIR` | `/opt/persianmeet` | اگر `PERSIANMEET_DIST_DIR` تنظیم نشده باشد، از این ساخته می‌شود |
+| `PM_PRODUCT_DB` | `$PERSIANMEET_INSTALL_DIR/test.db` | مسیر دیتابیس sqlite محصول — **فقط‌خواندنی** برای حضور دقیق (جدول `Connection`) |
 
 ### نمونه بلوک Nginx (روی همان دامنه‌ی کلاس)
 
@@ -78,17 +81,32 @@ sudo systemctl daemon-reload && sudo systemctl enable --now classroom-manager
 journalctl -u classroom-manager -f
 ```
 
+## برند پویا (نام/لوگو/آیکون از پنل ادمین محصول)
+
+این ماژول endpoint های `/brand-api/*` را هم سرو می‌کند:
+
+- `GET /brand-api/config` — برگرداندن `brand.json` فعلی (عمومی)
+- `GET /brand-api/admin-check` — بررسی ادمین‌بودن GUID محصول
+- `POST /brand-api/save` — ذخیره‌ی برند + آپلود لوگو/آیکون (**فقط ادمین محصول**، احراز با GUID علیه خود محصول)
+
+نصب پل برند در dist محصول و راهنمای کامل: [`../docs/13-branding.md`](../docs/13-branding.md).
+nginx باید `location /brand-api/ → 127.0.0.1:8090` و `location /brand/ → PersianMeet (no-store)` داشته باشد
+(نمونه در `../deploy/nginx.reverse-proxy.conf`).
+
 ## تست‌ها
 
 ```bash
-python3 -m unittest discover -s classroom-manager/tests -v     # ۶ تست، بدون اینترنت
+python3 -m unittest discover -s classroom-manager/tests -v     # ۱۰ تست، بدون اینترنت
 ```
 
 ## محدودیت‌های فعلی (و چیزی که به سورس نیاز دارد)
 
-- ⏱️ **مدت حضور**: ورود دقیق است؛ خروج «در لحظه‌ی بستن کلاس» ثبت می‌شود. اگر دانش‌آموز زودتر برود،
-  حضورش تا زمان بستن محسوب می‌شود. خروج آنی per-user نیازمند patch در سورس است (ثبت `disconnect`
-  روی `/wsroom`) — نقشه‌ی راه در [`../docs/05-source-workflow.md`](../docs/05-source-workflow.md) § قدم ۳.
+- ⏱️ **مدت حضور — حالا دقیق است**: اگر دیتابیس محصول (`PM_PRODUCT_DB`) خوانده شود، بازه‌های واقعی
+  WebSocket از جدول `Connection` محصول تجمیع می‌شود (اولین ورود / آخرین خروج / آنلاین-الآن) — چه حین
+  کلاس و چه بعد از بستن («اسنپ‌شات» لحظه‌ی بستن، *قبل از* `DeleteMeet` گرفته می‌شود تا داده حتی اگر
+  اتاق حذف شود حفظ شود). خروجی CSV ستون «منبع داده» (دقیق/تقریبی) دارد. اگر دیتابیس محصول در دسترس
+  نباشد، رفتار به حالت تقریبی قبلی (از `entered_at` خودمان) عقب‌نشینی می‌کند — صادقانه در پنل نمایش داده می‌شود.
+  نکته‌ی مهم: «دبیر هنوز داخل کلاس هست؟» هم روی صفحه‌ی نشست نمایش داده می‌شود.
 - 🚫 اخراج **تک‌تک** دانش‌آموز (بدون بستن کلاس) با API رسمی ممکن نیست؛ باید در سورس یک پیام
   broadcast اضافه شود (یا حذف اتاق).
 - 📚 کتاب PDF داخل تخته تعاملی → تغییر سورس (فرانت Pod «کتاب» + تبدیل صفحه با `mupdf-tools`).

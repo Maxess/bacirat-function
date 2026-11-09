@@ -70,7 +70,16 @@ python3 api/persianmeet_api.py --base-url https://class.example.com create \
 │   ├── 01-architecture.md        # معماری فنی: باینری، config، API، WebSocket، پورت‌ها
 │   ├── 02-customization.md       # چه چیزی قابل تغییر است و چه چیزی نه (+ جایگزین‌های متن‌باز)
 │   ├── 03-deployment-guide.md    # راهنمای دیپلوی گام‌به‌گام لینوکس
-│   └── 04-troubleshooting.md     # عیب‌یابی رایج
+│   ├── 04-troubleshooting.md     # عیب‌یابی رایج
+│   ├── 05-source-workflow.md     # گردش‌کار سورس (اگر لایسنس سورس بگیرید)
+│   └── 13-branding.md            # برند پویا از پنل ادمین محصول (نام/لوگو/آیکون/رنگ — با آپلود فایل)
+├── api/
+│   ├── persianmeet_api.py        # کلاینت رسمی API (CreateMeet/Join/GetMeetInfo/MeetList/ActiveMeets/DeleteMeet)
+│   ├── README.md                 # مستندات کلاینت + مثال CLI
+│   └── examples/curl-examples.sh # همان endpoint ها با curl
+├── classroom-manager/            # سایدکار مدیریت کلاس (ورود دبیر/دانش‌آموز، کلاس‌ها، حضور دقیق، برند API)
+├── branding/                     # پل برند پویا: payload/ (brand-bridge.js + brand.json) + install-brand.py
+├── persianmeet/                  # پکیج رسمی محصول (باینری لینوکس + dist + config.yml) — مرجع تست/نصب
 ├── deploy/
 │   ├── install.sh                # نصب خودکار Ubuntu/Debian (همه‌کاره، مطابق مستندات)
 │   ├── update.sh                 # آپدیت با بکاپ خودکار
@@ -79,10 +88,6 @@ python3 api/persianmeet_api.py --base-url https://class.example.com create \
 │   ├── persianmeet.service       # یونیت systemd
 │   ├── config.yml.example        # نمونه‌ی کامنت‌خورده‌ی config.yml
 │   └── nginx.reverse-proxy.conf  # (اختیاری) ریورس‌پراکسی با nginx + WS upgrade
-├── api/
-│   ├── persianmeet_api.py        # کلاینت رسمی API (CreateMeet/Join/GetMeetInfo/MeetList/ActiveMeets/DeleteMeet)
-│   ├── README.md                 # مستندات کلاینت + مثال CLI
-│   └── examples/curl-examples.sh # همان endpoint ها با curl
 └── tests/
     └── test_api_client.py        # تست واحد کلاینت (سرور mock داخلی) — بدون اینترنت اجرا می‌شود
 ```
@@ -93,7 +98,7 @@ python3 api/persianmeet_api.py --base-url https://class.example.com create \
 
 | لایه | ابزار | فایل راهنما |
 |---|---|---|
-| ظاهر و برندینگ (لوگو/رنگ/متن) | فایل‌های `wwwroot` داخل پکیج + `config.yml` | `docs/02-customization.md` §2 |
+| ظاهر و برندینگ (لوگو/رنگ/متن) | **برند پویا از پنل ادمین** (`/dash` → «تنظیمات برند») — یا فایل‌های استاتیک `dist/` | `docs/13-branding.md` (+ `docs/02-customization.md` §2) |
 | دامنه، SSL، پورت | `config.yml` (`auto_ssl`) یا nginx جلوی آن | `docs/02-customization.md` §1, و `deploy/nginx.reverse-proxy.conf` |
 | اتصال به سایت شما (ساخت اتاق، لینک ورود) | API رسمی `/api` | `api/` |
 | نگهداری سرور (service, بکاپ, لاگ) | `deploy/` | `docs/03-deployment-guide.md` |
@@ -107,9 +112,9 @@ python3 api/persianmeet_api.py --base-url https://class.example.com create \
 | ورود دبیر/دانش‌آموز | ورود دبیر با حساب؛ ورود دانش‌آموز فقط با لینک اختصاصی کلاس | ✅ پیاده و تست‌شده |
 | کلاس با ورود دبیر فعال می‌شود | دکمه‌ی «شروع کلاس» → ساخت اتاق PersianMeet + لینک مستقیم دبیر | ✅ پیاده و تست‌شده |
 | بستن کلاس و خروج همه | «بستن کلاس» → حذف/توقف اتاق (`DeleteMeet`) و خروج همه + ثبت خروج | ✅ پیاده و تست‌شده |
-| حضور و غیاب زنده با مدت حضور | صفحه‌ی نشست (رفرش ۱۵ ثانیه‌ای) + خروجی CSV | ✅ پیاده و تست‌شده (ورود دقیق؛ خروج آنی per-user نیازمند patch سورس است) |
-| برندینگ (لوگو/رنگ/متن) | `docs/02-customization.md` — فایل‌های wwwroot یا تزریق nginx | راهنما (فایل‌ها بعد از unzip مشخص می‌شوند) |
-| کتاب PDF روی تخته تعاملی | تغییر سورس — راهنمای کامل در `docs/05-source-workflow.md` | نیازمند سورس |
+| حضور و غیاب زنده با مدت حضور | صفحه‌ی نشست + CSV — بازه‌های واقعی WebSocket از جدول `Connection` محصول (دقیق)، با اسنپ‌شات قبل از حذف اتاق | ✅ پیاده و تست‌شده (زنده + بعد از بستن) |
+| برند پویا از پنل ادمین محصول | دکمه‌ی «⚙️ تنظیمات برند» در `/dash` — نام/توضیح/رنگ + آپلود فایل لوگو و آیکون | ✅ پیاده و تست‌شده روی نسخه‌ی ۰٫۲۶٫۳ — `docs/13-branding.md` |
+| کتاب PDF روی تخته تعاملی | **بدون سورس**: آپلود PDF از داخل اتاق → سفیدبرداری داخلی محصول (`app/lit` + PDFium) صفحه‌های کتاب روی وایت‌برد | ✅ تست‌شده روی لینوکس |
 
-نکته: تغییرات عمیق‌تر (خروج آنی per-user، حضور آنلاین لحظه‌ای دقیق، PDF روی تخته) به سورس اصلی نیاز دارند؛
-اگر سورس را در `persianmeet-src/` این ماشین یا ریپوی خصوصی جدا بگذارید، آن‌ها را هم پیاده می‌کنیم.
+نکته: تغییرات عمیق‌تر (مثلاً اخراج تک‌تک کاربران بدون بستن کلاس، یا تغییر منطق داخل اتاق) هنوز به سورس
+فروشنده نیاز دارند؛ راهنمای گردش‌کار سورس در [`docs/05-source-workflow.md`](docs/05-source-workflow.md).

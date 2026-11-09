@@ -32,6 +32,8 @@ from .auth import SessionCodec, verify_password, hash_password
 from .importer import import_teachers, import_classes, import_students
 from .templates import page, msg_box
 from .pmclient import PersianMeetAPI, PersianMeetError
+from . import product_db
+from . import brand as brandmod
 from html import escape
 
 
@@ -58,6 +60,81 @@ def fmt_duration(seconds: int) -> str:
     h, rem = divmod(seconds, 3600)
     m, s = divmod(rem, 60)
     return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+def ts_to_str(ts: int | float | None) -> str:
+    if not ts:
+        return ""
+    try:
+        return datetime.fromtimestamp(int(ts), tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return ""
+
+
+def parse_ts(s: str | None) -> int:
+    if not s:
+        return 0
+    try:
+        return int(datetime.strptime(s, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc).timestamp())
+    except Exception:
+        return 0
+
+
+def aggregate_presence(meet_id: int | None, rows: list) -> dict:
+    """
+    rows: ردیف‌های attendance (sqlite Row) برای یک نشست.
+    خروجی: {student_id: dict(seconds, first_join, last_exit, online, exact)}
+    اگر پایگاه محصول در دسترس باشد، بازه‌ها از جدول Connection خوانده می‌شوند (دقیق)؛
+    وگرنه به entered_at/exited_at خودمان عقب‌نشینی می‌کنیم (تقریبی).
+    """
+    out = {}
+    ids = [r["user_room_id"] for r in rows if r["user_room_id"]]
+    intervals = product_db.intervals_for_rooms(int(meet_id), ids) if (meet_id and ids) else None
+    online = product_db.online_room_ids(int(meet_id)) if meet_id else None
+    now = int(time.time())
+    for r in rows:
+        sid = r["student_id"]
+        urid = r["user_room_id"] or ""
+        snap = r["snap_seconds"] if "snap_seconds" in r.keys() else None
+        if snap is not None:  # اسنپ‌شات لحظه‌ی بستن کلاس — مرجع نهایی
+            out[sid] = {
+                "seconds": int(snap),
+                "first_join": int(r["snap_first_join"] or 0),
+                "last_exit": int(r["snap_last_exit"] or 0),
+                "online": False,
+                "exact": True,
+                "intervals": int(r["snap_intervals"] or 0),
+            }
+            continue
+        ints = intervals.get(urid) if intervals is not None else None
+        if ints:
+            total = sum(e - s for s, e in ints)
+            first = min(s for s, _ in ints)
+            last = max(e for _, e in ints)
+            out[sid] = {
+                "seconds": int(total),
+                "first_join": first,
+                "last_exit": last,
+                "online": bool(online and urid in online),
+                "exact": True,
+                "intervals": len(ints),
+            }
+        else:
+            entered = parse_ts(r["entered_at"])
+            closed = now if (r["exited_at"] is None) else parse_ts(r["exited_at"])
+            if entered:
+                out[sid] = {
+                    "seconds": max(0, closed - entered),
+                    "first_join": entered,
+                    "last_exit": (closed if r["exited_at"] else 0),
+                    "online": r["exited_at"] is None and intervals is None,
+                    "exact": False,
+                    "intervals": 1,
+                }
+            else:
+                out[sid] = {"seconds": 0, "first_join": 0, "last_exit": 0, "online": False,
+                            "exact": intervals is not None, "intervals": 0}
+    return out
 
 
 class Config:
@@ -133,6 +210,18 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
+    def send_json(self, obj: dict, status: int = 200, headers: dict | None = None):
+        body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(body)
+
     def send_csv(self, filename: str, text: str):
         body = text.encode("utf-8-sig")
         self.send_response(200)
@@ -186,6 +275,9 @@ class Handler(BaseHTTPRequestHandler):
     # ---------- مسیریابی ----------
     ROUTES = [
         ("GET",  re.compile(r"/healthz"),                         "healthz"),
+        ("GET",  re.compile(r"/brand-api/config"),                "brand_config"),
+        ("GET",  re.compile(r"/brand-api/admin-check"),           "brand_admin_check"),
+        ("POST", re.compile(r"/brand-api/save"),                  "brand_save"),
         ("GET",  re.compile(r"/login"),                           "login_form"),
         ("POST", re.compile(r"/login"),                           "login_submit"),
         ("GET",  re.compile(r"/logout"),                          "logout"),
@@ -245,6 +337,38 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    # ---------- برند (هم‌مبدأ از طریق nginx) ----------
+    def route_brand_config(self, m):
+        # خواندن عمومی برند — همان چیزی که brand-bridge.js از /brand/brand.json می‌خواند
+        self.send_json(brandmod.load_brand())
+
+    def route_brand_admin_check(self, m):
+        guid = self._product_admin_guid()
+        self.send_json({"ok": self._is_product_admin(guid)})
+
+    def route_brand_save(self, m):
+        guid = self._product_admin_guid()
+        if not self._is_product_admin(guid):
+            self.send_json({"ok": False, "error": "فقط ادمین محصول (نقش ۱) می‌تواند برند را تغییر دهد"}, status=403)
+            return
+        fields, files = self._parse_multipart_full()
+        try:
+            brand = brandmod.save_brand(
+                site_name=fields.get("siteName", ""),
+                site_name_short=fields.get("siteNameShort", ""),
+                tagline=fields.get("tagline", ""),
+                primary_color=fields.get("primaryColor", "#000000"),
+                logo=(files["logo"], "logo") if files.get("logo") else None,
+                icon=(files["icon"], "icon") if files.get("icon") else None,
+            )
+        except ValueError as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=400)
+            return
+        except OSError as exc:
+            self.send_json({"ok": False, "error": f"نوشتن فایل برند ناموفق بود: {exc}"}, status=500)
+            return
+        self.send_json({"ok": True, "brand": brand})
 
     # ---------- ورود ----------
     def route_login_form(self, m):
@@ -434,11 +558,15 @@ class Handler(BaseHTTPRequestHandler):
             sess = self._load_session(conn, session_id)
             if not sess or not self._check_class_access(user, {"teacher_id": sess["teacher_id"]}):
                 raise Redirect("/")
-            rows = conn.execute("""SELECT s.id, s.student_code, s.full_name, a.entered_at, a.exited_at, a.pid
+            rows = conn.execute("""SELECT s.id, s.student_code, s.full_name, a.entered_at, a.exited_at, a.pid,
+                                          COALESCE(a.user_room_id, '') AS user_room_id,
+                                          a.snap_seconds, a.snap_first_join, a.snap_last_exit, a.snap_intervals
                                    FROM students s
                                    JOIN enrollments e ON e.student_id=s.id AND e.class_id=?
                                    LEFT JOIN attendance a ON a.session_id=? AND a.student_id=s.id
                                    ORDER BY s.full_name""", (sess["class_id"], session_id)).fetchall()
+            attendance_rows = [r for r in rows if r["entered_at"]]
+            presence = aggregate_presence(sess["meet_id"], attendance_rows)
             tokens = {r["student_id"]: r["token"] for r in conn.execute("SELECT student_id, token FROM entry_tokens WHERE class_id=?", (sess["class_id"],)).fetchall()}
             for r in rows:
                 if r["id"] not in tokens:
@@ -451,19 +579,34 @@ class Handler(BaseHTTPRequestHandler):
         status_pill = '<span class="pill ok">کلاس باز است</span>' if is_open else '<span class="pill danger">کلاس بسته است</span>'
         entered_rows = []
         entered = 0
+        exact_any = False
         for r in rows:
-            if r["entered_at"]:
+            pr = presence.get(r["id"])
+            if pr:
                 entered += 1
-                until = r["exited_at"] or (now_str() if is_open else r["entered_at"])
-                dur = fmt_duration(seconds_between(r["entered_at"], until))
-                state = f'🟢 وارد شده ({escape(r["entered_at"][11:16])})'
-                dur_cell = dur
+                exact_any = exact_any or pr["exact"]
+                if pr["online"]:
+                    state = '<span class="pill ok">🟢 آنلاین الآن</span>'
+                elif pr["last_exit"]:
+                    state = f'⚪ خارج شد ({escape(ts_to_str(pr["last_exit"])[11:16])})'
+                else:
+                    state = f'🟡 وارد شده ({escape(r["entered_at"][11:16])})'
+                dur_cell = fmt_duration(pr["seconds"])
             else:
                 state = '<span class="muted">هنوز وارد نشده</span>'
                 dur_cell = "—"
             entered_rows.append(f'<tr><td>{escape(r["student_code"])}</td><td>{escape(r["full_name"])}</td><td>{state}</td><td>{dur_cell}</td>'
                                 f'<td><code class="link">{escape(base)}/enter?token={escape(tokens[r["id"]])}</code></td></tr>')
-        until_note = "تا لحظه‌ی بستن کلاس" if not is_open else "تا همین لحظه (زنده)"
+        until_note = "دقیق (مستقیم از پایگاه داده‌ی PersianMeet)" if exact_any else "تقریبی (تا همین لحظه / بستن کلاس)"
+        data_note = f'<p class="muted">دقتِ محاسبه‌ی حضور: <strong>{escape(until_note)}</strong></p>'
+        # وضعیت دبیر (آیا خودش داخل اتاق است؟)
+        teacher_state_html = ""
+        teacher_room = product_db.user_room_id_for_pid(sess["teacher_pid"]) if (sess["teacher_pid"] and sess["meet_id"]) else None
+        if sess["teacher_pid"] and sess["meet_id"]:
+            online_ids = product_db.online_room_ids(int(sess["meet_id"]))
+            if online_ids is not None and teacher_room:
+                teacher_state_html = ('<p class="muted">دبیر: <span class="pill ok">🟢 داخل کلاس است</span></p>' if teacher_room in online_ids
+                                      else '<p class="muted">دبیر: <span class="pill warn">⚪ هنوز وارد کلاس نشده/خارج شده</span></p>')
         teacher_link = f'{self.cfg.pm_url}/user/{sess["teacher_pid"]}' if sess["teacher_pid"] else ""
         refresh = '<meta http-equiv="refresh" content="15">' if is_open else ""
         if is_open:
@@ -481,7 +624,7 @@ class Handler(BaseHTTPRequestHandler):
     <a class="btn" href="/session/{session_id}/attendance.csv">⬇️ خروجی حضور و غیاب (CSV)</a>
     <button class="btn" onclick="window.print()">🖨️ چاپ</button>
   </div>
-  <p class="muted">مدت حضور دانش‌آموزان {until_note} محاسبه می‌شود.</p>
+  {teacher_state_html}{data_note}
 </div>
 <div class="card">
   <h2>حضور و غیاب کلاس</h2>
@@ -503,6 +646,28 @@ class Handler(BaseHTTPRequestHandler):
                 conn.execute("UPDATE attendance SET exited_at=? WHERE session_id=? AND exited_at IS NULL", (closed, session_id))
                 conn.commit()
                 note = "کلاس بسته شد و حضور و غیاب ثبت شد."
+                # اسنپ‌شات دقیق حضور را *قبل* از حذف اتاق می‌گیریم — بعد از DeleteMeet ممکن است
+                # رکوردهای Connection محصول از بین بروند و دقت حضور غیرقابل بازیابی باشد.
+                snap_rows = conn.execute("""SELECT s.id AS student_id, a.user_room_id
+                                             FROM students s
+                                             JOIN attendance a ON a.session_id=? AND a.student_id=s.id
+                                             WHERE a.user_room_id <> ''""", (session_id,)).fetchall()
+                if sess["meet_id"] and snap_rows:
+                    presence = aggregate_presence(int(sess["meet_id"]), [
+                        {"student_id": r["student_id"], "user_room_id": r["user_room_id"],
+                         "entered_at": "", "exited_at": closed,
+                         "snap_seconds": None, "snap_first_join": 0, "snap_last_exit": 0, "snap_intervals": 0}
+                        for r in snap_rows
+                    ])
+                    for r in snap_rows:
+                        pr = presence.get(r["student_id"])
+                        if pr and pr["exact"]:
+                            conn.execute("""UPDATE attendance SET snap_seconds=?, snap_first_join=?, snap_last_exit=?, snap_intervals=?
+                                             WHERE session_id=? AND student_id=?""",
+                                         (pr["seconds"], pr["first_join"], pr["last_exit"], pr["intervals"],
+                                          session_id, r["student_id"]))
+                    conn.commit()
+                    note += " اسنپ‌شات حضور دقیق ذخیره شد."
                 if self.cfg.close_strategy == "delete" and sess["meet_id"]:
                     try:
                         self.cfg.pm_api().delete_meet(int(sess["meet_id"]))
@@ -520,22 +685,29 @@ class Handler(BaseHTTPRequestHandler):
             sess = self._load_session(conn, session_id)
             if not sess or not self._check_class_access(user, {"teacher_id": sess["teacher_id"]}):
                 raise Redirect("/")
-            rows = conn.execute("""SELECT s.student_code, s.full_name, a.entered_at, a.exited_at
+            rows = conn.execute("""SELECT s.id AS student_id, s.student_code, s.full_name,
+                                          a.entered_at, a.exited_at,
+                                          COALESCE(a.user_room_id, '') AS user_room_id,
+                                          a.snap_seconds, a.snap_first_join, a.snap_last_exit, a.snap_intervals
                                    FROM students s
                                    JOIN enrollments e ON e.student_id=s.id AND e.class_id=?
                                    LEFT JOIN attendance a ON a.session_id=? AND a.student_id=s.id
                                    ORDER BY s.full_name""", (sess["class_id"], session_id)).fetchall()
+            attendance_rows = [r for r in rows if r["entered_at"]]
+            presence = aggregate_presence(sess["meet_id"], attendance_rows)
         out = io.StringIO()
         writer = csv.writer(out)
-        writer.writerow(["کد دانش‌آموز", "نام", "ورود", "خروج", "مدت حضور (ثانیه)", "مدت حضور"])
+        writer.writerow(["کد دانش‌آموز", "نام", "اولین ورود", "آخرین خروج", "مدت حضور (ثانیه)", "مدت حضور", "منبع داده", "وضعیت"])
         for r in rows:
-            entered, exited = r["entered_at"], r["exited_at"]
-            if entered:
-                until = exited or sess["closed_at"] or now_str()
-                secs = seconds_between(entered, until)
-                writer.writerow([r["student_code"], r["full_name"], entered, exited or "", secs, fmt_duration(secs)])
+            pr = presence.get(r["student_id"])
+            if pr:
+                first = ts_to_str(pr["first_join"])
+                last = ts_to_str(pr["last_exit"])
+                src_ = "دقیق" if pr["exact"] else "تقریبی"
+                state = "آنلاین" if pr["online"] else ("حاضر" if pr["seconds"] > 0 else "غایب")
+                writer.writerow([r["student_code"], r["full_name"], first, last, pr["seconds"], fmt_duration(pr["seconds"]), src_, state])
             else:
-                writer.writerow([r["student_code"], r["full_name"], "", "", 0, "غایب"])
+                writer.writerow([r["student_code"], r["full_name"], "", "", 0, "غایب", "—", "غایب"])
         self.send_csv(f"attendance-session-{session_id}.csv", out.getvalue())
 
     # ---------- ورود دانش‌آموز (redirector) ----------
@@ -573,8 +745,9 @@ class Handler(BaseHTTPRequestHandler):
                 except (PersianMeetError, KeyError, ValueError) as exc:
                     self.send_page("خطا", f'<div class="card"><h1>خطا در ورود به کلاس</h1><p class="muted">{escape(str(exc))}</p></div>', status=502)
                     return
-                conn.execute("INSERT INTO attendance(session_id, student_id, pid, entered_at) VALUES (?,?,?,?)",
-                             (sess["id"], row["student_id"], pid, now_str()))
+                user_room_id = product_db.user_room_id_for_pid(pid) or ""
+                conn.execute("INSERT INTO attendance(session_id, student_id, pid, user_room_id, entered_at) VALUES (?,?,?,?,?)",
+                             (sess["id"], row["student_id"], pid, user_room_id, now_str()))
                 conn.commit()
         self.redirect(f"{self.cfg.pm_url}/user/{pid}")
 
@@ -615,6 +788,46 @@ class Handler(BaseHTTPRequestHandler):
             if payload:
                 files[name_m.group(1)] = payload
         return files
+
+    def _parse_multipart_full(self) -> tuple[dict, dict]:
+        """برگرداندن (fields, files) — فایل‌ها به‌صورت bytes و فیلدها به‌صورت str."""
+        ctype = self.headers.get("Content-Type", "")
+        fields: dict[str, str] = {}
+        files: dict[str, bytes] = {}
+        if "multipart/form-data" not in ctype:
+            return fields, files
+        body = self._read_body()
+        raw = (f"Content-Type: {ctype}\r\nMIME-Version: 1.0\r\n\r\n").encode("utf-8") + body
+        msg = message_from_bytes(raw)
+        for part in msg.walk():
+            disp = part.get("Content-Disposition", "")
+            name_m = re.search(r'name="([^"]+)"', disp)
+            if not name_m:
+                continue
+            name = name_m.group(1)
+            if part.get_filename():
+                payload = part.get_payload(decode=True) or b""
+                if payload:
+                    files[name] = payload
+            else:
+                payload = part.get_payload(decode=True) or b""
+                charset = part.get_content_charset() or "utf-8"
+                fields[name] = payload.decode(charset, "replace").strip()
+        return fields, files
+
+    def _product_admin_guid(self) -> str:
+        return (self.headers.get("X-PM-GUID") or "").strip()
+
+    def _is_product_admin(self, guid: str) -> bool:
+        """بررسی ادمین‌بودن با خود محصول: panelUserList فقط با GUID ادمین پاسخ 'ok' می‌دهد."""
+        if not guid:
+            return False
+        try:
+            pm = self.cfg.pm_api()
+            resp = pm.call("panelUserList", None, secret=guid)
+            return str(resp.get("Status", "")).lower() == "ok"
+        except Exception:
+            return False
 
     def route_import_submit(self, m):
         self.require_admin()

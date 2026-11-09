@@ -25,10 +25,16 @@ sudo DOMAIN=class.example.com ./deploy/install.sh
 | `SECRET` | تصادفی ۲۴ بایتی | secret برای API |
 | `OPEN_UFW` | `1` | بازکردن ۸۰/۴۴۳/۸۰۰۳ در ufw |
 | `ADMIN_EMAIL` | خالی | فقط برای نمایش راهنما (Let's Encrypt خودِ محصول هندل می‌کند) |
+| `WITH_BRAND` | `1` | نصب خودکار «برند پویا» (دایرکت `branding/install-brand.py`)؛ `0` برای رد شدن |
+| `BRAND_SITE_NAME` / `BRAND_TAGLINE` / `BRAND_PRIMARY_COLOR` | خالی | مقادیر اولیه‌ی `brand.json` (با `#rrggbb` برای رنگ) |
 
 اسکریپت چه کار می‌کند: آپدیت apt → نصب `wget nano unzip mupdf-tools curl ufw` → دانلود همان لینک رسمی →
 `unzip` به `/opt/persianmeet` → `chmod +x persianmeet app/optimized` → ساخت `config.yml` (با `auto_ssl: true`
-روی دامنه + `secret` تصادفی) → نصب و فعال‌سازی سرویس systemd → تنظیم فایروال → چاپ مراحل نهایی.
+روی دامنه + `secret` تصادفی) → نصب و فعال‌سازی سرویس systemd → **نصب برند پویا** (`branding/install-brand.py`) → تنظیم فایروال → چاپ مراحل نهایی.
+
+> بعد از نصب، «برند پویا» از داخل پنل ادمین محصول قابل تنظیم است (دکمه‌ی «⚙️ تنظیمات برند» در `/dash`):
+> [`13-branding.md`](13-branding.md). nginx باید `location /brand/` و `location /brand-api/` را داشته باشد
+> (نمونه در `deploy/nginx.reverse-proxy.conf`).
 
 بعد از آن:
 

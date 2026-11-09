@@ -39,7 +39,13 @@ class MockPersianMeetHandler(BaseHTTPRequestHandler):
         MockPersianMeetHandler.calls.append(payload)
         t = payload.get("Type")
         data = payload.get("Data") or {}
-        if t == "CreateMeet":
+        if t == "panelUserList":
+            # GUID ادمین آزمایشی: admin-guid-123 → ok ؛ بقیه → no
+            if payload.get("Secret") == "admin-guid-123":
+                resp = {"Status": "ok", "Count": 1, "Data": [{"UserName": "admin", "Role": 1}]}
+            else:
+                resp = {"Status": "no"}
+        elif t == "CreateMeet":
             resp = {"Status": "ok", "ID": 777, "Url": "/room/777", "Title": data.get("Title"), "Message": ""}
         elif t == "Join":
             role = int(data.get("JoinRole", 0))
@@ -281,3 +287,99 @@ class TestHttpFlow(BaseCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+class TestBrandApi(BaseCase):
+    """مسیر برند: config عمومی + save با احراز GUID ادمین محصول (محصول موک می‌شود)."""
+
+    def setUp(self):
+        super().setUp()
+        self.mock_ctx = MockServer()
+        self.pm_url = self.mock_ctx.__enter__()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dist_dir = Path(self.tmp.name) / "dist"
+        (self.dist_dir / "brand").mkdir(parents=True)
+        self.tmp_env = {
+            "PM_MANAGER_DB": self.db,
+            "PM_MANAGER_SECRET": "test-secret-key",
+            "PERSIANMEET_URL": self.pm_url,
+            "PERSIANMEET_SECRET": "topsecret",
+            "PERSIANMEET_DIST_DIR": str(self.dist_dir),
+        }
+        self._old_env = {k: os.environ.get(k) for k in self.tmp_env}
+        os.environ.update(self.tmp_env)
+
+        self.server = make_server("127.0.0.1", 0)
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.base = f"http://127.0.0.1:{self.port}"
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.thread.join(timeout=2)
+        self.server.server_close()
+        self.mock_ctx.__exit__(None, None, None)
+        self.tmp.cleanup()
+        for k, v in self._old_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        super().tearDown()
+
+    @staticmethod
+    def _multipart(fields: dict, files: dict | None = None):
+        boundary = "----TestBrandBoundary42"
+        chunks = []
+        for k, v in fields.items():
+            chunks.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n".encode())
+        for k, (filename, blob, ctype) in (files or {}).items():
+            chunks.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"{k}\"; filename=\"{filename}\"\r\nContent-Type: {ctype}\r\n\r\n".encode() + blob + b"\r\n")
+        chunks.append(f"--{boundary}--\r\n".encode())
+        body = b"".join(chunks)
+        return body, f"multipart/form-data; boundary={boundary}"
+
+    def test_brand_config_defaults(self):
+        status, _, body = http_request("GET", self.base + "/brand-api/config")
+        self.assertEqual(status, 200)
+        data = json.loads(body)
+        self.assertEqual(data["siteName"], "PersianMeet")
+
+    def test_brand_save_requires_admin_guid(self):
+        body, ctype = self._multipart({"siteName": "مدرسه تست", "primaryColor": "#0ea5e9"})
+        status, _, resp = http_request("POST", self.base + "/brand-api/save", body=body,
+                                       headers={"Content-Type": ctype})
+        self.assertEqual(status, 403)
+        status, _, resp = http_request("POST", self.base + "/brand-api/save", body=body,
+                                       headers={"Content-Type": ctype, "X-PM-GUID": "not-admin"})
+        self.assertEqual(status, 403)
+
+    def test_brand_save_writes_files(self):
+        png = b"\x89PNG\r\n\x1a\n" + b"0" * 64
+        body, ctype = self._multipart(
+            {"siteName": "مدرسه تست", "siteNameShort": "تست", "tagline": "پلتفرم ما", "primaryColor": "#0ea5e9"},
+            {"icon": ("icon.png", png, "image/png"), "logo": ("logo.png", png, "image/png")})
+        status, _, resp = http_request("POST", self.base + "/brand-api/save", body=body,
+                                       headers={"Content-Type": ctype, "X-PM-GUID": "admin-guid-123"})
+        self.assertEqual(status, 200, resp)
+        data = json.loads(resp)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["brand"]["siteName"], "مدرسه تست")
+        self.assertTrue(data["brand"]["hasLogo"] and data["brand"]["hasIcon"])
+        brand_file = self.dist_dir / "brand" / "brand.json"
+        saved = json.loads(brand_file.read_text("utf-8"))
+        self.assertEqual(saved["siteName"], "مدرسه تست")
+        self.assertEqual(saved["primaryColor"], "#0ea5e9")
+        self.assertTrue((self.dist_dir / "brand" / "logo.png").exists())
+        self.assertTrue((self.dist_dir / "brand" / "icon.png").exists())
+
+    def test_brand_save_rejects_bad_color_and_bad_image(self):
+        body, ctype = self._multipart({"siteName": "x", "primaryColor": "red"})
+        status, _, resp = http_request("POST", self.base + "/brand-api/save", body=body,
+                                       headers={"Content-Type": ctype, "X-PM-GUID": "admin-guid-123"})
+        self.assertEqual(status, 400)
+        bad = b"not-an-image-at-all"
+        body, ctype = self._multipart({"siteName": "x", "primaryColor": "#000000"},
+                                      {"icon": ("icon.png", bad, "image/png")})
+        status, _, resp = http_request("POST", self.base + "/brand-api/save", body=body,
+                                       headers={"Content-Type": ctype, "X-PM-GUID": "admin-guid-123"})
+        self.assertEqual(status, 400)
