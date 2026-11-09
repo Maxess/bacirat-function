@@ -1,0 +1,91 @@
+override_environment_variable: false
+port: 8003
+auto_ssl: false
+ssl_domains: []
+default_lang: fa
+demo_meet_id : 1 # meet for demo
+use_json: false
+client_build_version: 28
+api_secret: 124
+post_method_need_api_secret: [ DeleteMeet , ActiveMeets , MeetList ]
+max_user_count_in_room: 200
+max_video_count_in_room: 8
+in_active_meet_timeout: 300 # second
+
+
+# office online ------------------------------------------------------------------------------
+office_enable: false
+only_office_enable: false
+office_url: 
+only_office_url: 
+
+
+# db ------------------------------------------------------------------------------------------
+# database driver - sqlite3 | mysql | postgres | sqlserver
+driver_name: sqlite3
+# connection_string - for sqlite3 enter name of db file
+# mysql connectionString format  "user:password@tcp(ip:port)/dbname"
+# mysql connectionString sample  "root:pass@tcp(127.0.0.1:3306)/testdb"
+# sqlserver connectionString sample  "sqlserver://sa:passA1!@DESKTOP-TN3URK2?database=p1"
+# postgres connectionString sample  "host=localhost user=postgres password=pass dbname=db3 port=5433 sslmode=disable TimeZone=Asia/Shanghai"
+
+connection_string: "./test.db"
+#connection_string: "root:pppp@tcp(127.0.0.1:3306)/p11?charset=utf8mb4&parseTime=True&loc=Local"
+#connection_string: "sqlserver://sa:passA1!@DESKTOP-TN3URK2?database=p3"
+#connection_string: "host=localhost user=postgres password=pass dbname=db6 port=5433 sslmode=disable TimeZone=Asia/Shanghai"
+# db end ----------------------------------------------------------------------------------------
+
+sfu_server:
+  internal: true
+  url: ''  
+  run: auto # auto | manual
+  apikey: skey1
+  secret: svalue1
+  port: 7880
+  internal_turn: true
+
+whiteboard:
+  optimized: true
+  optimized_type: node
+  optimized_url: http://localhost:8010/opt
+  optimized_interval: 30 #second default 200
+  snapshot: true
+  save_in_db: true
+
+ 
+
+upload_file:
+  external_file_server: false
+  external_office_file_server: false
+  external_file_server_id: fs101
+  external_file_server_url: http://localhost:3000
+  path: "./upload"
+  # maximum file size in MB . Default 50MB
+  max_size: 20
+  # maximum file size in MB for office upload. Default 5MB
+  max_size_office_file: 5
+  # maximum file size in MB for whiteboard upload. Default 10MB
+  max_size_pwa_file: 10
+
+recorder:
+  enable: false
+  host: http://localhost:7000
+  host_api_secret: 123
+
+desktop_stream:
+  enable: false
+  host: http://localhost:9090
+  host_api_secret: 123
+  client_host: http://localhost:8003
+  timeout: 60
+  image_list: [chrome , firefox , xfce_desktop]
+
+diagram:
+  enable: false
+  host: /hostdiagram/
+  ws_server: http://localhost:3001
+
+notes:
+  enable: false
+  ws_server: http://localhost:3001
+

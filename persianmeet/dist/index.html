@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr" class="dark darkness">
+<head>
+    <meta charset="UTF-8"/>
+    <link rel="icon" href="/favicon.ico"/>
+    <!--        <meta name="viewport" content="width=device-width, initial-scale=1.0" />-->
+    <title>persianmeet</title>
+    <style>
+    </style>
+    <meta charset="utf-8"/>
+    <meta name="google" content="notranslate"/>
+    <meta name="theme-color" content="#000000"/>
+    <meta name="description" content="persiameet"/>
+    <meta name="format-detection" content="telephone=no"/>
+    <meta name="msapplication-tap-highlight" content="no"/>
+    <!--  <meta name="viewport" content="user-scalable=no, initial-scale=1, maximum-scale=1, minimum-scale=1, width=device-width<% if (ctx.mode.cordova || ctx.mode.capacitor) { %>, viewport-fit=cover<% } %>">-->
+    <meta name="viewport" content="user-scalable=no, initial-scale=1, maximum-scale=1, minimum-scale=1"/>
+
+
+
+    <link rel="icon" type="image/ico" href="/favicon.ico"/>
+    <script src="/config.js"></script>
+    <script src="/translate.js"></script>
+    <script src="/noCacheJs.js"></script>
+    <script>
+        let href = window.location.href;
+        if (href.includes('app.learn100')) {
+            let n = href.replace('app.learn100', 'app2.learn100');
+            setTimeout(function () {
+                console.log(href);
+                console.log(n);
+                window.location.href = n
+            }, 1000)
+
+        }
+    </script>
+    <style>
+        html{
+            //background: #020024!important;
+            //background: linear-gradient(90deg,rgba(0, 0, 46, 1) 0%, rgba(0, 0, 0, 1) 50%, rgba(0, 0, 46, 1) 100%)!important;
+        }
+        #app-loader {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background-color: #020024;
+            //background: #ffffff url("/img/bg6.jpg") no-repeat center / cover fixed;
+            background: linear-gradient(90deg,rgba(0, 0, 46, 1) 0%, rgba(0, 0, 0, 1) 50%, rgba(0, 0, 46, 1) 100%)!important;
+            z-index: 9999;
+        }
+        #app-loader .logo {
+            width: 120px;
+            height: 120px;
+            margin-bottom: 32px;
+            background-image: url("/favicon.png");
+            background-position: center;
+            background-repeat: no-repeat;
+            background-size: contain;
+            opacity: 0;
+            transform: scale(0.8);
+            animation: fadeIn 0.6s ease-out 0.3s forwards;
+        }
+        #app-loader .spinner {
+            width: 28px;
+            height: 28px;
+            position: relative;
+            opacity: 0;
+            transform: scale(0.8);
+            animation: fadeIn 0.6s ease-out 0.3s forwards;
+            margin-top: 10px;
+        }
+        #app-loader .spinner {
+            display: inline-block;
+            width: 40px;
+            height: 40px;
+        }
+        #app-loader .spinner svg {
+            display: block;
+        }
+        #app-loader .spinner .stroke {
+            stroke: greenyellow;
+            stroke-linecap: round;
+            animation: spinDash 1.4s ease-in-out infinite;
+        }
+        #app-loader .spinner .background {
+            stroke: rgba(0, 0, 0, 0.1)
+        }
+
+        @keyframes spinDash {
+            0% {
+                stroke-dasharray: 1px, 200px;
+                stroke-dashoffset: 0;
+            }
+            50% {
+                stroke-dasharray: 100px, 200px;
+                stroke-dashoffset: -15px;
+            }
+            100% {
+                stroke-dasharray: 1px, 200px;
+                stroke-dashoffset: -126px;
+            }
+        }
+        @keyframes fadeIn {
+            to {
+                opacity: 1;
+                transform: scale(1);
+            }
+        }
+    </style>
+  <script type="module" crossorigin src="/assets/index-Cisn-kYU.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/index-fgh51dm_.css">
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#000000">
+<link rel="icon" href="/favicon.ico" sizes="48x48">
+<link rel="apple-touch-icon" href="/apple-touch-icon-180x180.png"></head>
+<body>
+<noscript>You need to enable JavaScript to run this app.</noscript>
+<div id="app-loader">
+    <div style="color: greenyellow;font-weight: normal;">loading file ...  please wait</div>
+<!--    <div class="logo"></div>-->
+
+    <div class="spinner">
+        <svg viewBox="22 22 44 44">
+            <circle class="background" cx="44" cy="44" r="20" fill="none" stroke-width="4"></circle>
+            <circle class="stroke" cx="44" cy="44" r="20" fill="none" stroke-width="4"></circle>
+        </svg>
+    </div>
+</div>
+<div id="app">loading file ...  please wait</div>
+<audio id="silenceAudioElement" src="/silence.mp3" loop></audio>
+<script>
+    document.addEventListener("DOMContentLoaded", function () {
+        // Hide loader when the app has loaded
+        const appRoot = document.getElementById("app");
+        const observer = new MutationObserver(function (mutations) {
+            if (appRoot.children.length > 0) {
+                document.getElementById("app-loader").style.display = "none";
+                observer.disconnect();
+            }
+        });
+        observer.observe(appRoot, { childList: true });
+    });
+</script>
+</body>
+</html>

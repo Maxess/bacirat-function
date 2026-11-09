@@ -1,7 +1,6 @@
 # پکیج‌های دانلودی PersianMeet (نباید در git باشند؛ هزاران فایل باینری)
 *.zip
 persianmeet-linux-*
-persianmeet/
 /opt/
 
 # محرمانه‌ها
