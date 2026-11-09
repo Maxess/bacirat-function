@@ -22,3 +22,13 @@ __pycache__/
 # سیستم
 .DS_Store
 Thumbs.db
+
+# سورس اختصاصی سازنده — عمداً خارج از git
+persianmeet-src/
+
+# محیط اجرای ماژول مدیریت کلاس
+classroom-manager/data/
+*.db
+*.db-wal
+*.db-shm
+secret_key

@@ -1,0 +1,21 @@
+[Unit]
+Description=Classroom Manager (bacirat-function) — PersianMeet class/session/attendance manager
+After=network-online.target persianmeet.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/bacirat-function/classroom-manager
+Environment=PERSIANMEET_URL=http://127.0.0.1:8003
+Environment=PM_MANAGER_PORT=8090
+# Environment=PERSIANMEET_SECRET=...        # همان secret داخل config.yml محصول (برای حذف اتاق هنگام بستن کلاس)
+# Environment=PM_MANAGER_CLOSE_STRATEGY=delete
+ExecStart=/usr/bin/python3 run.py serve --host 127.0.0.1 --port 8090
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
