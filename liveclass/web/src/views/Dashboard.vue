@@ -46,7 +46,7 @@ onMounted(load)
 <template>
   <h1>کلاس‌های من</h1>
 
-  <form class="card row" @submit.prevent="createClass" style="margin-bottom:16px">
+  <form v-if="user?.role !== 'guest'" class="card row" @submit.prevent="createClass" style="margin-bottom:16px">
     <input class="input" style="flex:2; min-width:200px" v-model="newTitle" placeholder="عنوان کلاس جدید (مثلاً ریاضی هفتم)" required />
     <select v-if="user?.role === 'admin'" class="input" style="flex:1; min-width:160px" v-model="newTeacher">
       <option value="">دبیر… (خودم)</option>
@@ -54,13 +54,14 @@ onMounted(load)
     </select>
     <button class="btn primary" type="submit">+ ساخت کلاس</button>
   </form>
+  <div v-else class="card muted" style="margin-bottom:16px">کاربر مهمان هستید — فقط کلاس‌هایی که به شما دسترسی داده شده را می‌بینید.</div>
   <div v-if="error" class="error">{{ error }}</div>
 
   <div v-if="loading" class="card muted">در حال بارگذاری…</div>
   <div v-else-if="!classes.length" class="card muted">هنوز کلاسی ندارید. از بالا یکی بسازید.</div>
   <div v-else class="grid cards">
     <a v-for="c in classes" :key="c.id" class="card" :href="`#/class/${c.id}`" style="display:block">
-      <h3>📚 {{ c.title }}</h3>
+      <h3>📚 {{ c.title }} <span v-if="c.guest_access" class="pill warn" style="font-size:11px">دسترسی مهمان</span></h3>
       <p class="muted small">دبیر: {{ c.teacher_name }}</p>
       <p class="muted small">ساخته شده: {{ c.created_at }}</p>
       <span class="btn sm primary" style="margin-top:10px">ورود به کلاس ←</span>

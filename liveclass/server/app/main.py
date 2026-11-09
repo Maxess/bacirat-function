@@ -16,9 +16,15 @@ from fastapi.responses import FileResponse, JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.gzip import GZipMiddleware
 
+import zipfile
+import sqlite3
+import tempfile
+from datetime import datetime as _dt
+
 from . import db as dbmod
 from . import brand as brandmod
 from . import importer, livekit_hub
+from . import pdf_store
 from .security import hash_password, verify_password, encode_session, decode_session
 
 COOKIE = "lc_session"
@@ -112,9 +118,21 @@ def create_app() -> FastAPI:
         return row
 
     def require_class_teacher(request: Request, conn, class_row) -> dict:
+        """ادمین، مالک کلاس، یا کاربری با «دسترسی دبیر» به این کلاس."""
+        user = require_user(request)
+        if user["role"] == "admin" or class_row["teacher_id"] == user["id"]:
+            return user
+        grant = conn.execute("SELECT 1 FROM class_access WHERE class_id=? AND user_id=?",
+                             (class_row["id"], user["id"])).fetchone()
+        if grant:
+            return user
+        raise HTTPException(403, "این کلاس متعلق به شما نیست")
+
+    def require_class_owner(request: Request, conn, class_row) -> dict:
+        """فقط مالک کلاس یا ادمین — برای منوی دسترسی‌های کلاس."""
         user = require_user(request)
         if user["role"] != "admin" and class_row["teacher_id"] != user["id"]:
-            raise HTTPException(403, "این کلاس متعلق به شما نیست")
+            raise HTTPException(403, "فقط مالک کلاس یا ادمین می‌تواند دسترسی‌ها را مدیریت کند")
         return user
 
     def open_session_for_class(conn, class_id: int):
@@ -270,14 +288,21 @@ def create_app() -> FastAPI:
                 rows = conn.execute("""SELECT c.*, u.full_name AS teacher_name FROM classes c
                                        JOIN users u ON u.id=c.teacher_id ORDER BY c.id DESC""").fetchall()
             else:
-                rows = conn.execute("""SELECT c.*, u.full_name AS teacher_name FROM classes c
-                                       JOIN users u ON u.id=c.teacher_id WHERE c.teacher_id=? ORDER BY c.id DESC""",
-                                    (user["id"],)).fetchall()
+                rows = conn.execute("""
+                    SELECT DISTINCT c.*, u.full_name AS teacher_name,
+                           (c.teacher_id != ?) AS guest_access
+                    FROM classes c JOIN users u ON u.id=c.teacher_id
+                    LEFT JOIN class_access ca ON ca.class_id=c.id AND ca.user_id=?
+                    WHERE c.teacher_id=? OR ca.user_id IS NOT NULL
+                    ORDER BY c.id DESC""",
+                    (user["id"], user["id"], user["id"])).fetchall()
         return {"classes": [dict(r) for r in rows]}
 
     @app.post("/api/classes")
     async def create_class(request: Request):
         user = require_user(request)
+        if user["role"] not in ("admin", "teacher"):
+            raise HTTPException(403, "کاربر مهمان نمی‌تواند کلاس بسازد")
         body = await request.json()
         title = (body.get("title") or "").strip()
         if not title:
@@ -476,6 +501,206 @@ def create_app() -> FastAPI:
         await livekit_hub.remove_participant(session_row["room_name"], identity)
         return {"ok": True}
 
+    # ---------- دسترسی دبیر مهمان به کلاس ----------
+    @app.get("/api/classes/{class_id}/access")
+    async def list_access(request: Request, class_id: int):
+        with dbmod.connect() as conn:
+            cls = class_or_404(conn, class_id)
+            require_class_owner(request, conn, cls)
+            owner = conn.execute("SELECT id, username, full_name, role FROM users WHERE id=?",
+                                 (cls["teacher_id"],)).fetchone()
+            rows = conn.execute("""
+                SELECT u.id, u.username, u.full_name, u.role, ca.created_at
+                FROM class_access ca JOIN users u ON u.id=ca.user_id
+                WHERE ca.class_id=? ORDER BY ca.created_at""", (class_id,)).fetchall()
+        return {"owner": dict(owner), "grants": [dict(r) for r in rows]}
+
+    @app.post("/api/classes/{class_id}/access")
+    async def grant_access(request: Request, class_id: int):
+        body = await request.json()
+        username = (body.get("username") or "").strip()
+        if not username:
+            raise HTTPException(400, "نام کاربری الزامی است")
+        with dbmod.connect() as conn:
+            cls = class_or_404(conn, class_id)
+            require_class_owner(request, conn, cls)
+            target = conn.execute("SELECT id, username, full_name, role FROM users WHERE username=?",
+                                  (username,)).fetchone()
+            if not target:
+                raise HTTPException(404, f"کاربری با نام {username} وجود ندارد")
+            if target["id"] == cls["teacher_id"]:
+                raise HTTPException(400, "این کاربر مالک کلاس است")
+            if target["role"] == "admin":
+                raise HTTPException(400, "ادمین به همه‌ی کلاس‌ها دسترسی دارد")
+            try:
+                conn.execute("INSERT INTO class_access(class_id, user_id) VALUES (?,?)",
+                             (class_id, target["id"]))
+                conn.commit()
+            except Exception:
+                raise HTTPException(409, "این کاربر از قبل دسترسی دارد")
+        return {"ok": True, "grant": dict(target)}
+
+    @app.delete("/api/classes/{class_id}/access/{user_id}")
+    async def revoke_access(request: Request, class_id: int, user_id: int):
+        with dbmod.connect() as conn:
+            cls = class_or_404(conn, class_id)
+            require_class_owner(request, conn, cls)
+            conn.execute("DELETE FROM class_access WHERE class_id=? AND user_id=?",
+                         (class_id, user_id))
+            conn.commit()
+        return {"ok": True}
+
+    # ---------- کتاب PDF روی تخته ----------
+    @app.post("/api/sessions/{session_id}/board/pdf")
+    async def board_pdf_upload(request: Request, session_id: int, file: UploadFile = File(...)):
+        body = {}
+        with dbmod.connect() as conn:
+            session_row, who = board_auth(conn, request, session_id, body)
+            if not who["is_teacher"]:
+                raise HTTPException(403, "فقط دبیر می‌تواند PDF بارگذاری کند")
+            if session_row["status"] != "open":
+                raise HTTPException(409, "جلسه «باز» نیست")
+        blob = await file.read()
+        try:
+            pdf_id = pdf_store.save_pdf(blob)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        name = Path(file.filename or "book.pdf").name[:120] or "book.pdf"
+        with dbmod.connect() as conn:
+            conn.execute("UPDATE sessions SET pdf_id=?, pdf_name=?, pdf_page=1 WHERE id=?",
+                         (pdf_id, name, session_id))
+            conn.commit()
+        return {"ok": True, "pdf": {"id": pdf_id, "name": name, "page": 1}}
+
+    @app.post("/api/sessions/{session_id}/board/pdf/page")
+    async def board_pdf_page(request: Request, session_id: int):
+        body = await request.json()
+        try:
+            page = int(body.get("page") or 1)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "شماره‌ی صفحه نامعتبر است")
+        page = max(1, min(page, 10000))
+        with dbmod.connect() as conn:
+            session_row, who = board_auth(conn, request, session_id, body)
+            if not who["is_teacher"]:
+                raise HTTPException(403, "فقط دبیر می‌تواند صفحه را تغییر دهد")
+            conn.execute("UPDATE sessions SET pdf_page=? WHERE id=?", (page, session_id))
+            conn.commit()
+        return {"ok": True, "page": page}
+
+    @app.post("/api/sessions/{session_id}/board/pdf/close")
+    async def board_pdf_close(request: Request, session_id: int):
+        body = await request.json() if await _has_json_body(request) else {}
+        with dbmod.connect() as conn:
+            session_row, who = board_auth(conn, request, session_id, body)
+            if not who["is_teacher"]:
+                raise HTTPException(403, "فقط دبیر")
+            conn.execute("UPDATE sessions SET pdf_id=NULL, pdf_name=NULL, pdf_page=1 WHERE id=?",
+                         (session_id,))
+            conn.commit()
+        return {"ok": True}
+
+    @app.get("/api/board/pdf/{pdf_id}")
+    async def board_pdf_file(request: Request, pdf_id: str, token: str | None = None):
+        """استریم PDF — فقط اعضای همان کلاس (دبیر/مهمان با کوکی، یا دانش‌آموز همان کلاس با توکن)."""
+        path = pdf_store.pdf_path(pdf_id)
+        if not path:
+            raise HTTPException(404, "فایل پیدا نشد")
+        with dbmod.connect() as conn:
+            session_row = conn.execute(
+                "SELECT * FROM sessions WHERE pdf_id=? ORDER BY id DESC LIMIT 1", (pdf_id,)).fetchone()
+            if not session_row:
+                raise HTTPException(404, "فایل پیدا نشد")
+            user = current_user(request)
+            if user:
+                cls = class_or_404(conn, session_row["class_id"])
+                require_class_teacher(request, conn, cls)
+            else:
+                entry = resolve_student_entry(conn, token or "") if token else None
+                if not entry or entry["class_id"] != session_row["class_id"]:
+                    raise HTTPException(403, "دسترسی به این فایل ندارید")
+        return FileResponse(path, media_type="application/pdf",
+                            headers={"Content-Disposition": "inline; filename=book.pdf",
+                                     "Cache-Control": "private, max-age=3600"})
+
+    # ---------- ضبط جلسه (LiveKit Egress — اختیاری) ----------
+    def recordings_dir() -> Path:
+        d = Path(os.environ.get("LIVECLASS_RECORDINGS_DIR") or (Path(dbmod.db_path()).parent / "recordings"))
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def recording_file_for(session_id: int):
+        files = sorted(recordings_dir().glob(f"{session_id}-*.mp4"),
+                       key=lambda f: f.stat().st_mtime, reverse=True)
+        return files[0] if files else None
+
+    @app.post("/api/sessions/{session_id}/record/start")
+    async def record_start(request: Request, session_id: int):
+        with dbmod.connect() as conn:
+            session_row, who = board_auth(conn, request, session_id, {})
+            if not who["is_teacher"]:
+                raise HTTPException(403, "فقط دبیر می‌تواند ضبط کند")
+            if session_row["status"] != "open":
+                raise HTTPException(409, "جلسه «باز» نیست")
+            if session_row["record_status"] == "recording":
+                return {"ok": True, "egress_id": session_row["record_egress_id"], "status": "recording", "already": True}
+        egress_enabled = os.environ.get("LIVECLASS_EGRESS_ENABLE") == "1" or os.environ.get("LIVECLASS_LIVEKIT_MOCK") == "1"
+        if not egress_enabled:
+            raise HTTPException(503, "ضبط روی این سرور فعال نشده است (LIVECLASS_EGRESS_ENABLE=1 لازم است)")
+        # اسکریپت نصب، RECORD_DIR را در همین مسیر داخل کانتینر egress ماونت می‌کند
+        target = recordings_dir() / f"{session_id}-{session_row['room_name']}-{int(_dt.now().timestamp())}.mp4"
+        try:
+            egress_id = await livekit_hub.start_room_composite_egress(session_row["room_name"], str(target))
+        except Exception as exc:
+            raise HTTPException(502, f"شروع ضبط ناموفق بود (آیا سرویس livekit-egress اجرا شده؟): {exc}")
+        with dbmod.connect() as conn:
+            conn.execute("UPDATE sessions SET record_egress_id=?, record_status='recording' WHERE id=?",
+                         (egress_id, session_id))
+            conn.commit()
+        return {"ok": True, "egress_id": egress_id, "status": "recording"}
+
+    @app.post("/api/sessions/{session_id}/record/stop")
+    async def record_stop(request: Request, session_id: int):
+        with dbmod.connect() as conn:
+            session_row, who = board_auth(conn, request, session_id, {})
+            if not who["is_teacher"]:
+                raise HTTPException(403, "فقط دبیر")
+            egress_id = session_row["record_egress_id"]
+        if egress_id:
+            await livekit_hub.stop_egress(egress_id)
+        with dbmod.connect() as conn:
+            conn.execute("UPDATE sessions SET record_status='stopped' WHERE id=? AND record_status='recording'",
+                         (session_id,))
+            conn.commit()
+        return {"ok": True, "status": "stopped"}
+
+    @app.get("/api/sessions/{session_id}/record/status")
+    async def record_status(request: Request, session_id: int):
+        with dbmod.connect() as conn:
+            session_row = conn.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
+            if not session_row:
+                raise HTTPException(404, "جلسه پیدا نشد")
+            cls = class_or_404(conn, session_row["class_id"])
+            require_class_teacher(request, conn, cls)
+        f = recording_file_for(session_id)
+        return {"record_status": session_row["record_status"],
+                "egress_id": session_row["record_egress_id"],
+                "has_file": bool(f),
+                "file_name": f.name if f else None}
+
+    @app.get("/api/sessions/{session_id}/record/download")
+    async def record_download(request: Request, session_id: int):
+        with dbmod.connect() as conn:
+            session_row = conn.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
+            if not session_row:
+                raise HTTPException(404, "جلسه پیدا نشد")
+            cls = class_or_404(conn, session_row["class_id"])
+            require_class_teacher(request, conn, cls)
+        f = recording_file_for(session_id)
+        if not f:
+            raise HTTPException(404, "فایل ضبط هنوز آماده نیست؛ چند ثانیه بعد دوباره تلاش کنید")
+        return FileResponse(f, media_type="video/mp4", filename=f.name)
+
     # ---------- تخته تعاملی ----------
     @app.post("/api/sessions/{session_id}/board/fetch")
     async def board_fetch(request: Request, session_id: int):
@@ -483,7 +708,10 @@ def create_app() -> FastAPI:
         with dbmod.connect() as conn:
             session_row, _who = board_auth(conn, request, session_id, body)
             ops = load_board_ops(conn, session_id)
-        return {"open": bool(session_row["board_open"]), "ops": ops}
+        pdf = None
+        if session_row["pdf_id"]:
+            pdf = {"id": session_row["pdf_id"], "name": session_row["pdf_name"], "page": session_row["pdf_page"]}
+        return {"open": bool(session_row["board_open"]), "ops": ops, "pdf": pdf}
 
     @app.post("/api/sessions/{session_id}/board/op")
     async def board_op(request: Request, session_id: int):
@@ -598,6 +826,161 @@ def create_app() -> FastAPI:
                 (now_str(), session_id, entry["student_id"]))
             conn.commit()
         return {"ok": True, "updated": cur.rowcount}
+
+    # ---------- کاربران و پروفایل ----------
+    @app.get("/api/users")
+    async def list_users(request: Request):
+        require_admin(request)
+        with dbmod.connect() as conn:
+            rows = conn.execute("""SELECT id, username, full_name, role, created_at FROM users ORDER BY id""").fetchall()
+        return {"users": [dict(r) for r in rows]}
+
+    @app.post("/api/users")
+    async def create_user(request: Request):
+        require_admin(request)
+        body = await request.json()
+        username = (body.get("username") or "").strip()
+        password = body.get("password") or ""
+        full_name = (body.get("full_name") or "").strip()
+        role = (body.get("role") or "teacher").strip()
+        if len(username) < 3:
+            raise HTTPException(400, "نام کاربری حداقل ۳ کاراکتر باشد")
+        if len(password) < 6:
+            raise HTTPException(400, "رمز حداقل ۶ کاراکتر باشد")
+        if role not in ("teacher", "guest"):
+            raise HTTPException(400, "نقش باید teacher یا guest باشد")
+        if not full_name:
+            full_name = username
+        with dbmod.connect() as conn:
+            if conn.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone():
+                raise HTTPException(409, "این نام کاربری قبلاً گرفته شده")
+            cur = conn.execute("INSERT INTO users(username, full_name, password_hash, role) VALUES (?,?,?,?)",
+                               (username, full_name, hash_password(password), role))
+            conn.commit()
+            row = conn.execute("SELECT id, username, full_name, role, created_at FROM users WHERE id=?",
+                               (cur.lastrowid,)).fetchone()
+        return {"user": dict(row)}
+
+    @app.put("/api/users/{user_id}/password")
+    async def admin_set_password(request: Request, user_id: int):
+        require_admin(request)
+        body = await request.json()
+        password = body.get("password") or ""
+        if len(password) < 6:
+            raise HTTPException(400, "رمز حداقل ۶ کاراکتر باشد")
+        with dbmod.connect() as conn:
+            if not conn.execute("SELECT id FROM users WHERE id=?", (user_id,)).fetchone():
+                raise HTTPException(404, "کاربر پیدا نشد")
+            conn.execute("UPDATE users SET password_hash=? WHERE id=?", (hash_password(password), user_id))
+            conn.commit()
+        return {"ok": True}
+
+    @app.delete("/api/users/{user_id}")
+    async def delete_user(request: Request, user_id: int):
+        admin = require_admin(request)
+        if admin["id"] == user_id:
+            raise HTTPException(400, "نمی‌توانید حساب خودتان را حذف کنید")
+        with dbmod.connect() as conn:
+            row = conn.execute("SELECT id FROM users WHERE id=?", (user_id,)).fetchone()
+            if not row:
+                raise HTTPException(404, "کاربر پیدا نشد")
+            owned = conn.execute("SELECT count(*) FROM classes WHERE teacher_id=?", (user_id,)).fetchone()[0]
+            if owned:
+                raise HTTPException(400, f"این کاربر مالک {owned} کلاس است؛ اول دسترسی آن کلاس‌ها را تغییر دهید")
+            conn.execute("DELETE FROM class_access WHERE user_id=?", (user_id,))
+            conn.execute("DELETE FROM users WHERE id=?", (user_id,))
+            conn.commit()
+        return {"ok": True}
+
+    @app.post("/api/me/password")
+    async def change_my_password(request: Request):
+        user = require_user(request)
+        body = await request.json()
+        current = body.get("current_password") or ""
+        new = body.get("new_password") or ""
+        if len(new) < 6:
+            raise HTTPException(400, "رمز جدید حداقل ۶ کاراکتر باشد")
+        with dbmod.connect() as conn:
+            row = conn.execute("SELECT password_hash FROM users WHERE id=?", (user["id"],)).fetchone()
+            if not row or not verify_password(current, row["password_hash"]):
+                raise HTTPException(400, "رمز فعلی اشتباه است")
+            conn.execute("UPDATE users SET password_hash=? WHERE id=?", (hash_password(new), user["id"]))
+            conn.commit()
+        return {"ok": True}
+
+    VIDEO_PRESETS = {"optimized", "balanced", "quality"}
+    VIDEO_FPS = {15, 20, 24}
+
+    @app.get("/api/me/preferences")
+    async def get_preferences(request: Request):
+        user = require_user(request)
+        with dbmod.connect() as conn:
+            row = conn.execute("SELECT video_preset, video_fps FROM users WHERE id=?",
+                               (user["id"],)).fetchone()
+        return {"video_preset": row["video_preset"] if row else "optimized",
+                "video_fps": row["video_fps"] if row else 15}
+
+    @app.put("/api/me/preferences")
+    async def put_preferences(request: Request):
+        user = require_user(request)
+        body = await request.json()
+        preset = str(body.get("video_preset") or "").strip()
+        try:
+            fps = int(body.get("video_fps"))
+        except (TypeError, ValueError):
+            fps = 0
+        if preset not in VIDEO_PRESETS:
+            raise HTTPException(400, "حالت کیفیت باید یکی از optimized/balanced/quality باشد")
+        if fps not in VIDEO_FPS:
+            raise HTTPException(400, "فریم‌ریت باید ۱۵، ۲۰ یا ۲۴ باشد")
+        with dbmod.connect() as conn:
+            conn.execute("UPDATE users SET video_preset=?, video_fps=? WHERE id=?",
+                         (preset, fps, user["id"]))
+            conn.commit()
+        return {"ok": True, "video_preset": preset, "video_fps": fps}
+
+    # ---------- بکاپ کامل سرور (zip: دیتابیس + dump JSON + برند) ----------
+    @app.get("/api/admin/backup")
+    async def admin_backup(request: Request):
+        require_admin(request)
+        tables = ["settings", "users", "students", "classes", "enrollments", "entry_tokens",
+                  "sessions", "attendance", "class_access", "board_ops"]
+        dump = {"format": "liveclass-backup", "version": 1, "created_at": now_str(), "tables": {}}
+        with dbmod.connect() as conn:
+            for t in tables:
+                try:
+                    dump["tables"][t] = [dict(r) for r in conn.execute(f"SELECT * FROM {t}").fetchall()]
+                except Exception:
+                    dump["tables"][t] = []
+        tmp_fd, tmp_path = tempfile.mkstemp(suffix=".db")
+        try:
+            with os.fdopen(tmp_fd, "wb") as _fh:
+                pass
+            src_conn = sqlite3.connect(dbmod.db_path())
+            dst_conn = sqlite3.connect(tmp_path)
+            try:
+                src_conn.backup(dst_conn)
+            finally:
+                dst_conn.close(); src_conn.close()
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr("backup.json", json.dumps(dump, ensure_ascii=False, indent=1))
+                zf.write(tmp_path, "liveclass.db")
+                brand_dir = Path(dbmod.db_path()).parent / "brand"
+                if brand_dir.is_dir():
+                    for f in brand_dir.iterdir():
+                        if f.is_file():
+                            zf.write(f, f"brand/{f.name}")
+                zf.writestr("README.txt", "LiveClass backup\n\nمحتویات:\n- backup.json : خروجی JSON همه‌ی جدول‌ها\n- liveclass.db : کپی سازگار دیتابیس SQLite (برای بازگردانی کامل)\n- brand/ : لوگو و آیکون‌های آپلود‌شده\n\nبازگردانی روی سرور جدید:\n1) systemctl stop liveclass\n2) cp liveclass.db به مسیر server/data/liveclass.db\n3) systemctl start liveclass\n\nهشدار: این فایل شامل داده‌های کامل مدرسه (و رمزهای هش‌شده) است؛ خصوصی نگه دارید.")
+            payload = buf.getvalue()
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        stamp = _dt.now().strftime("%Y%m%d-%H%M%S")
+        return Response(payload, media_type="application/zip",
+                        headers={"Content-Disposition": f'attachment; filename="liveclass-backup-{stamp}.zip"'})
 
     # ---------- ایمپورت CSV ----------
     @app.post("/api/admin/import/{kind}")

@@ -13,7 +13,12 @@ const newName = ref('')
 const openSession = ref(null)
 const attendance = ref([])
 const copied = ref('')
+const grants = ref([])
+const newAccessUser = ref('')
 let timer = null
+
+const canManageAccess = computed(() =>
+  !!props.user && !!cls.value && (props.user.role === 'admin' || cls.value.teacher_id === props.user.id))
 
 const baseUrl = window.location.origin
 function studentLink(token) { return `${baseUrl}/#/enter?token=${token}` }
@@ -26,10 +31,35 @@ async function load() {
     students.value = data.students
     sessions.value = data.sessions
     openSession.value = data.sessions.find(s => s.status === 'open') || null
+    if (canManageAccess.value) await loadAccess()
     if (openSession.value) await loadAttendance()
   } catch (e) {
     error.value = e.message
   }
+}
+
+async function loadAccess() {
+  try {
+    const data = await api.get(`/api/classes/${props.classId}/access`)
+    grants.value = data.grants
+  } catch { grants.value = [] }
+}
+
+async function addAccess() {
+  const username = newAccessUser.value.trim()
+  if (!username) return
+  error.value = ''
+  try {
+    await api.post(`/api/classes/${props.classId}/access`, { username })
+    newAccessUser.value = ''
+    notice.value = `دسترسی «${username}» اضافه شد ✅`
+    await loadAccess()
+  } catch (e) { error.value = e.message }
+}
+
+async function revokeAccess(u) {
+  if (!confirm(`دسترسی ${u.full_name} (${u.username}) از این کلاس گرفته شود؟`)) return
+  try { await api.del(`/api/classes/${props.classId}/access/${u.id}`); await loadAccess() } catch (e) { error.value = e.message }
 }
 
 async function loadAttendance() {
@@ -160,15 +190,41 @@ onUnmounted(() => clearInterval(timer))
     </table>
   </div>
 
+  <!-- دسترسی‌های کلاس (کاربر مهمان با دسترسی دبیر) -->
+  <div v-if="canManageAccess" class="card" style="margin-top:12px">
+    <div class="row">
+      <h3 style="margin:0">🔐 دسترسی‌های کلاس</h3>
+      <div class="spacer"></div>
+      <form class="row" @submit.prevent="addAccess" style="flex-wrap:nowrap">
+        <input class="input" style="width:150px" v-model="newAccessUser" placeholder="نام کاربری (مثل teacher2)" required />
+        <button class="btn sm primary" type="submit">+ افزودن دسترسی</button>
+      </form>
+    </div>
+    <p class="muted small" style="margin-top:6px">این کاربران دقیقاً مثل دبیر به این کلاس دسترسی دارند: شروع/بستن کلاس، حضور، اخراج دانش‌آموز، تخته و PDF و ضبط. برای «کاربر مهمان» یک حساب با نقش مهمان از «👥 کاربران» بسازید.</p>
+    <table class="table" style="margin-top:8px">
+      <thead><tr><th>نام کاربری</th><th>نام</th><th>نقش</th><th></th></tr></thead>
+      <tbody>
+        <tr v-for="u in grants" :key="u.id">
+          <td><code>{{ u.username }}</code></td>
+          <td>{{ u.full_name }}</td>
+          <td>{{ u.role === 'guest' ? 'مهمان' : 'دبیر' }}</td>
+          <td><button class="btn sm danger" @click="revokeAccess(u)">حذف دسترسی</button></td>
+        </tr>
+        <tr v-if="!grants.length"><td colspan="4" class="muted">دسترسی اضافی ثبت نشده است.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
   <!-- تاریخچه جلسات -->
   <div v-if="sessions.length > 1 || (sessions[0] && sessions[0].status === 'closed')" class="card" style="margin-top:12px">
     <h3>جلسات گذشته</h3>
-    <table class="table"><thead><tr><th>#</th><th>شروع</th><th>پایان</th><th>وضعیت</th><th></th></tr></thead>
+    <table class="table"><thead><tr><th>#</th><th>شروع</th><th>پایان</th><th>وضعیت</th><th>خروجی</th></tr></thead>
       <tbody>
         <tr v-for="s in sessions" :key="s.id">
           <td>{{ s.id }}</td><td>{{ s.started_at }}</td><td>{{ s.closed_at || '—' }}</td>
           <td>{{ s.status === 'open' ? 'باز' : 'بسته' }}</td>
-          <td><a class="btn sm ghost" :href="`/api/sessions/${s.id}/attendance.csv`">CSV</a></td>
+          <td><a class="btn sm ghost" :href="`/api/sessions/${s.id}/attendance.csv`">CSV</a>
+            <a v-if="s.record_status" class="btn sm ghost" :href="`/api/sessions/${s.id}/record/download`" title="دانلود ضبط جلسه">⬇️ ضبط</a></td>
         </tr>
       </tbody>
     </table>

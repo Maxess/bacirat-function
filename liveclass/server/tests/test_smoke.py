@@ -179,6 +179,199 @@ class TestFlow(unittest.TestCase):
         self.assertEqual(len(ops), 1)
         self.assertEqual(ops[0]["t"], "clear")
 
+    @staticmethod
+    def make_pdf() -> bytes:
+        content = b"BT /F1 24 Tf 100 700 Td (LiveClass Test) Tj ET"
+        objects = [
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+            b"<< /Length " + str(len(content)).encode() + b" >>\nstream\n" + content + b"\nendstream",
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        ]
+        out = b"%PDF-1.4\n"
+        offsets = []
+        for i, body in enumerate(objects, start=1):
+            offsets.append(len(out))
+            out += str(i).encode() + b" 0 obj\n" + body + b"\nendobj\n"
+        xref = len(out)
+        out += b"xref\n0 " + str(len(objects) + 1).encode() + b"\n" + b"0000000000 65535 f \n"
+        for off in offsets:
+            out += f"{off:010d} 00000 n \n".encode()
+        out += b"trailer\n<< /Size " + str(len(objects) + 1).encode() + b" /Root 1 0 R >>\nstartxref\n" + str(xref).encode() + b"\n%%EOF"
+        return out
+
+    def test_password_and_preferences(self):
+        admin_cookie = self.login("admin", "Admin123!")
+        # تغییر رمز توسط خود کاربر
+        cookie = self.login("teacher1", "Teach123!")
+        r = self.client.post("/api/me/password",
+                             json={"current_password": "Teach123!", "new_password": "NewTeach456!"},
+                             cookies={"lc_session": cookie})
+        self.assertEqual(r.status_code, 200, r.text)
+        r = self.client.post("/api/auth/login", json={"username": "teacher1", "password": "Teach123!"})
+        self.assertEqual(r.status_code, 401)
+        r = self.client.post("/api/auth/login", json={"username": "teacher1", "password": "NewTeach456!"})
+        self.assertEqual(r.status_code, 200)
+        new_cookie = r.cookies.get("lc_session")
+        # رمز را برگردان (برای تست‌های دیگر)
+        r = self.client.post("/api/me/password",
+                             json={"current_password": "NewTeach456!", "new_password": "Teach123!"},
+                             cookies={"lc_session": new_cookie})
+        self.assertEqual(r.status_code, 200)
+        # رمز فعلی اشتباه
+        r = self.client.post("/api/me/password",
+                             json={"current_password": "WRONG", "new_password": "Whatever123!"},
+                             cookies={"lc_session": cookie})
+        self.assertEqual(r.status_code, 400)
+
+        # ترجیحات کیفیت ویدیو
+        r = self.client.put("/api/me/preferences",
+                            json={"video_preset": "quality", "video_fps": 24},
+                            cookies={"lc_session": admin_cookie})
+        self.assertEqual(r.status_code, 200)
+        r = self.client.get("/api/me/preferences", cookies={"lc_session": admin_cookie})
+        self.assertEqual(r.json()["video_preset"], "quality")
+        self.assertEqual(r.json()["video_fps"], 24)
+        r = self.client.put("/api/me/preferences",
+                            json={"video_preset": "quality", "video_fps": 18},
+                            cookies={"lc_session": admin_cookie})
+        self.assertEqual(r.status_code, 400)
+        r = self.client.put("/api/me/preferences",
+                            json={"video_preset": "ultra", "video_fps": 24},
+                            cookies={"lc_session": admin_cookie})
+        self.assertEqual(r.status_code, 400)
+        # برگرداندن پیش‌فرض
+        self.client.put("/api/me/preferences", json={"video_preset": "optimized", "video_fps": 15},
+                        cookies={"lc_session": admin_cookie})
+
+    def test_guest_access_and_backup(self):
+        admin_cookie = self.login("admin", "Admin123!")
+        # ادمین یک کاربر مهمان می‌سازد
+        r = self.client.post("/api/users",
+                             json={"username": "guest1", "password": "Guest123!",
+                                   "full_name": "مهمان اول", "role": "guest"},
+                             cookies={"lc_session": admin_cookie})
+        self.assertIn(r.status_code, (200, 409), r.text)
+        guest_cookie = self.login("guest1", "Guest123!")
+        # مهمان اول هیچ کلاسی نمی‌بیند
+        self.client.cookies.clear()
+        r = self.client.get("/api/my/classes", cookies={"lc_session": guest_cookie})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["classes"], [])
+        # مهمان نمی‌تواند کلاس بسازد
+        r = self.client.post("/api/classes", json={"title": "کلاس مهمان"},
+                             cookies={"lc_session": guest_cookie})
+        self.assertEqual(r.status_code, 403)
+
+        # ادمین کلاس می‌سازد و به مهمان دسترسی می‌دهد
+        r = self.client.post("/api/classes", json={"title": "کلاس دسترسی مهمان", "teacher_id": 2},
+                             cookies={"lc_session": admin_cookie})
+        class_id = r.json()["class"]["id"]
+        r = self.client.post(f"/api/classes/{class_id}/access", json={"username": "guest1"},
+                             cookies={"lc_session": admin_cookie})
+        self.assertEqual(r.status_code, 200, r.text)
+        # حالا مهمان کلاس را می‌بیند و می‌تواند جلسه را شروع کند
+        r = self.client.get("/api/my/classes", cookies={"lc_session": guest_cookie})
+        titles = [c["title"] for c in r.json()["classes"]]
+        self.assertIn("کلاس دسترسی مهمان", titles)
+        r = self.client.post(f"/api/classes/{class_id}/start", cookies={"lc_session": guest_cookie})
+        self.assertEqual(r.status_code, 200, r.text)
+        session_id = r.json()["session"]["id"]
+        # اما مهمان نمی‌تواند دسترسی‌ها را مدیریت کند
+        r = self.client.post(f"/api/classes/{class_id}/access", json={"username": "teacher1"},
+                             cookies={"lc_session": guest_cookie})
+        self.assertEqual(r.status_code, 403)
+        r = self.client.post(f"/api/sessions/{session_id}/end", cookies={"lc_session": guest_cookie})
+        self.assertEqual(r.status_code, 200)
+        # ادمین دسترسی را می‌گیرد
+        r = self.client.get(f"/api/classes/{class_id}/access", cookies={"lc_session": admin_cookie})
+        grant_id = r.json()["grants"][0]["id"]
+        r = self.client.delete(f"/api/classes/{class_id}/access/{grant_id}",
+                               cookies={"lc_session": admin_cookie})
+        self.assertEqual(r.status_code, 200)
+        r = self.client.post(f"/api/classes/{class_id}/start", cookies={"lc_session": guest_cookie})
+        self.assertEqual(r.status_code, 403)
+        # ادمین رمز مهمان را ریست می‌کند
+        users = self.client.get("/api/users", cookies={"lc_session": admin_cookie}).json()["users"]
+        guest_id = next(u["id"] for u in users if u["username"] == "guest1")
+        r = self.client.put(f"/api/users/{guest_id}/password", json={"password": "Guest456!"},
+                            cookies={"lc_session": admin_cookie})
+        self.assertEqual(r.status_code, 200)
+        r = self.client.post("/api/auth/login", json={"username": "guest1", "password": "Guest456!"})
+        self.assertEqual(r.status_code, 200)
+
+        # بکاپ کامل: باید zip باشد و backup.json داخلش
+        r = self.client.get("/api/admin/backup", cookies={"lc_session": admin_cookie})
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.content[:2] == b"PK")
+        import zipfile, io as _io, json as _json
+        zf = zipfile.ZipFile(_io.BytesIO(r.content))
+        self.assertIn("backup.json", zf.namelist())
+        self.assertIn("liveclass.db", zf.namelist())
+        dump = _json.loads(zf.read("backup.json").decode("utf-8"))
+        self.assertIn("users", dump["tables"])
+        self.assertGreaterEqual(len(dump["tables"]["classes"]), 1)
+        # دانش‌آموز عادی (کوکی معلم) نمی‌تواند بکاپ بگیرد
+        r = self.client.get("/api/admin/backup", cookies={"lc_session": self.login("teacher1", "Teach123!")})
+        self.assertEqual(r.status_code, 403)
+
+    def test_pdf_on_board(self):
+        admin_cookie = self.login("admin", "Admin123!")
+        teacher_cookie = self.login("teacher1", "Teach123!")
+        r = self.client.post("/api/classes", json={"title": "کتاب علوم", "teacher_id": 2},
+                             cookies={"lc_session": admin_cookie})
+        class_id = r.json()["class"]["id"]
+        r = self.client.post(f"/api/classes/{class_id}/students",
+                             json={"student_code": "3001", "full_name": "کتابی سارا"},
+                             cookies={"lc_session": admin_cookie})
+        entry_token = self.client.get(f"/api/classes/{class_id}",
+                                      cookies={"lc_session": admin_cookie}).json()["students"][0]["token"]
+        r = self.client.post(f"/api/classes/{class_id}/start", cookies={"lc_session": teacher_cookie})
+        session_id = r.json()["session"]["id"]
+        # PDF خراب رد می‌شود
+        r = self.client.post(f"/api/sessions/{session_id}/board/pdf",
+                             files={"file": ("fake.pdf", b"not a pdf", "application/pdf")},
+                             cookies={"lc_session": teacher_cookie})
+        self.assertEqual(r.status_code, 400)
+        # PDF سالم بارگذاری می‌شود
+        r = self.client.post(f"/api/sessions/{session_id}/board/pdf",
+                             files={"file": ("olom.pdf", self.make_pdf(), "application/pdf")},
+                             cookies={"lc_session": teacher_cookie})
+        self.assertEqual(r.status_code, 200, r.text)
+        pdf_id = r.json()["pdf"]["id"]
+        self.assertEqual(r.json()["pdf"]["page"], 1)
+        # صفحه عوض می‌شود
+        r = self.client.post(f"/api/sessions/{session_id}/board/pdf/page", json={"page": 3},
+                             cookies={"lc_session": teacher_cookie})
+        self.assertEqual(r.status_code, 200)
+        # معلم وضعیت تخته را می‌بیند
+        r = self.client.post(f"/api/sessions/{session_id}/board/fetch", json={},
+                             cookies={"lc_session": teacher_cookie})
+        self.assertEqual(r.json()["pdf"]["page"], 3)
+        self.assertEqual(r.json()["pdf"]["name"], "olom.pdf")
+        # دانش‌آموز همان کلاس می‌تواند PDF را دانلود کند
+        self.client.cookies.clear()
+        r = self.client.get(f"/api/board/pdf/{pdf_id}?token={entry_token}")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.headers["content-type"], "application/pdf")
+        self.assertTrue(r.content.startswith(b"%PDF-"))
+        # توکن بی‌ربط رد می‌شود
+        r = self.client.get(f"/api/board/pdf/{pdf_id}?token=deadbeef")
+        self.assertEqual(r.status_code, 403)
+        # دانش‌آموز نمی‌تواند صفحه عوض کند
+        r = self.client.post(f"/api/sessions/{session_id}/board/pdf/page",
+                             json={"page": 99, "token": entry_token})
+        self.assertEqual(r.status_code, 403)
+        # دبیر می‌بندد
+        r = self.client.post(f"/api/sessions/{session_id}/board/pdf/close", json={},
+                             cookies={"lc_session": teacher_cookie})
+        self.assertEqual(r.status_code, 200)
+        r = self.client.post(f"/api/sessions/{session_id}/board/fetch", json={},
+                             cookies={"lc_session": teacher_cookie})
+        self.assertIsNone(r.json()["pdf"])
+        self.client.post(f"/api/sessions/{session_id}/end", cookies={"lc_session": teacher_cookie})
+
     def test_brand_admin_only(self):
         admin_cookie = self.login("admin", "Admin123!")
         teacher_cookie = self.login("teacher1", "Teach123!")

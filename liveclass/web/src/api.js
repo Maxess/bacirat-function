@@ -19,6 +19,7 @@ async function request(path, { method = 'GET', body, form, isForm = false } = {}
 export const api = {
   get: (p) => request(p),
   post: (p, body) => request(p, { method: 'POST', body }),
+  put: (p, body) => request(p, { method: 'PUT', body }),
   postForm: (p, form) => request(p, { method: 'POST', form }),
   putForm: (p, form) => request(p, { method: 'PUT', form }),
   del: (p) => request(p, { method: 'DELETE' }),

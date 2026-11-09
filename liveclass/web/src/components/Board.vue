@@ -1,16 +1,24 @@
 <script setup>
 /* تخته‌ی تعاملی LiveClass — سبک، آفلاین و بدون وابستگی خارجی.
    تمام مختصات به‌صورت نرمال‌شده (۰..۱) ذخیره می‌شوند تا روی هر اندازه‌ی صفحه یکسان رندر شوند. */
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 
 const props = defineProps({
   canClear: { type: Boolean, default: false },   // فقط دبیر
   canDraw: { type: Boolean, default: true },
+  pdf: { type: Object, default: null },           // {id, page, name, url} | null
 })
-const emit = defineEmits(['op'])                  // op لوکال برای broadcast بیرون
+const emit = defineEmits(['op', 'pdf-loaded'])    // op لوکال برای broadcast بیرون؛ تعداد صفحات بعد از load
 
 const surface = ref(null)
 const canvas = ref(null)
+const pdfCanvas = ref(null)
+const pdfLoading = ref(false)
+const pdfError = ref('')
+const pdfTotal = ref(0)
+let pdfjsLib = null
+let pdfDoc = null
+let pdfDocId = null
 const tool = ref('pen')          // pen | eraser
 const color = ref('#1f2a44')
 const size = ref(4)
@@ -74,6 +82,59 @@ function replay() {
   ctx.clearRect(0, 0, w, h)
   for (const s of ops) paintStroke(s)
 }
+async function ensurePdfjs() {
+  if (pdfjsLib) return pdfjsLib
+  pdfjsLib = await import('pdfjs-dist')
+  const workerUrl = (await import('pdfjs-dist/build/pdf.worker.min.mjs?url')).default
+  pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl
+  return pdfjsLib
+}
+
+function clearPdfCanvas() {
+  pdfTotal.value = 0
+  pdfDocId = null
+  if (pdfDoc) { pdfDoc.destroy().catch(() => {}); pdfDoc = null }
+  const c = pdfCanvas.value
+  const ctx2 = c?.getContext('2d')
+  if (c && ctx2) ctx2.clearRect(0, 0, c.width, c.height)
+}
+
+async function renderPdf() {
+  const pdf = props.pdf
+  if (!pdf) { clearPdfCanvas(); return }
+  const canvasEl = pdfCanvas.value
+  if (!canvasEl) return
+  pdfLoading.value = true
+  pdfError.value = ''
+  try {
+    const lib = await ensurePdfjs()
+    if (!pdfDoc || pdfDocId !== pdf.id) {
+      if (pdfDoc) { pdfDoc.destroy().catch(() => {}); pdfDoc = null }
+      const resp = await fetch(pdf.url)
+      if (!resp.ok) throw new Error(`بارگذاری PDF ناموفق بود (${resp.status})`)
+      pdfDoc = await lib.getDocument({ data: await resp.arrayBuffer() }).promise
+      pdfDocId = pdf.id
+      pdfTotal.value = pdfDoc.numPages
+      emit('pdf-loaded', { total: pdfDoc.numPages, name: pdf.name })
+    }
+    const pageNum = Math.min(Math.max(1, pdf.page || 1), pdfDoc.numPages)
+    const page = await pdfDoc.getPage(pageNum)
+    const cssW = Math.max(80, surface.value?.clientWidth || 800)
+    const vp1 = page.getViewport({ scale: 1 })
+    const viewport = page.getViewport({ scale: cssW / vp1.width })
+    const dpr = Math.min(window.devicePixelRatio || 1, 2)
+    canvasEl.width = Math.floor(viewport.width * dpr)
+    canvasEl.height = Math.floor(viewport.height * dpr)
+    const ctx2 = canvasEl.getContext('2d')
+    ctx2.setTransform(dpr, 0, 0, dpr, 0, 0)
+    await page.render({ canvasContext: ctx2, viewport }).promise
+  } catch (e) {
+    pdfError.value = e.message || 'خطا در نمایش PDF'
+  } finally {
+    pdfLoading.value = false
+  }
+}
+
 function applyRemote(op) {
   if (!op || !op.id) return
   if (op.t === 'clear') {
@@ -144,10 +205,17 @@ async function clearBoard() {
 
 onMounted(() => {
   setupCanvas()
-  resizeObs = new ResizeObserver(() => setupCanvas())
+  let rt = null
+  resizeObs = new ResizeObserver(() => {
+    setupCanvas()
+    clearTimeout(rt)
+    rt = setTimeout(() => { if (props.pdf) renderPdf() }, 150)
+  })
   if (surface.value) resizeObs.observe(surface.value)
+  if (props.pdf) renderPdf()
 })
-onBeforeUnmount(() => { resizeObs?.disconnect() })
+watch(() => [props.pdf?.id, props.pdf?.page], renderPdf)
+onBeforeUnmount(() => { resizeObs?.disconnect(); clearPdfCanvas() })
 
 defineExpose({ applyRemote, loadInitial, clearBoard })
 </script>
@@ -155,7 +223,10 @@ defineExpose({ applyRemote, loadInitial, clearBoard })
 <template>
   <div class="board-wrap">
     <div ref="surface" class="board-surface">
-      <canvas ref="canvas"
+      <canvas v-show="pdf" ref="pdfCanvas" class="pdf-layer"></canvas>
+      <div v-if="pdf && pdfLoading" class="pdf-loading">در حال بارگذاری کتاب…</div>
+      <div v-if="pdf && pdfError" class="pdf-error">⚠️ {{ pdfError }}</div>
+      <canvas ref="canvas" class="stroke-layer"
               @pointerdown="onPointerDown" @pointermove="onPointerMove"
               @pointerup="onPointerUp" @pointercancel="onPointerUp"></canvas>
     </div>

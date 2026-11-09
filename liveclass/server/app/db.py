@@ -74,6 +74,13 @@ CREATE TABLE IF NOT EXISTS settings (
   value TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS class_access (
+  class_id INTEGER NOT NULL REFERENCES classes(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (class_id, user_id)
+);
+
 CREATE TABLE IF NOT EXISTS board_ops (
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -86,6 +93,7 @@ CREATE TABLE IF NOT EXISTS board_ops (
 CREATE INDEX IF NOT EXISTS idx_enroll_class ON enrollments(class_id);
 CREATE INDEX IF NOT EXISTS idx_attend_session ON attendance(session_id);
 CREATE INDEX IF NOT EXISTS idx_board_session ON board_ops(session_id, seq);
+CREATE INDEX IF NOT EXISTS idx_access_user ON class_access(user_id);
 """
 
 DEFAULT_SETTINGS = {
@@ -133,6 +141,23 @@ def init_db(path: str | None = None) -> str:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()}
         if "board_open" not in cols:
             conn.execute("ALTER TABLE sessions ADD COLUMN board_open INTEGER NOT NULL DEFAULT 0")
+        if "pdf_id" not in cols:
+            conn.execute("ALTER TABLE sessions ADD COLUMN pdf_id TEXT")
+        if "pdf_name" not in cols:
+            conn.execute("ALTER TABLE sessions ADD COLUMN pdf_name TEXT")
+        if "pdf_page" not in cols:
+            conn.execute("ALTER TABLE sessions ADD COLUMN pdf_page INTEGER NOT NULL DEFAULT 1")
+        if "record_egress_id" not in cols:
+            conn.execute("ALTER TABLE sessions ADD COLUMN record_egress_id TEXT")
+        if "record_status" not in cols:
+            conn.execute("ALTER TABLE sessions ADD COLUMN record_status TEXT NOT NULL DEFAULT ''")
+        ucols = {r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
+        if "video_preset" not in ucols:
+            conn.execute("ALTER TABLE users ADD COLUMN video_preset TEXT NOT NULL DEFAULT 'optimized'")
+        if "video_fps" not in ucols:
+            conn.execute("ALTER TABLE users ADD COLUMN video_fps INTEGER NOT NULL DEFAULT 15")
+        if "full_name" in ucols and "guest" not in (ucols or set()):
+            pass  # نقش مهمان در همان ستون role نگه‌داری می‌شود (admin | teacher | guest)
         for k, v in DEFAULT_SETTINGS.items():
             conn.execute("INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)", (k, v))
         conn.commit()

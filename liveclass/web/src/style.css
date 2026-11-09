@@ -202,3 +202,31 @@ code, .mono { font-family: ui-monospace, Menlo, Consolas, monospace; background:
 /* فوتر */
 .footer { text-align: center; color: var(--muted); font-size: 12px; padding: 14px; border-top: 1px solid var(--border); }
 .toast { position: fixed; bottom: 18px; right: 18px; z-index: 50; background: #10331f; border: 1px solid #1f6b3a; color: #b7f5cd; padding: 10px 16px; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,.4); }
+
+/* ====== امکانات جدید: PDF روی تخته، ضبط، تنظیمات ====== */
+.pdf-layer { position: absolute; inset: 0; z-index: 0; width: 100%; height: 100%; }
+.stroke-layer { position: absolute; inset: 0; z-index: 1; }
+.pdf-loading, .pdf-error { position: absolute; z-index: 2; top: 14px; inset-inline-start: 14px; background: rgba(4,6,15,.82); border: 1px solid var(--border); color: var(--text); font-size: 12px; border-radius: 10px; padding: 6px 12px; pointer-events: none; }
+.pdf-error { color: #ffb4ab; border-color: #7f2d33; }
+.pdf-nav { position: absolute; z-index: 15; bottom: 76px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 10px; background: rgba(8, 12, 30, .88); border: 1px solid var(--border); border-radius: 14px; padding: 7px 10px; backdrop-filter: blur(8px); box-shadow: 0 10px 34px rgba(0,0,0,.45); max-width: min(92vw, 640px); }
+.pdf-meta { display: flex; flex-direction: column; align-items: center; min-width: 0; }
+.pdf-meta b { font-size: 12px; max-width: 46vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pdf-meta span { font-size: 11px; color: var(--muted); }
+.pdf-btn { border: 1px solid var(--border); background: var(--surface2); color: var(--text); border-radius: 10px; padding: 6px 12px; font: inherit; font-size: 13px; cursor: pointer; transition: .15s; }
+.pdf-btn:hover:not(:disabled) { border-color: var(--brand); }
+.pdf-btn:disabled { opacity: .4; cursor: not-allowed; }
+.pdf-btn.close { background: #3a1518; border-color: #7f2d33; color: #ffb4ab; }
+.upload-tab { cursor: pointer; }
+.record-pill { display: inline-flex; align-items: center; gap: 7px; background: rgba(40, 8, 14, .9); border: 1px solid #7f2d33; color: #ffb4ab; border-radius: 999px; padding: 7px 14px; font-size: 12px; backdrop-filter: blur(8px); font-weight: 700; }
+.call-btn.recording { background: #b91c1c; border-color: #ef4444; color: #fff; animation: recPulse 1.4s infinite; }
+@keyframes recPulse { 0%,100% { box-shadow: 0 0 0 0 rgba(239,68,68,.55); } 50% { box-shadow: 0 0 0 9px rgba(239,68,68,0); } }
+
+/* تنظیمات: کارت‌های انتخاب کیفیت */
+.quality-options { display: flex; flex-direction: column; gap: 8px; margin: 10px 0 4px; }
+.quality-option { display: flex; gap: 12px; align-items: flex-start; border: 1px solid var(--border); border-radius: 14px; padding: 12px 14px; cursor: pointer; transition: .15s; background: var(--surface); }
+.quality-option input { margin-top: 4px; accent-color: var(--brand); }
+.quality-option:hover { border-color: var(--brand); }
+.quality-option.active { border-color: var(--brand); background: var(--brand-soft); box-shadow: var(--glow); }
+.qo-title { font-weight: 800; font-size: 14px; }
+
+.sep { border: 0; border-top: 1px solid var(--border); margin: 14px 0; }

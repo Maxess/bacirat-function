@@ -7,6 +7,8 @@ import ClassDetail from './views/ClassDetail.vue'
 import Room from './views/Room.vue'
 import AdminBrand from './views/AdminBrand.vue'
 import Enter from './views/Enter.vue'
+import Settings from './views/Settings.vue'
+import Users from './views/Users.vue'
 
 const user = ref(null)
 const config = ref(null)
@@ -22,6 +24,8 @@ function parseHash() {
   if (seg[0] === 'class' && seg[1]) return { name: 'class', param: Number(seg[1]) }
   if (seg[0] === 'room' && seg[1]) return { name: 'room', param: seg[1] === 'student' ? 'student' : Number(seg[1]) }
   if (seg[0] === 'admin' && seg[1] === 'brand') return { name: 'admin-brand' }
+  if (seg[0] === 'admin' && seg[1] === 'users') return { name: 'admin-users' }
+  if (seg[0] === 'settings') return { name: 'settings' }
   if (seg[0] === 'enter') return { name: 'enter', query: q }
   return { name: 'dashboard' }
 }
@@ -55,7 +59,7 @@ function onLoggedIn(u) {
   location.hash = '#/'
 }
 
-const isTeacherView = computed(() => ['dashboard', 'class', 'admin-brand'].includes(route.name))
+const isTeacherView = computed(() => ['dashboard', 'class', 'admin-brand', 'admin-users', 'settings'].includes(route.name))
 const needsUser = computed(() => route.name !== 'enter' && route.name !== 'login')
 
 onMounted(async () => {
@@ -75,7 +79,9 @@ onUnmounted(() => window.removeEventListener('hashchange', applyRoute))
     </a>
     <div class="actions">
       <a class="btn sm ghost" href="#/">🏠 کلاس‌ها</a>
-      <a v-if="user.role === 'admin'" class="btn sm ghost" href="#/admin/brand">⚙️ تنظیمات برند</a>
+      <a v-if="user.role === 'admin'" class="btn sm ghost" href="#/admin/users">👥 کاربران</a>
+      <a v-if="user.role === 'admin'" class="btn sm ghost" href="#/admin/brand">🎨 برند</a>
+      <a class="btn sm ghost" href="#/settings">⚙️ تنظیمات</a>
       <button class="btn sm danger" @click="logout">خروج ({{ user.full_name }})</button>
     </div>
   </header>
@@ -99,6 +105,15 @@ onUnmounted(() => window.removeEventListener('hashchange', applyRoute))
   <main class="container" v-else-if="route.name === 'admin-brand'">
     <AdminBrand v-if="user?.role === 'admin'" :brand="config?.brand" @saved="loadConfig" />
     <div v-else class="card"><p>فقط ادمین دسترسی دارد.</p></div>
+  </main>
+
+  <main class="container" v-else-if="route.name === 'admin-users'">
+    <Users v-if="user?.role === 'admin'" :user="user" />
+    <div v-else class="card"><p>فقط ادمین دسترسی دارد.</p></div>
+  </main>
+
+  <main class="container" v-else-if="route.name === 'settings'">
+    <Settings :brand="config?.brand" :user="user" />
   </main>
 
   <footer class="footer" v-if="isTeacherView">{{ config?.brand?.site_name || 'LiveClass' }} — پلتفرم اختصاصی شما</footer>

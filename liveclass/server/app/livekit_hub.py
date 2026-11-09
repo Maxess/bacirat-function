@@ -128,3 +128,38 @@ def mint_token(room_name: str, identity: str, display_name: str, *, can_publish:
              .with_grants(grant)
              .with_ttl(timedelta(seconds=ttl_seconds)))
     return token.to_jwt()
+
+
+async def _with_egress(fn):
+    lkapi = lk.LiveKitAPI(http_url(), _key(), _secret())
+    try:
+        return await fn(lkapi.egress)
+    finally:
+        await lkapi.aclose()
+
+
+async def start_room_composite_egress(room_name: str, filepath: str) -> str:
+    """ضبط کامل اتاق روی فایل MP4 — نیاز به سرویس livekit-egress دارد (LIVECLASS_EGRESS_ENABLE=1)."""
+    if _mock():
+        import secrets as _secrets
+        return "EG_mock_" + _secrets.token_hex(6)
+    async def go(egress):
+        req = lk.RoomCompositeEgressRequest(
+            room_name=room_name,
+            layout="grid",
+            file_outputs=[lk.EncodedFileOutput(file_type=lk.EncodedFileType.MP4, filepath=filepath)],
+        )
+        return await egress.start_room_composite_egress(req)
+    resp = await _with_egress(go)
+    return resp.egress_id
+
+
+async def stop_egress(egress_id: str) -> None:
+    if _mock() or (egress_id or "").startswith("EG_mock_"):
+        return None
+    async def go(egress):
+        try:
+            return await egress.stop_egress(lk.StopEgressRequest(egress_id=egress_id))
+        except Exception:
+            return None
+    await _with_egress(go)

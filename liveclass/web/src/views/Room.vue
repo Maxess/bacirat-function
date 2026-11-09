@@ -5,6 +5,7 @@ import { api } from '../api.js'
 import { Room, RoomEvent, Track } from 'livekit-client'
 import VideoTile from '../components/VideoTile.vue'
 import Board from '../components/Board.vue'
+import { loadPrefs, savePrefsLocal, PRESETS } from '../prefs.js'
 
 const props = defineProps({ mode: { type: String, required: true }, sessionId: [Number, String], brand: Object })
 
@@ -27,6 +28,10 @@ const connected = ref(false)
 const screenVideo = ref(null)
 const boardEl = ref(null)
 const audioSink = ref(null)
+const pdfState = ref(null)          // {id, page, name}
+const pdfTotal = ref(0)
+const recordStatus = ref('idle')    // idle | recording | stopped
+const videoPrefs = ref(loadPrefs())
 
 let room = null
 let heartbeatTimer = null
@@ -37,6 +42,11 @@ const audioEls = new Map()            // identity -> audio element
 const isTeacher = computed(() => props.mode === 'teacher')
 const canPublish = computed(() => isTeacher.value || creds.value?.can_publish !== false)
 const liveSessionId = computed(() => creds.value?.session_id ?? props.sessionId)
+const studentToken = computed(() => isTeacher.value ? ''
+  : (JSON.parse(sessionStorage.getItem('lcStudent') || '{}').token || ''))
+const boardPdf = computed(() => pdfState.value
+  ? { ...pdfState.value, url: `/api/board/pdf/${pdfState.value.id}${isTeacher.value ? '' : `?token=${studentToken.value}`}` }
+  : null)
 const displayName = computed(() => isTeacher.value ? 'دبیر' : (creds.value?.student_name || 'دانش‌آموز'))
 const camParticipants = computed(() => participants.value.filter(p => !p.screenTrack))
 const screenParticipant = computed(() => participants.value.find(p => p.screenTrack) || null)
@@ -118,6 +128,9 @@ function routeData(msg, participant) {
     if (sideTab.value !== 'chat') unread.value += 1
   } else if (msg.type === 'board' && msg.op) {
     boardEl.value?.applyRemote(msg.op)
+  } else if (msg.type === 'board-pdf') {
+    pdfState.value = msg.pdf || null
+    if (msg.pdf) { stage.value = 'board' } else { pdfTotal.value = 0 }
   } else if (msg.type === 'board-state') {
     boardOpen.value = !!msg.open
     if (msg.open) { stage.value = 'board' } else if (stage.value === 'board') { stage.value = 'grid' }
@@ -143,6 +156,7 @@ async function fetchBoard() {
     const d = await api.post(`/api/sessions/${liveSessionId.value}/board/fetch`, body)
     boardOpen.value = !!d.open
     pendingBoardOps = d.ops || []
+    pdfState.value = d.pdf || null
     if (d.open) stage.value = 'board'
   } catch { pendingBoardOps = [] }
 }
@@ -155,11 +169,19 @@ async function connect() {
   }
   try {
     await fetchBoard()
+    // ترجیحات کیفیتِ حساب (برای کاربر لاگین) را هم بخوانیم — اگر آفلاین بود همان localStorage
+    try {
+      const pref = await api.get('/api/me/preferences')
+      videoPrefs.value = { video_preset: pref.video_preset, video_fps: pref.video_fps }
+      savePrefsLocal(videoPrefs.value)
+    } catch { /* دانش‌آموز بدون کوکی — localStorage ملاک است */ }
+    const pr = PRESETS[videoPrefs.value.video_preset] || PRESETS.optimized
+
     room = new Room({
       adaptiveStream: true,
       dynacast: true,
-      // تصویر کوچک پیش‌فرض روی دوربین‌های ضعیف → پهنای باند و CPU بسیار کمتر
-      videoCaptureDefaults: { resolution: { width: 640, height: 360, frameRate: 15 } },
+      // حالت انتخابی کاربر (پیش‌فرض: اقتصادی ۶۴۰×۳۶۰@۱۵) → پهنای باند و CPU بسیار کمتر
+      videoCaptureDefaults: { resolution: { width: pr.w, height: pr.h, frameRate: videoPrefs.value.video_fps } },
       publishDefaults: { simulcast: true },
     })
     room
@@ -198,6 +220,7 @@ async function connect() {
     await nextTick()
     if (boardEl.value && pendingBoardOps) boardEl.value.loadInitial(pendingBoardOps)
 
+    if (isTeacher.value) fetchRecordStatus()
     if (!isTeacher.value) {
       heartbeatTimer = setInterval(async () => {
         try {
@@ -264,6 +287,82 @@ async function openBoardTab() {
   stage.value = 'board'
 }
 
+/* ---------- کتاب PDF روی تخته (فقط دبیر بارگذاری/ورق‌زنی می‌کند) ---------- */
+function applyPdfLocal(pdf) {
+  pdfState.value = pdf ? { ...pdf } : null
+  if (!pdf) pdfTotal.value = 0
+}
+
+async function uploadPdf(event) {
+  const file = event.target.files?.[0]
+  event.target.value = ''
+  if (!file) return
+  if (file.size > 25 * 1024 * 1024) { pushSystemChat('⚠️ حجم PDF بیش از ۲۵ مگابایت است.'); return }
+  const fd = new FormData()
+  fd.append('file', file)
+  try {
+    const d = await api.postForm(`/api/sessions/${liveSessionId.value}/board/pdf`, fd)
+    applyPdfLocal(d.pdf)
+    // تخته را برای همه باز کن تا کتاب را ببینند
+    if (!boardOpen.value) await openBoardTab()
+    await publishData({ type: 'board-pdf', pdf: pdfState.value })
+    pushSystemChat(`📄 «${d.pdf.name}» روی تخته بارگذاری شد.`)
+  } catch (e) {
+    pushSystemChat(`⚠️ بارگذاری PDF ناموفق بود: ${e.message}`)
+  }
+}
+
+async function togglePage(delta) {
+  if (!isTeacher.value || !pdfState.value) return
+  const total = pdfTotal.value || 10000
+  const page = Math.min(Math.max(1, pdfState.value.page + delta), total)
+  if (page === pdfState.value.page) return
+  try {
+    await api.post(`/api/sessions/${liveSessionId.value}/board/pdf/page`, { page })
+    applyPdfLocal({ ...pdfState.value, page })
+    await publishData({ type: 'board-pdf', pdf: pdfState.value })
+  } catch (e) { pushSystemChat(`⚠️ تغییر صفحه ناموفق بود: ${e.message}`) }
+}
+
+async function closePdf() {
+  if (!isTeacher.value) return
+  try {
+    await api.post(`/api/sessions/${liveSessionId.value}/board/pdf/close`, {})
+    applyPdfLocal(null)
+    await publishData({ type: 'board-pdf', pdf: null })
+    pushSystemChat('📄 کتاب از تخته برداشته شد.')
+  } catch (e) { pushSystemChat(`⚠️ ${e.message}`) }
+}
+
+function onPdfLoaded({ total }) { pdfTotal.value = total }
+
+/* ---------- ضبط جلسه ---------- */
+async function fetchRecordStatus() {
+  try {
+    const d = await api.get(`/api/sessions/${liveSessionId.value}/record/status`)
+    recordStatus.value = d.record_status || 'idle'
+  } catch { /* ضبط در دسترس نیست */ }
+}
+
+async function toggleRecord() {
+  if (!isTeacher.value) return
+  try {
+    if (recordStatus.value === 'recording') {
+      await api.post(`/api/sessions/${liveSessionId.value}/record/stop`, {})
+      recordStatus.value = 'stopped'
+      pushSystemChat('⏹ ضبط متوقف شد؛ پس از آماده‌شدن فایل، در صفحه‌ی کلاس دانلود می‌شود.')
+    } else {
+      const d = await api.post(`/api/sessions/${liveSessionId.value}/record/start`, {})
+      recordStatus.value = 'recording'
+      pushSystemChat(d.already ? '⏺ ضبط از قبل در جریان است.' : '⏺ ضبط جلسه شروع شد.')
+    }
+  } catch (e) {
+    pushSystemChat(e.status === 503
+      ? '⚠️ ضبط روی این سرور فعال نیست (LIVECLASS_EGRESS_ENABLE=1 لازم است).'
+      : `⚠️ ضبط انجام نشد: ${e.message}`)
+  }
+}
+
 function onBoardOp(op) {
   publishData({ type: 'board', op })
   const body = isTeacher.value
@@ -309,6 +408,8 @@ onUnmounted(() => { clearInterval(heartbeatTimer); room?.disconnect() })
         <button class="stage-tab" :class="{ active: stage === 'grid' }" @click="stage = 'grid'">🎥 دوربین‌ها</button>
         <button class="stage-tab" :class="{ active: stage === 'board' }" :title="isTeacher ? (boardOpen ? 'کلیک: بستن تخته برای همه' : 'کلیک: نمایش تخته برای همه') : 'تخته کلاس'" @click="openBoardTab">📋 تخته<span v-if="isTeacher && boardOpen"> (برای همه)</span></button>
         <button v-if="hasScreen" class="stage-tab" :class="{ active: stage === 'screen' }" @click="stage = 'screen'">🖥️ اشتراک صفحه</button>
+        <label v-if="isTeacher" class="stage-tab upload-tab" title="بارگذاری کتاب PDF روی تخته">📄 کتاب PDF<input type="file" accept="application/pdf,.pdf" hidden @change="uploadPdf" /></label>
+        <span v-if="recordStatus === 'recording'" class="record-pill"><span class="live-dot"></span>در حال ضبط</span>
         <span v-if="connected" class="live-pill"><span class="live-dot"></span>پخش زنده · {{ participants.length }} نفر</span>
       </div>
 
@@ -322,7 +423,16 @@ onUnmounted(() => { clearInterval(heartbeatTimer); room?.disconnect() })
           </div>
         </div>
         <template v-else>
-          <Board v-show="stage === 'board'" ref="boardEl" :can-clear="isTeacher" :can-draw="true" @op="onBoardOp" />
+          <Board v-show="stage === 'board'" ref="boardEl" :can-clear="isTeacher" :can-draw="true" :pdf="boardPdf" @op="onBoardOp" @pdf-loaded="onPdfLoaded" />
+          <div v-if="pdfState && stage === 'board'" class="pdf-nav">
+            <button v-if="isTeacher" class="pdf-btn" :disabled="pdfState.page <= 1" @click="togglePage(-1)">‹ قبلی</button>
+            <div class="pdf-meta">
+              <b :title="pdfState.name">{{ pdfState.name }}</b>
+              <span>صفحه {{ pdfState.page }} از {{ pdfTotal || '…' }}</span>
+            </div>
+            <button v-if="isTeacher" class="pdf-btn" :disabled="!!pdfTotal && pdfState.page >= pdfTotal" @click="togglePage(1)">بعدی ›</button>
+            <button v-if="isTeacher" class="pdf-btn close" title="برداشتن کتاب از تخته" @click="closePdf">✕</button>
+          </div>
 
           <div v-show="stage === 'grid'" class="video-grid">
             <VideoTile v-for="p in camParticipants" :key="p.identity"
@@ -347,6 +457,7 @@ onUnmounted(() => { clearInterval(heartbeatTimer); room?.disconnect() })
         <button class="call-btn" :class="[camOn ? 'on' : 'off', { locked: !canPublish }]" :title="canPublish ? (camOn ? 'بستن دوربین' : 'بازکردن دوربین') : 'در این جلسه فقط بیننده هستید'" @click="toggleCam">{{ camOn ? '🎥' : '📵' }}</button>
         <button class="call-btn" :class="{ on: sharingScreen, locked: !canPublish }" title="اشتراک صفحه" @click="toggleScreen">🖥️</button>
         <button class="call-btn" :class="{ 'hand-on': handRaised }" :title="handRaised ? 'پایین آوردن دست' : 'بالا بردن دست'" @click="toggleHand">✋</button>
+        <button v-if="isTeacher" class="call-btn" :class="{ recording: recordStatus === 'recording' }" :title="recordStatus === 'recording' ? 'توقف ضبط جلسه' : 'شروع ضبط جلسه'" @click="toggleRecord">{{ recordStatus === 'recording' ? '⏹' : '⏺' }}</button>
         <button class="call-btn danger" title="خروج از کلاس" @click="leave">خروج 🚪</button>
       </div>
     </div>
