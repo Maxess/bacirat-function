@@ -1,0 +1,16 @@
+[Unit]
+Description=LiveClass backend (FastAPI + SQLite + LiveKit signalling)
+After=network-online.target livekit.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=/opt/bacirat-function/liveclass/server
+EnvironmentFile=-/etc/liveclass/liveclass.env
+ExecStart=/opt/bacirat-function/liveclass/.venv/bin/python run.py serve --host 127.0.0.1 --port 8200
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

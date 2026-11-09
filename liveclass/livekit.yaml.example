@@ -1,0 +1,9 @@
+# نمونه‌ی کانفیگ LiveKit برای تولید (مسیر پیش‌فرض نصب‌کننده: /etc/liveclass/livekit.yaml)
+port: 7880
+rtc:
+  port_range_start: 50000
+  port_range_end: 60000
+  use_external_ip: true       # اگر پشت NAT هستید: ip عمومی را صریحاً بدهید: node_ip: 1.2.3.4
+keys:
+  # !! کلید واقعی را با install-livekit.sh بسازید؛ این فقط نمونه‌ است
+  devkey: secret-secret-secret-secret-secret-12

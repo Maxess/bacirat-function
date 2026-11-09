@@ -1,0 +1,9 @@
+# مسیر جایگزین با Docker (اختیاری) — برای production systemd + install-livekit.sh توصیه می‌شود
+services:
+  livekit:
+    image: livekit/livekit-server:v1.13.11
+    command: --config /etc/livekit/livekit.yaml
+    volumes:
+      - ./livekit.yaml.example:/etc/livekit/livekit.yaml:ro
+    network_mode: host
+    restart: unless-stopped

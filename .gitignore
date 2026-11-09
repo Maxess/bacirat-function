@@ -31,3 +31,10 @@ classroom-manager/data/
 *.db-wal
 *.db-shm
 secret_key
+
+# فرانت‌اند و محیط مجازی پروژه‌ی liveclass
+liveclass/.venv/
+liveclass/web/node_modules/
+liveclass/web/dist/
+liveclass/server/*.db
+liveclass/server/data/
