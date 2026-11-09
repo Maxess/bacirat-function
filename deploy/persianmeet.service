@@ -1,0 +1,21 @@
+[Unit]
+Description=PersianMeet (learn100) virtual classroom server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/persianmeet
+ExecStart=/opt/persianmeet/persianmeet
+Restart=on-failure
+RestartSec=5
+# طبق مستندات رسمی، محصول به‌صورت root اجرا می‌شود (مسیرهای داده ممکن است به پوشه‌ی نصب وابسته باشند).
+# برای کاهش سطح حمله، فقط این دو هاردِنینگ را اعمال می‌کنیم بدون شکستن اپ:
+NoNewPrivileges=true
+LimitNOFILE=65535
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=persianmeet
+
+[Install]
+WantedBy=multi-user.target

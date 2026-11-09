@@ -1,0 +1,19 @@
+# PersianMeet — نمونه‌ی پیکربندی
+# فایل اصلی روی سرور: /opt/persianmeet/config.yml
+# فقط کلیدهای زیر توسط مستندات رسمی تأیید شده‌اند؛ سایر کلیدها را در همان فایل روی سرور ببینید.
+
+# true  → خودِ محصول با دامنه‌ی شما از Let's Encrypt گواهی رایگان می‌گیرد (پیش‌فرض مستندات).
+#         لازم است پورت ۸۰ از اینترنت در دسترس و DNS دامنه به این سرور اشاره کند.
+# false → محصول فقط روی http://127.0.0.1:8003 سرو می‌شود؛ TLS را خودتان پشت nginx
+#         (deploy/nginx.reverse-proxy.conf) انجام دهید.
+auto_ssl: true
+
+# secret برای API — طولانی و تصادفی باشد. پیش‌فرض MeetList و ActiveMeets به آن نیاز دارند؛
+# در همان config.yml می‌توانید تعیین کنید کدام Type های دیگر Secret بخواهند.
+secret: "CHANGE_ME_TO_A_LONG_RANDOM_STRING"
+
+# ---- نکته‌های مهم ----
+# 1) بعد از تغییر config.yml حتماً سرویس را ری‌استارت کنید:
+#      sudo systemctl restart persianmeet
+# 2) این فایل حاوی secret است → chmod 600
+# 3) قبل از آپدیت با deploy/update.sh از همین فایل بکاپ گرفته می‌شود.

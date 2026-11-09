@@ -1,0 +1,24 @@
+# پکیج‌های دانلودی PersianMeet (نباید در git باشند؛ هزاران فایل باینری)
+*.zip
+persianmeet-linux-*
+persianmeet/
+/opt/
+
+# محرمانه‌ها
+.env
+config.yml
+*.pem
+*.key
+
+# بکاپ‌ها
+/var/backups/
+*.tar.gz
+
+# پایتون
+__pycache__/
+*.pyc
+.venv/
+
+# سیستم
+.DS_Store
+Thumbs.db
