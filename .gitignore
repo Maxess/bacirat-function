@@ -1,5 +1,6 @@
 # پکیج‌های دانلودی PersianMeet (نباید در git باشند؛ هزاران فایل باینری)
 *.zip
+!/liveclass-install.zip
 persianmeet-linux-*
 /opt/
 

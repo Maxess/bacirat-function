@@ -32,6 +32,22 @@
 
 ---
 
+## 🆕 سیستم خودیِ ما: LiveClass (پیشنهاد جایگزین)
+
+کنار ابزارهای اتوماسیون PersianMeet، این ریپو شامل یک **پلتفرم کلاس مجازی کاملاً جدیدِ خودی** به نام **LiveClass** است
+(FastAPI + SQLite + Vue 3 + LiveKit — سورس کامل، بدون باینری فروشنده): ویدیو، تخته‌ی تعاملی، PDF روی تخته،
+ضبط جلسه، کاربران/مهمان با دسترسی دبیر، بکاپ کامل، HTTPS خودکار.
+
+**نصب مستقیم روی سرور با یک دستور** (اوبونتو/دبیان):
+```bash
+curl -fL -o liveclass-install.zip https://raw.githubusercontent.com/Maxess/bacirat-function/main/liveclass-install.zip
+unzip liveclass-install.zip && cd liveclass
+sudo DOMAIN=class.example.com LIVEKIT_DOMAIN=livekit.class.example.com ./scripts/install-liveclass.sh
+```
+فایل zip نصب در ریشه‌ی ریپو هست (`liveclass-install.zip`). جزئیات: [`liveclass/README.md`](liveclass/README.md) — راهنمای نصب روی سرور: [`liveclass/docs/INSTALL-SERVER.md`](liveclass/docs/INSTALL-SERVER.md)
+
+---
+
 ## پیش‌نیازها (مطابق مستندات رسمی)
 
 | مورد | مقدار |

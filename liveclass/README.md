@@ -73,8 +73,17 @@ LIVECLASS_LIVEKIT_MOCK=1 .venv/bin/python server/run.py serve --port 8200
 
 ## نصب روی سرور — یک دستور (مثل نصب PersianMeet)
 
+**دانلود مستقیم پکیج نصب از ریپوی GitHub** (نیازی به git روی سرور نیست):
 ```bash
-git clone <ریپو> ~/bacirat-function && cd ~/bacirat-function/liveclass
+curl -fL -o liveclass-install.zip https://raw.githubusercontent.com/Maxess/bacirat-function/main/liveclass-install.zip
+unzip -o liveclass-install.zip && cd liveclass
+sudo DOMAIN=class.example.com LIVEKIT_DOMAIN=livekit.class.example.com ./scripts/install-liveclass.sh
+```
+> تا قبل از merge شدن این شاخه، به‌جای `main` نام شاخه‌ی نگه‌داری را بگذارید.
+
+یا با git:
+```bash
+git clone https://github.com/Maxess/bacirat-function.git ~/bacirat-function && cd ~/bacirat-function/liveclass
 sudo DOMAIN=class.example.com LIVEKIT_DOMAIN=livekit.class.example.com ./scripts/install-liveclass.sh
 ```
 

@@ -18,11 +18,19 @@
 
 ## ۱) دریافت کد
 
+### راه الف — دانلود پکیج آماده‌ی نصب از GitHub (بدون git)
+```bash
+sudo apt-get update && sudo apt-get install -y curl unzip
+curl -fL -o liveclass-install.zip https://raw.githubusercontent.com/Maxess/bacirat-function/main/liveclass-install.zip
+unzip -o liveclass-install.zip && cd liveclass
+```
+> اگر روی شاخه‌ی نگه‌داری این فایل هستید، `main` را با همان نام شاخه عوض کنید.
+
+### راه ب — با git
 ```bash
 sudo apt-get update && sudo apt-get install -y git
-git clone <آدرس-ریپوی-شما> ~/bacirat-function
+git clone https://github.com/Maxess/bacirat-function.git ~/bacirat-function
 cd ~/bacirat-function/liveclass
-git checkout arena/977de953-bacirat-function   # یا main بعد از merge
 ```
 
 > اگر فقط `liveclass/` را می‌خواهید: همان پوشه را کپی کنید؛ بقیه‌ی ریپو (persianmeet و …) لازم نیست.
