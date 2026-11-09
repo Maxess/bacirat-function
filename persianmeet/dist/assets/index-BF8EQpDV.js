@@ -1,0 +1,1 @@
+import{d as n,a1 as s,o as c,b as r,f as e,a2 as l}from"./index-Cisn-kYU.js";import{p}from"./icons-DCLQwUAU.js";const d=n({__name:"index",setup(u){const a=s().get,o=p("plus");return(_,i)=>{const t=l;return c(),r(t,{as:"a",href:"/dash/CreateMeet",color:"neutral",variant:"subtle",class:"m-7",icon:e(o),label:e(a)("createNewMeet")},null,8,["icon","label"])}}});export{d as default};
