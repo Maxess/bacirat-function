@@ -74,8 +74,18 @@ CREATE TABLE IF NOT EXISTS settings (
   value TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS board_ops (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  op_id TEXT UNIQUE NOT NULL,
+  author TEXT NOT NULL DEFAULT '',
+  op TEXT NOT NULL,                          -- JSON: {t:'stroke', tool, color, size, pts:[...]} | {t:'clear'}
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_enroll_class ON enrollments(class_id);
 CREATE INDEX IF NOT EXISTS idx_attend_session ON attendance(session_id);
+CREATE INDEX IF NOT EXISTS idx_board_session ON board_ops(session_id, seq);
 """
 
 DEFAULT_SETTINGS = {
@@ -103,8 +113,14 @@ def db_path() -> str:
 
 
 def connect(path: str | None = None) -> sqlite3.Connection:
-    conn = sqlite3.connect(path or db_path())
+    conn = sqlite3.connect(path or db_path(), timeout=5)
     conn.row_factory = sqlite3.Row
+    # تنظیمات بهینه برای سرورهای ضعیف: WAL + همگام‌سازی عادی + کش حافظه
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA cache_size=-8000")      # ~8MB کش صفحه
+    conn.execute("PRAGMA temp_store=MEMORY")
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
@@ -114,8 +130,12 @@ def init_db(path: str | None = None) -> str:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with connect(path) as conn:
         conn.executescript(SCHEMA)
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+        if "board_open" not in cols:
+            conn.execute("ALTER TABLE sessions ADD COLUMN board_open INTEGER NOT NULL DEFAULT 0")
         for k, v in DEFAULT_SETTINGS.items():
             conn.execute("INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)", (k, v))
+        conn.commit()
     return path
 
 

@@ -120,6 +120,65 @@ class TestFlow(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertIn("سارا تستی", r.text)
 
+    def test_board_flow(self):
+        admin_cookie = self.login("admin", "Admin123!")
+        teacher_cookie = self.login("teacher1", "Teach123!")
+
+        # کلاس + دانش‌آموز + توکن ورود
+        r = self.client.post("/api/classes", json={"title": "علوم ششم", "teacher_id": 2},
+                             cookies={"lc_session": admin_cookie})
+        class_id = r.json()["class"]["id"]
+        r = self.client.post(f"/api/classes/{class_id}/students",
+                             json={"student_code": "2001", "full_name": "علی تستی"},
+                             cookies={"lc_session": admin_cookie})
+        entry_token = r.json().get("token") or self.client.get(
+            f"/api/classes/{class_id}", cookies={"lc_session": admin_cookie}).json()["students"][0]["token"]
+
+        r = self.client.post(f"/api/classes/{class_id}/start", cookies={"lc_session": teacher_cookie})
+        session = r.json()["session"]
+        session_id = session["id"]
+        r = self.client.post("/api/student/enter", json={"token": entry_token})
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.json()["can_publish"])   # نفر اول → اجازه‌ی انتشار دارد
+        self.client.cookies.clear()                # کوکی‌ها پاک می‌شود؛ دانش‌آموز کوکی ندارد
+
+        # دبیر حالت تخته را باز می‌کند
+        r = self.client.post(f"/api/sessions/{session_id}/board/state",
+                             json={"open": True}, cookies={"lc_session": teacher_cookie})
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.json()["open"])
+
+        # دانش‌آموز یک ضربه روی تخته ثبت می‌کند
+        stroke = {"id": "op-test-1", "t": "stroke", "tool": "pen", "color": "#ffffff",
+                  "size": 3, "pts": [0.1, 0.1, 0.5, 0.5]}
+        r = self.client.post(f"/api/sessions/{session_id}/board/op",
+                             json={"token": entry_token, "op": stroke})
+        self.assertEqual(r.status_code, 200, r.text)
+
+        # دبیر نقطه را می‌بیند
+        r = self.client.post(f"/api/sessions/{session_id}/board/fetch", json={},
+                             cookies={"lc_session": teacher_cookie})
+        self.assertEqual(r.status_code, 200)
+        data = r.json()
+        self.assertTrue(data["open"])
+        self.assertEqual(len(data["ops"]), 1)
+        self.assertEqual(data["ops"][0]["id"], "op-test-1")
+
+        # دانش‌آموز نمی‌تواند تخته را پاک کند
+        r = self.client.post(f"/api/sessions/{session_id}/board/clear",
+                             json={"token": entry_token})
+        self.assertEqual(r.status_code, 403)
+
+        # دبیر پاک می‌کند
+        r = self.client.post(f"/api/sessions/{session_id}/board/clear", json={},
+                             cookies={"lc_session": teacher_cookie})
+        self.assertEqual(r.status_code, 200)
+        r = self.client.post(f"/api/sessions/{session_id}/board/fetch", json={},
+                             cookies={"lc_session": teacher_cookie})
+        ops = r.json()["ops"]
+        self.assertEqual(len(ops), 1)
+        self.assertEqual(ops[0]["t"], "clear")
+
     def test_brand_admin_only(self):
         admin_cookie = self.login("admin", "Admin123!")
         teacher_cookie = self.login("teacher1", "Teach123!")

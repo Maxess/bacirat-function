@@ -14,6 +14,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request, Response, HTTPException, Form, File, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.gzip import GZipMiddleware
 
 from . import db as dbmod
 from . import brand as brandmod
@@ -23,10 +24,22 @@ from .security import hash_password, verify_password, encode_session, decode_ses
 COOKIE = "lc_session"
 SESSION_COOKIE_MAX_AGE = 12 * 3600
 HEARTBEAT_GRACE_SECONDS = 75
+# سقف ناشران (دوربین/میکروفون) برای هر جلسه — فراتر از آن دانش‌آموزها فقط تماشا می‌کنند (بهینه برای سرور ضعیف)
+try:
+    MAX_PUBLISHERS = int(os.environ.get("LIVECLASS_MAX_PUBLISHERS", "8"))
+except ValueError:
+    MAX_PUBLISHERS = 8
+MAX_BOARD_OPS = 5000          # سقف تعداد عملیات روی تخته برای هر جلسه
+MAX_BOARD_OP_BYTES = 49152    # سقف اندازه‌ی یک عملیات تخته (۴۸KB)
 
 
 def now_str() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+async def _has_json_body(request: Request) -> bool:
+    ctype = request.headers.get("content-type", "")
+    return "application/json" in ctype and (request.headers.get("content-length") not in (None, "0"))
 
 
 def seconds_between(a: str | None, b: str | None) -> int:
@@ -48,7 +61,28 @@ def effective_leave(row, reference: str) -> str:
 
 def create_app() -> FastAPI:
     dbmod.init_db()
-    app = FastAPI(title="LiveClass", version="0.1.0")
+    app = FastAPI(title="LiveClass", version="0.2.0")
+
+    # فشرده‌سازی Gzip برای پاسخ‌های متنی (HTML/JSON/CSV) — کاهش محسوس مصرف پهنای باند
+    app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+    @app.middleware("http")
+    async def security_and_cache_headers(request: Request, call_next):
+        resp = await call_next(request)
+        h = resp.headers
+        h.setdefault("X-Content-Type-Options", "nosniff")
+        h.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+        h.setdefault("X-Frame-Options", "SAMEORIGIN")
+        h.setdefault("Content-Security-Policy",
+                     "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+                     "img-src 'self' data: blob:; font-src 'self' data:; "
+                     "connect-src 'self' ws: wss: http: https:; media-src 'self' blob: mediastream:; "
+                     "worker-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'self'")
+        path = request.url.path
+        if path.startswith("/assets/"):
+            # فایل‌های build وی با هش نام‌گذاری شده‌اند → بی‌نهایت قابل کش
+            h.setdefault("Cache-Control", "public, max-age=31536000, immutable")
+        return resp
 
     # ---------- ابزارها ----------
     def current_user(request: Request) -> dict | None:
@@ -123,6 +157,37 @@ def create_app() -> FastAPI:
             conn.execute("UPDATE attendance SET left_at=?, seconds=? WHERE session_id=? AND student_id=?",
                          (eff, secs, session_row["id"], r["student_id"]))
         conn.execute("UPDATE sessions SET status='closed', closed_at=? WHERE id=?", (now, session_row["id"]))
+
+    # ---------- تخته (اشتراکی) ----------
+    def board_auth(conn, request: Request, session_id: int, body: dict):
+        """مجوز تخته: کوکی دبیر/ادمین صاحب کلاس، یا توکن ورود دانش‌آموز همان کلاس."""
+        session_row = conn.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
+        if not session_row:
+            raise HTTPException(404, "جلسه پیدا نشد")
+        user = current_user(request)
+        if user:
+            cls = class_or_404(conn, session_row["class_id"])
+            require_class_teacher(request, conn, cls)
+            return session_row, {"name": user["full_name"], "is_teacher": True}
+        token = (body.get("token") or "").strip()
+        entry = resolve_student_entry(conn, token) if token else None
+        if not entry or entry["class_id"] != session_row["class_id"]:
+            raise HTTPException(403, "دسترسی به تخته ندارید")
+        return session_row, {"name": entry["full_name"], "is_teacher": False}
+
+    def load_board_ops(conn, session_id: int) -> list[dict]:
+        rows = conn.execute(
+            "SELECT seq, op_id, author, op, created_at FROM board_ops WHERE session_id=? ORDER BY seq",
+            (session_id,)).fetchall()
+        out = []
+        for r in rows:
+            try:
+                op = json.loads(r["op"])
+            except Exception:
+                continue
+            out.append({"seq": r["seq"], "id": r["op_id"], "author": r["author"],
+                        "created_at": r["created_at"], **op})
+        return out
 
     # ---------- auth ----------
     @app.post("/api/auth/login")
@@ -323,7 +388,7 @@ def create_app() -> FastAPI:
                                (class_id, room_name, cls["title"], now))
             conn.commit()
             session_row = conn.execute("SELECT * FROM sessions WHERE id=?", (cur.lastrowid,)).fetchone()
-        return {"session": dict(session_row)}
+        return {"session": dict(session_row)}  # board_open داخلش هست
 
     @app.post("/api/sessions/{session_id}/end")
     async def end_session(request: Request, session_id: int):
@@ -354,7 +419,7 @@ def create_app() -> FastAPI:
                                         can_publish=True)
         return {"livekit_url": livekit_hub.public_url(), "token": token,
                 "room": session_row["room_name"], "session_id": session_id,
-                "class_id": session_row["class_id"]}
+                "class_id": session_row["class_id"], "can_publish": True}
 
     @app.get("/api/sessions/{session_id}/attendance")
     async def attendance(request: Request, session_id: int):
@@ -411,6 +476,70 @@ def create_app() -> FastAPI:
         await livekit_hub.remove_participant(session_row["room_name"], identity)
         return {"ok": True}
 
+    # ---------- تخته تعاملی ----------
+    @app.post("/api/sessions/{session_id}/board/fetch")
+    async def board_fetch(request: Request, session_id: int):
+        body = await request.json() if await _has_json_body(request) else {}
+        with dbmod.connect() as conn:
+            session_row, _who = board_auth(conn, request, session_id, body)
+            ops = load_board_ops(conn, session_id)
+        return {"open": bool(session_row["board_open"]), "ops": ops}
+
+    @app.post("/api/sessions/{session_id}/board/op")
+    async def board_op(request: Request, session_id: int):
+        body = await request.json()
+        op = body.get("op")
+        if not isinstance(op, dict):
+            raise HTTPException(400, "op نامعتبر است")
+        op_id = str(op.get("id") or "").strip()
+        op_type = str(op.get("t") or "").strip()
+        if not op_id or len(op_id) > 64 or op_type not in ("stroke", "clear"):
+            raise HTTPException(400, "عملیات تخته نامعتبر است")
+        raw = json.dumps(op, ensure_ascii=False, separators=(",", ":"))
+        if len(raw.encode("utf-8")) > MAX_BOARD_OP_BYTES:
+            raise HTTPException(413, "عملیات خیلی بزرگ است")
+        with dbmod.connect() as conn:
+            session_row, who = board_auth(conn, request, session_id, body)
+            if session_row["status"] != "open":
+                raise HTTPException(409, "جلسه «باز» نیست")
+            count = conn.execute("SELECT count(*) FROM board_ops WHERE session_id=?",
+                                 (session_id,)).fetchone()[0]
+            if count >= MAX_BOARD_OPS:
+                raise HTTPException(429, "تخته بیش از حد اجازه پر شده است؛ دبیر آن را پاک کند")
+            conn.execute("INSERT OR IGNORE INTO board_ops(session_id, op_id, author, op) VALUES (?,?,?,?)",
+                         (session_id, op_id, who["name"], raw))
+            conn.commit()
+        return {"ok": True}
+
+    @app.post("/api/sessions/{session_id}/board/clear")
+    async def board_clear(request: Request, session_id: int):
+        body = await request.json()
+        with dbmod.connect() as conn:
+            session_row, who = board_auth(conn, request, session_id, body)
+            if not who["is_teacher"]:
+                raise HTTPException(403, "فقط دبیر می‌تواند تخته را پاک کند")
+            if session_row["status"] != "open":
+                raise HTTPException(409, "جلسه «باز» نیست")
+            conn.execute("DELETE FROM board_ops WHERE session_id=?", (session_id,))
+            op_id = str(body.get("op_id") or "").strip()[:64] or ("clear-" + secrets.token_hex(8))
+            op = {"t": "clear", "id": op_id}
+            conn.execute("INSERT INTO board_ops(session_id, op_id, author, op) VALUES (?,?,?,?)",
+                         (session_id, op["id"], who["name"], json.dumps(op, ensure_ascii=False)))
+            conn.commit()
+        return {"ok": True, "op": op}
+
+    @app.post("/api/sessions/{session_id}/board/state")
+    async def board_state(request: Request, session_id: int):
+        body = await request.json()
+        with dbmod.connect() as conn:
+            session_row, who = board_auth(conn, request, session_id, body)
+            if not who["is_teacher"]:
+                raise HTTPException(403, "فقط دبیر می‌تواند وضعیت تخته را تغییر دهد")
+            open_flag = 1 if body.get("open") else 0
+            conn.execute("UPDATE sessions SET board_open=? WHERE id=?", (open_flag, session_id))
+            conn.commit()
+        return {"ok": True, "open": bool(open_flag)}
+
     # ---------- ورود دانش‌آموز با لینک اختصاصی ----------
     def resolve_student_entry(conn, token: str):
         row = conn.execute("""
@@ -441,12 +570,18 @@ def create_app() -> FastAPI:
                 ON CONFLICT(session_id, student_id) DO UPDATE SET last_heartbeat=excluded.last_heartbeat""",
                 (session_row["id"], entry["student_id"], now, now))
             conn.commit()
+            active = conn.execute(
+                "SELECT count(*) FROM attendance WHERE session_id=? AND left_at IS NULL",
+                (session_row["id"],)).fetchone()[0]
+            # چند نفر اول اتاق اجازه‌ی انتشار تصویر/صدا دارند؛ بقیه فقط تماشا می‌کنند (بار سرور پایین می‌ماند)
+            can_publish = active <= MAX_PUBLISHERS
             room = session_row["room_name"]
         livekit_token = livekit_hub.mint_token(room, f"student-{entry['student_id']}", entry["full_name"],
-                                                can_publish=True)
+                                                can_publish=can_publish)
         return {"livekit_url": livekit_hub.public_url(), "token": livekit_token,
                 "room": room, "session_id": session_row["id"],
-                "student_name": entry["full_name"], "class_title": entry["class_title"]}
+                "student_name": entry["full_name"], "class_title": entry["class_title"],
+                "can_publish": can_publish}
 
     @app.post("/api/student/heartbeat")
     async def student_heartbeat(request: Request):
@@ -491,7 +626,7 @@ def create_app() -> FastAPI:
             candidate = dist / full_path
             if full_path and candidate.is_file():
                 return FileResponse(candidate)
-            return FileResponse(dist / "index.html")
+            return FileResponse(dist / "index.html", headers={"Cache-Control": "no-cache"})
 
     return app
 

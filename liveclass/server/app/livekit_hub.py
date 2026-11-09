@@ -48,12 +48,21 @@ async def _with_room(fn):
         await lkapi.aclose()
 
 
+def _room_max_participants() -> int:
+    try:
+        return int(os.environ.get("LIVECLASS_ROOM_MAX_PARTICIPANTS", "200"))
+    except ValueError:
+        return 200
+
+
 async def create_room(room_name: str) -> None:
     if _mock():
         _MOCK_ROOMS.setdefault(room_name, [])
         return None
     async def go(room):
-        return await room.create_room(lk.CreateRoomRequest(name=room_name))
+        # max_participants جلوی اتاق‌های بی‌نهایت را می‌گیرد — همان نقش max_user_count_in_room در PersianMeet
+        return await room.create_room(lk.CreateRoomRequest(
+            name=room_name, max_participants=_room_max_participants()))
     await _with_room(go)
 
 

@@ -15,6 +15,7 @@ onMounted(async () => {
       token, session_id: data.session_id, room: data.room,
       livekit_url: data.livekit_url, livekit_token: data.token,
       student_name: data.student_name, class_title: data.class_title,
+      can_publish: data.can_publish !== false,
     }))
     location.hash = '#/room/student'
   } catch (e) {
