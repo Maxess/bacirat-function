@@ -137,7 +137,7 @@ if command -v nginx >/dev/null; then
 server {
     listen 80;
     server_name ${DOMAIN:-_};
-    client_max_body_size 10m;
+    client_max_body_size 30m;  # PDF تا ۲۵MB
     location / {
         proxy_pass http://127.0.0.1:8200;
         proxy_set_header Host \$host;
