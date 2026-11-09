@@ -63,6 +63,28 @@ ufw status | grep -E '50000|443|80|7881'      # قوانین فایروال
 
 سپس از مرورگر: ورود ادمین → ساخت یک کلاس → اضافه‌کردن دانش‌آموز → شروع کلاس → بازکردن لینک دانش‌آموز در یک مرورگر دیگر → ویدیو/صدا/چت/تخته/PDF.
 
+## ۳٫۵) HTTPS خودکار (auto-ssl) — معادل auto_ssl پرشین‌مییت
+
+اگر نصب را با `--domain` اجرا کرده باشید، این مراحل خودکار انجام می‌شوند؛ این بخش برای مواردی است که نصب بدون دامنه انجام شده یا بعداً دامنه اضافه می‌کنید.
+
+```bash
+sudo DOMAIN=class.example.com LIVEKIT_DOMAIN=livekit.class.example.com \
+  ./scripts/auto-ssl.sh
+```
+
+چه می‌کند (idempotent — هر بار اجرا کنید مشکلی ندارد):
+1. پیکربندی موقت HTTP برای چالش ACME (webroot) ← ری‌لود nginx
+2. صدور (یا استفاده‌ی مجدد از) گواهی Let's Encrypt برای اپ و زیردامنه‌ی LiveKit
+3. پیکربندی نهایی nginx: ریدایرکت ۸۰→۴۴۳، HSTS، هدرهای امنیتی، `client_max_body_size 30m` (PDF)، WebSocket برای LiveKit
+4. تمدید خودکار: `certbot.timer` + deploy-hook که بعد از هر تمدید nginx را ری‌لود می‌کند
+5. ویرایش `/etc/liveclass/liveclass.env` (با بکاپ): `LIVECLASS_SECURE_COOKIES=1` و `LIVECLASS_LIVEKIT_PUBLIC_URL=wss://livekit.class.example.com` ← ری‌استارت سرویس
+6. بررسی نهایی و نمایش تاریخ انقضای گواهی
+
+نکات صادقانه:
+- نیازمند DNS صحیح و پورت‌های ۸۰/۴۴۳ باز است؛ بدون آن certbot شکست می‌خورد (اسکریپت خطا می‌دهد ولی اپ را خراب نمی‌کند).
+- برای تست بدون مصرف سهمیه‌ی Let's Encrypt: `STAGED=1 DOMAIN=… ./scripts/auto-ssl.sh`.
+- این معماری «auto_ssl داخلی باینری پرشین‌مییت» نیست؛ معادل عملی آن روی پشته‌ی ما (nginx + certbot) است و همان نتیجه را می‌دهد: HTTPS معتبر + تمدید خودکار بدون دخالت شما.
+
 ## ۴) کارهای بعد از نصب (توصیه‌شده)
 
 ```bash
@@ -126,7 +148,7 @@ sudo systemctl restart liveclass livekit
 | تصویر یخ می‌زند ولی صدا هست | UDP بسته است | بازه‌ی ۵۰۰۰۰–۶۰۰۰۰/udp در ufw **و** فایروال ابری |
 | آپلود PDF با خطای ۴۱۳ | `client_max_body_size` قدیمی | باید `30m` باشد (در نسخه‌های جدید اسکریپت هست؛ `nginx -t && systemctl reload nginx`) |
 | ضبط کار نمی‌کند (۵۰۳) | Egress یا `LIVECLASS_EGRESS_ENABLE=1` نیست | بخش ۴ را انجام دهید؛ `docker ps` باید `liveclass-egress` را نشان دهد |
-| گواهی TLS نگرفت | DNS هنوز propagate نشده یا ۸۰ بسته است | رکورد DNS و پورت ۸۰ را چک و `certbot --nginx -d …` را دوباره بزنید |
+| گواهی TLS نگرفت | DNS هنوز propagate نشده یا ۸۰ بسته است | رکورد DNS/پورت ۸۰ را چک و `sudo DOMAIN=… ./scripts/auto-ssl.sh` را دوباره بزنید |
 
 ## ۸) حذف
 

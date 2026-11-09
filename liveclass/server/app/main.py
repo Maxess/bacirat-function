@@ -29,6 +29,12 @@ from .security import hash_password, verify_password, encode_session, decode_ses
 
 COOKIE = "lc_session"
 SESSION_COOKIE_MAX_AGE = 12 * 3600
+
+
+def _secure_cookies() -> bool:
+    # با اجرای auto-ssl.sh روی سرور، این مقدار در liveclass.env برابر 1 می‌شود
+    return os.environ.get("LIVECLASS_SECURE_COOKIES") == "1"
+
 HEARTBEAT_GRACE_SECONDS = 75
 # سقف ناشران (دوربین/میکروفون) برای هر جلسه — فراتر از آن دانش‌آموزها فقط تماشا می‌کنند (بهینه برای سرور ضعیف)
 try:
@@ -220,13 +226,14 @@ def create_app() -> FastAPI:
         token = encode_session(row["id"], row["role"])
         resp = JSONResponse({"user": {"id": row["id"], "username": row["username"],
                                        "full_name": row["full_name"], "role": row["role"]}})
-        resp.set_cookie(COOKIE, token, max_age=SESSION_COOKIE_MAX_AGE, httponly=True, samesite="lax")
+        resp.set_cookie(COOKIE, token, max_age=SESSION_COOKIE_MAX_AGE, httponly=True,
+                        samesite="lax", secure=_secure_cookies())
         return resp
 
     @app.post("/api/auth/logout")
     async def logout():
         resp = JSONResponse({"ok": True})
-        resp.delete_cookie(COOKIE)
+        resp.delete_cookie(COOKIE, secure=_secure_cookies())
         return resp
 
     @app.get("/api/me")

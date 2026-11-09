@@ -87,8 +87,20 @@ sudo DOMAIN=class.example.com LIVEKIT_DOMAIN=livekit.class.example.com ./scripts
 5. نوشتن `/etc/liveclass/liveclass.env` (سِکرت‌ها تصادفی)، سرویس `liveclass.service`، nginx و گواهی **Let's Encrypt خودکار**
 6. تنظیم فایروال (۸۰/۴۴۳/۷۸۸۱ + بازه‌ی UDP مدیا)
 
+### HTTPS خودکار (معادل auto_ssl پرشین‌مییت)
+
+`scripts/auto-ssl.sh` کل چرخه‌ی HTTPS را خودکار و idempotent انجام می‌دهد: چالش ACME (webroot) ← صدور گواهی Let's Encrypt برای `DOMAIN` و `livekit.DOMAIN` ← پیکربندی nginx با HTTP→HTTPS، HSTS، WebSocket برای LiveKit ← فعال‌سازی **تمدید خودکار** (`certbot.timer` + deploy-hook ری‌لود nginx) ← تنظیم `LIVECLASS_SECURE_COOKIES=1` و `LIVECLASS_LIVEKIT_PUBLIC_URL=wss://…` در `liveclass.env` و ری‌استارت سرویس.
+
+```bash
+sudo DOMAIN=class.example.com ./scripts/auto-ssl.sh                 # صدور/تکمیل HTTPS
+sudo LETSENCRYPT_EMAIL=me@example.com DOMAIN=class.example.com ./scripts/auto-ssl.sh
+sudo STAGED=1 DOMAIN=class.example.com ./scripts/auto-ssl.sh        # تست با staging (بدون مصرف سهمیه)
+```
+
+پیش‌نیاز: رکوردهای DNS (A) هر دو دامنه به سرور اشاره کنند و پورت‌های ۸۰/۴۴۳ باز باشند. نصب یک‌دستوری (`install-liveclass.sh`) در صورت دادن `--domain` خودش این را صدا می‌زند.
+
 بدون دامنه (فقط تست محلی/شبکه‌ی داخلی): `sudo ./scripts/install-liveclass.sh`
-هشدار: **دوربین و میکروفون فقط در HTTPS یا localhost کار می‌کنند**؛ برای استفاده‌ی واقعی حتماً `--domain` بدهید.
+هشدار: **دوربین و میکروفون فقط در HTTPS یا localhost کار می‌کنند**؛ برای استفاده‌ی واقعی حتماً دامنه بدهید یا بعد از نصب auto-ssl را اجرا کنید.
 
 به‌روزرسانی: `sudo ./scripts/update-liveclass.sh` (بکاپ خودکار قبل از آپدیت)
 بکاپ: `sudo ./scripts/backup-liveclass.sh` — حذف کامل: `sudo ./scripts/uninstall-liveclass.sh`
@@ -109,6 +121,7 @@ sudo DOMAIN=class.example.com LIVEKIT_DOMAIN=livekit.class.example.com ./scripts
 | `LIVECLASS_RECORDINGS_DIR` | `server/data/recordings/` | پوشه‌ی ذخیره‌ی فایل‌های MP4 ضبط |
 | `LIVECLASS_PDF_DIR` | `server/data/pdf/` | پوشه‌ی کتاب‌های PDF بارگذاری‌شده |
 | `LIVECLASS_MAX_PDF_MB` | `25` | سقف حجم PDF |
+| `LIVECLASS_SECURE_COOKIES` | خاموش | `1` = کوکی سِشن فقط روی HTTPS (با اجرای auto-ssl خودکار می‌شود) |
 
 ## ضبط جلسه (اختیاری — پیش‌فرض خاموش)
 
@@ -131,6 +144,7 @@ sudo ./scripts/install-livekit.sh --with-egress
 
 ## نکات امنیتی
 
+- HTTPS و secure cookie: بعد از اجرای `auto-ssl.sh`، کوکی سِشن با پرچم `Secure` ست می‌شود؛ روی HTTP فقط برای تست محلی کار می‌کند.
 - `admin` اولیه را با رمز قوی بسازید؛ سپس از «⚙️ تنظیمات › تغییر رمز» رمز را عوض کنید.
 - `livekit.yaml` و `egress.yaml` شامل سِکرت‌هاست — `chmod 600`.
 - توکن ورود دانش‌آموزها تصادفی ۲۴ بایتی است؛ لینک‌ها را خصوصی نگه دارید.

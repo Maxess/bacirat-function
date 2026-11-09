@@ -128,11 +128,9 @@ systemctl daemon-reload
 systemctl enable --now liveclass.service
 ok "سرویس liveclass بالا است (status: $(systemctl is-active liveclass.service))."
 
-# ---------- nginx + TLS ----------
+# ---------- nginx + HTTPS خودکار (auto-ssl) ----------
 if command -v nginx >/dev/null; then
-  log "نوشتن پیکربندی nginx…"
-  APP_SERVER="${DOMAIN:-_}"
-  LK_SERVER="${LIVEKIT_DOMAIN:-_}"
+  log "پیکربندی اولیه‌ی nginx (فاز HTTP)…"
   cat > /etc/nginx/sites-available/liveclass.conf <<NGINX
 server {
     listen 80;
@@ -146,7 +144,7 @@ server {
     }
 }
 NGINX
-  if [ -n "$DOMAIN" ]; then
+  if [ -n "$LIVEKIT_DOMAIN" ]; then
     cat >> /etc/nginx/sites-available/liveclass.conf <<NGINX
 server {
     listen 80;
@@ -165,12 +163,16 @@ NGINX
   ln -sf /etc/nginx/sites-available/liveclass.conf /etc/nginx/sites-enabled/liveclass.conf
   rm -f /etc/nginx/sites-enabled/default
   nginx -t && systemctl reload nginx
-  ok "nginx پیکربندی شد."
+  ok "nginx پیکربندی شد (HTTP)."
+
   if [ -n "$DOMAIN" ]; then
-    log "دریافت گواهی TLS از Let's Encrypt…"
-    certbot --nginx --non-interactive --agree-tos --register-unsafely-without-email \
-      -d "$DOMAIN" -d "$LIVEKIT_DOMAIN" \
-      || log "هشدار: certbot ناموفق بود — دستی اجرا کنید: certbot --nginx -d $DOMAIN -d $LIVEKIT_DOMAIN"
+    log "صدور گواهی و فعال‌سازی HTTPS (auto-ssl)…"
+    if ! DOMAIN="$DOMAIN" LIVEKIT_DOMAIN="$LIVEKIT_DOMAIN" bash "$SCRIPT_DIR/auto-ssl.sh"; then
+      log "هشدار: auto-ssl کامل نشد. بعد از رفع DNS/فایروال دوباره بزنید:"
+      log "  sudo DOMAIN=$DOMAIN LIVEKIT_DOMAIN=$LIVEKIT_DOMAIN $SCRIPT_DIR/auto-ssl.sh"
+    fi
+  else
+    log "دامنه داده نشد — HTTPS فعال نشد؛ دوربین/میکروفون فقط روی localhost کار می‌کند."
   fi
 fi
 
