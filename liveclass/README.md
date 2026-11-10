@@ -73,18 +73,13 @@ LIVECLASS_LIVEKIT_MOCK=1 .venv/bin/python server/run.py serve --port 8200
 
 ## نصب روی سرور — یک دستور (مثل نصب PersianMeet)
 
-> ⚠️ ریپوی GitHub **خصوصی** است؛ لینک دانلود عمومی (raw/jsDelivr) ۴۰۴ می‌دهد. یکی از این راه‌ها:
-
+**دانلود مستقیم پکیج نصب از ریپوی GitHub** (ریپو عمومی است — بدون احراز هویت):
 ```bash
-# راه ۱ — انتقال zip از کامپیوتر خودتان (ساده‌ترین)
-scp liveclass-install.zip root@<IP-سرور>:/root/
-ssh root@<IP-سرور> && unzip -o /root/liveclass-install.zip && cd /root/liveclass
-sudo DOMAIN=class.example.com LIVEKIT_DOMAIN=livekit.class.example.com ./scripts/install-liveclass.sh
-
-# راه ۲ — با git روی سرور
-git clone https://github.com/Maxess/bacirat-function.git ~/bacirat-function && cd ~/bacirat-function/liveclass
+curl -fL -o liveclass-install.zip https://raw.githubusercontent.com/Maxess/bacirat-function/arena/977de953-bacirat-function/liveclass-install.zip
+unzip -o liveclass-install.zip && cd liveclass
 sudo DOMAIN=class.example.com LIVEKIT_DOMAIN=livekit.class.example.com ./scripts/install-liveclass.sh
 ```
+> بعد از merge شدن شاخه به main آدرس دائمی می‌شود: `https://raw.githubusercontent.com/Maxess/bacirat-function/main/liveclass-install.zip`
 
 همین. اسکریپت همه‌چیز را انجام می‌دهد:
 

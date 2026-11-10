@@ -18,15 +18,13 @@
 
 ## ۱) دریافت کد
 
-### راه الف — انتقال پکیج zip از کامپیوتر شما (ساده‌ترین — ریپو خصوصی است)
+### راه الف — دانلود مستقیم از GitHub (ریپو عمومی است)
 ```bash
-# روی کامپیوتر خودتان (PowerShell در ویندوز):
-scp liveclass-install.zip root@<IP-سرور>:/root/
-# روی سرور:
-apt-get update && apt-get install -y unzip
-unzip -o /root/liveclass-install.zip && cd /root/liveclass
+sudo apt-get update && sudo apt-get install -y curl unzip
+curl -fL -o liveclass-install.zip https://raw.githubusercontent.com/Maxess/bacirat-function/arena/977de953-bacirat-function/liveclass-install.zip
+unzip -o liveclass-install.zip && cd liveclass
 ```
-> ریپو خصوصی است؛ لینک‌های عمومی GitHub (raw…) ۴۰۴ می‌دهند — از scp/git استفاده کنید.
+> بعد از merge شدن شاخه به main آدرس دائمی می‌شود: `https://raw.githubusercontent.com/Maxess/bacirat-function/main/liveclass-install.zip`
 
 ### راه ب — با git
 ```bash

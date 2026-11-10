@@ -38,10 +38,11 @@
 (FastAPI + SQLite + Vue 3 + LiveKit — سورس کامل، بدون باینری فروشنده): ویدیو، تخته‌ی تعاملی، PDF روی تخته،
 ضبط جلسه، کاربران/مهمان با دسترسی دبیر، بکاپ کامل، HTTPS خودکار.
 
-**نصب مستقیم روی سرور با یک دستور** (اوبونتو/دبیان؛ ریپو خصوصی است):
+**نصب مستقیم روی سرور با یک دستور** (اوبونتو/دبیان — ریپو عمومی است):
 ```bash
-scp liveclass-install.zip root@<سرور>:/root/
-ssh root@<سرور> "unzip -o /root/liveclass-install.zip && cd /root/liveclass && sudo DOMAIN=class.example.com LIVEKIT_DOMAIN=livekit.class.example.com ./scripts/install-liveclass.sh"
+curl -fL -o liveclass-install.zip https://raw.githubusercontent.com/Maxess/bacirat-function/arena/977de953-bacirat-function/liveclass-install.zip
+unzip liveclass-install.zip && cd liveclass
+sudo DOMAIN=class.example.com LIVEKIT_DOMAIN=livekit.class.example.com ./scripts/install-liveclass.sh
 ```
 فایل zip نصب در ریشه‌ی ریپو هست (`liveclass-install.zip`). جزئیات: [`liveclass/README.md`](liveclass/README.md) — راهنمای نصب روی سرور: [`liveclass/docs/INSTALL-SERVER.md`](liveclass/docs/INSTALL-SERVER.md)
 
