@@ -38,6 +38,13 @@ done
 [ "$(id -u)" -ne 0 ] && die "با root اجرا کنید: sudo $0"
 command -v apt-get >/dev/null || die "فقط Ubuntu/Debian پشتیبانی می‌شود."
 
+case "$DOMAIN" in
+  *://*|*/) die "DOMAIN باید فقط نام هاست باشد، بدون https:// یا اسلش آخر. مثال: DOMAIN=class.example.com" ;;
+esac
+case "$LIVEKIT_DOMAIN" in
+  *://*|*/) die "LIVEKIT_DOMAIN باید فقط نام هاست باشد، بدون https:// یا اسلش آخر. مثال: LIVEKIT_DOMAIN=livekit.class.example.com" ;;
+esac
+
 if [ -n "$DOMAIN" ] && [ -z "$LIVEKIT_DOMAIN" ]; then
   LIVEKIT_DOMAIN="livekit.${DOMAIN}"     # مثلاً livekit.class.example.com
 fi
@@ -65,8 +72,16 @@ ok "فایل‌ها کپی شدند."
 # ---------- محیط مجازی پایتون ----------
 log "ساخت venv و نصب requirements…"
 python3 -m venv "$INSTALL_DIR/.venv"
-"$INSTALL_DIR/.venv/bin/pip" install -q --upgrade pip
-"$INSTALL_DIR/.venv/bin/pip" install -q -r "$INSTALL_DIR/server/requirements.txt"
+PIP_ARGS=(--default-timeout 180)
+if [ -d "$SRC_DIR/wheelhouse" ]; then
+  log "نصب آفلاین از wheelhouse محلی (نیازی به PyPI نیست)."
+  PIP_ARGS+=(--no-index --find-links "$SRC_DIR/wheelhouse")
+elif [ -n "${PIP_INDEX_URL:-}" ]; then
+  log "استفاده از ایندکس PyPI سفارشی: $PIP_INDEX_URL"
+  PIP_ARGS+=(-i "$PIP_INDEX_URL")
+fi
+"$INSTALL_DIR/.venv/bin/pip" install -q "${PIP_ARGS[@]}" --upgrade pip || log "هشدار: ارتقای pip رد شد (مشکلی ندارد)."
+"$INSTALL_DIR/.venv/bin/pip" install -q "${PIP_ARGS[@]}" -r "$INSTALL_DIR/server/requirements.txt"
 ok "venv آماده شد."
 
 # ---------- ادمین اولیه ----------

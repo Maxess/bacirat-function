@@ -24,6 +24,9 @@ sudo apt-get update && sudo apt-get install -y curl unzip
 curl -fL -o liveclass-install.zip https://raw.githubusercontent.com/Maxess/bacirat-function/arena/977de953-bacirat-function/liveclass-install.zip
 unzip -o liveclass-install.zip && cd liveclass
 ```
+پکیج شامل **wheelhouse آفلاین** پایتون است؛ `pip` از آن نصب می‌شود و به PyPI نیاز ندارد
+(برای سرورهایی که به files.pythonhosted.org دسترسی ندارند). برای ایندکس سفارشی:
+`PIP_INDEX_URL=https://mirror… ./scripts/install-liveclass.sh`
 > بعد از merge شدن شاخه به main آدرس دائمی می‌شود: `https://raw.githubusercontent.com/Maxess/bacirat-function/main/liveclass-install.zip`
 
 ### راه ب — با git
@@ -34,6 +37,8 @@ cd ~/bacirat-function/liveclass
 ```
 
 > اگر فقط `liveclass/` را می‌خواهید: همان پوشه را کپی کنید؛ بقیه‌ی ریپو (persianmeet و …) لازم نیست.
+
+> ⚠️ `DOMAIN` و `LIVEKIT_DOMAIN` فقط **نام هاست** می‌گیرند: `class.example.com` نه `https://class.example.com/`.
 
 ## ۲) نصب یک‌دستوری (با دامنه — توصیه‌شده)
 

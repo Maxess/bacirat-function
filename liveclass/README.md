@@ -73,6 +73,8 @@ LIVECLASS_LIVEKIT_MOCK=1 .venv/bin/python server/run.py serve --port 8200
 
 ## نصب روی سرور — یک دستور (مثل نصب PersianMeet)
 
+> ⚠️ `DOMAIN`/`LIVEKIT_DOMAIN` فقط نام هاست: بدون `https://` و بدون اسلش آخر.
+
 **دانلود مستقیم پکیج نصب از ریپوی GitHub** (ریپو عمومی است — بدون احراز هویت):
 ```bash
 curl -fL -o liveclass-install.zip https://raw.githubusercontent.com/Maxess/bacirat-function/arena/977de953-bacirat-function/liveclass-install.zip

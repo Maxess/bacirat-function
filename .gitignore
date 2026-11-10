@@ -39,3 +39,6 @@ liveclass/.venv/
 liveclass/web/node_modules/
 liveclass/server/*.db
 liveclass/server/data/
+
+# wheelhouse نصب آفلاین (داخل zip هست؛ کامیت نمی‌شود)
+liveclass/wheelhouse/
