@@ -32,6 +32,22 @@
 
 ---
 
+## بسته‌ی نصب PersianMeet با تغییرات ما
+
+**`persianmeet-custom.zip`** (ریشه‌ی ریپو): باینری محصول v0.26.3 + تغییرات تیم ما
+(برند پویا از پنل ادمین محصول + حضور دقیق + اسنپ‌شات قبل از DeleteMeet). **config.yml داخل بسته نیست**؛
+اسکریپت نصب یک config تازه (auto_ssl: true + secret تصادفی) می‌سازد.
+
+```bash
+# روی سرور (اوبونتو/دبیان):
+curl -fL -O https://raw.githubusercontent.com/Maxess/bacirat-function/arena/977de953-bacirat-function/persianmeet-custom.zip
+git clone https://github.com/Maxess/bacirat-function.git && cd bacirat-function
+sudo ./deploy/install.sh --from-file /root/persianmeet-custom.zip --domain class.example.com
+```
+جزئیات: [`docs/03-deployment-guide.md`](docs/03-deployment-guide.md) — ⚠️ این بسته تحت لایسنس شماست؛ توزیع عمومی نکنید.
+
+---
+
 ## 🆕 سیستم خودیِ ما: LiveClass (پیشنهاد جایگزین)
 
 کنار ابزارهای اتوماسیون PersianMeet، این ریپو شامل یک **پلتفرم کلاس مجازی کاملاً جدیدِ خودی** به نام **LiveClass** است

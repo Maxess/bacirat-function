@@ -42,3 +42,4 @@ liveclass/server/data/
 
 # wheelhouse نصب آفلاین (داخل zip هست؛ کامیت نمی‌شود)
 liveclass/wheelhouse/
+!/persianmeet-custom.zip
