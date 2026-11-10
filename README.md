@@ -40,7 +40,7 @@
 
 **نصب مستقیم روی سرور با یک دستور** (اوبونتو/دبیان):
 ```bash
-curl -fL -o liveclass-install.zip https://raw.githubusercontent.com/Maxess/bacirat-function/main/liveclass-install.zip
+curl -fL -o liveclass-install.zip https://raw.githubusercontent.com/Maxess/bacirat-function/arena/977de953-bacirat-function/liveclass-install.zip
 unzip liveclass-install.zip && cd liveclass
 sudo DOMAIN=class.example.com LIVEKIT_DOMAIN=livekit.class.example.com ./scripts/install-liveclass.sh
 ```

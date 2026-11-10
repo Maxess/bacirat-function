@@ -21,10 +21,10 @@
 ### راه الف — دانلود پکیج آماده‌ی نصب از GitHub (بدون git)
 ```bash
 sudo apt-get update && sudo apt-get install -y curl unzip
-curl -fL -o liveclass-install.zip https://raw.githubusercontent.com/Maxess/bacirat-function/main/liveclass-install.zip
+curl -fL -o liveclass-install.zip https://raw.githubusercontent.com/Maxess/bacirat-function/arena/977de953-bacirat-function/liveclass-install.zip
 unzip -o liveclass-install.zip && cd liveclass
 ```
-> اگر روی شاخه‌ی نگه‌داری این فایل هستید، `main` را با همان نام شاخه عوض کنید.
+> بعد از merge شدن شاخه به main آدرس دائمی می‌شود: `https://raw.githubusercontent.com/Maxess/bacirat-function/main/liveclass-install.zip`
 
 ### راه ب — با git
 ```bash

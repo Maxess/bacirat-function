@@ -75,11 +75,11 @@ LIVECLASS_LIVEKIT_MOCK=1 .venv/bin/python server/run.py serve --port 8200
 
 **دانلود مستقیم پکیج نصب از ریپوی GitHub** (نیازی به git روی سرور نیست):
 ```bash
-curl -fL -o liveclass-install.zip https://raw.githubusercontent.com/Maxess/bacirat-function/main/liveclass-install.zip
+curl -fL -o liveclass-install.zip https://raw.githubusercontent.com/Maxess/bacirat-function/arena/977de953-bacirat-function/liveclass-install.zip
 unzip -o liveclass-install.zip && cd liveclass
 sudo DOMAIN=class.example.com LIVEKIT_DOMAIN=livekit.class.example.com ./scripts/install-liveclass.sh
 ```
-> تا قبل از merge شدن این شاخه، به‌جای `main` نام شاخه‌ی نگه‌داری را بگذارید.
+> بعد از merge شدن شاخه به main آدرس دائمی می‌شود: `https://raw.githubusercontent.com/Maxess/bacirat-function/main/liveclass-install.zip`
 
 یا با git:
 ```bash

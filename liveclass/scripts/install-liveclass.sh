@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # install-liveclass.sh — نصب یک‌دستوری LiveClass روی Ubuntu/Debian (مشابه نصب PersianMeet)
 # پکیج zip آماده‌ی نصب از ریپوی GitHub:
-#   curl -fL -O https://raw.githubusercontent.com/Maxess/bacirat-function/main/liveclass-install.zip
+#   curl -fL -O https://raw.githubusercontent.com/Maxess/bacirat-function/arena/977de953-bacirat-function/liveclass-install.zip
 #   unzip liveclass-install.zip && cd liveclass && sudo DOMAIN=… ./scripts/install-liveclass.sh
 #
 #   sudo ./scripts/install-liveclass.sh                          # نصب روی localhost/شبکه‌ی داخلی (بدون TLS)
