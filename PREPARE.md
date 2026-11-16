@@ -233,7 +233,45 @@ sudo /usr/local/go/bin/go version        # باید go1.24.13 را چاپ کند
 
 سپس دستورهای `ln -sf` و `export PATH` از بالا را اجرا کنید.
 
-راه دیگر (اگر GitHub هم در دسترس نیست): فایل را روی رایانهٔ خودتان از
+### اگر ترمینال، Paste چندخطی را به هم می‌ریزد
+
+برخی کنسول‌ها هنگام Paste چند خط، دستورها را با خروجیِ قبلی قاطی می‌کنند؛
+مثلاً `VER=1.24.13` به شکل `VER=1.24.x86_64` درمی‌آید و بعد `curl` خطای
+`404` می‌دهد (در حالی که خودِ نشانی درست است). اگر چنین است، این دو
+دستور **تک‌خطی** را یکی‌یکی اجرا کنید — هیچ متغیری ندارند:
+
+```sh
+sudo sh -c 'for u in https://go.dev/dl/go1.24.13.linux-amd64.tar.gz https://github.com/actions/go-versions/releases/download/1.24.13-21696107652/go-1.24.13-linux-x64.tar.gz; do echo "trying $u"; curl -fsSL --connect-timeout 20 -o /tmp/go.tgz "$u" && tar tzf /tmp/go.tgz >/dev/null 2>&1 && { echo OK; break; }; rm -f /tmp/go.tgz; done; ls -l /tmp/go.tgz'
+```
+
+```sh
+sudo sh -c 'set -e; T=$(mktemp -d); tar -C "$T" -xzf /tmp/go.tgz; G=$(find "$T" -type f -path "*/bin/go" | head -1); R=$(dirname "$(dirname "$G")"); rm -rf /usr/local/go; mv "$R" /usr/local/go; rm -rf "$T"; ln -sf /usr/local/go/bin/go /usr/local/bin/go; ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt; /usr/local/go/bin/go version'
+```
+
+دستور اول فقط دانلود می‌کند و اندازهٔ فایل را چاپ می‌کند (باید حدود ۷۰
+مگابایت باشد)؛ دستور دوم نصب می‌کند و نسخه را چاپ می‌کند. لینک‌های
+`/usr/local/bin` در مسیر پیش‌فرضِ همهٔ کاربران — و مهم‌تر از همه، در
+مسیر `sudo` — هستند، بنابراین بعد از این دو دستور هم `go version` و هم
+`sudo go version` باید `go1.24.13` را چاپ کنند. اگر هیچ منبعی کار نکند،
+`/tmp/go.tgz` ساخته نمی‌شود و `ls` پیام `No such file` می‌دهد.
+
+### راه دیگر: بستهٔ snap
+
+اگر snapd روی سرور فعال است، این راه از شبکهٔ Fastly دانلود می‌کند (نه
+از دامنه‌های گوگل):
+
+```sh
+sudo snap install go --classic --channel=1.24/stable
+sudo ln -sf /snap/bin/go /usr/local/bin/go
+go version
+```
+
+اگر کانال `1.24/stable` را نداشت، `snap info go` کانال‌های موجود را نشان
+می‌دهد؛ هر کانالی با نسخهٔ ۱.۲۴ یا بالاتر قابل قبول است.
+
+### راه آخر: انتقال دستی
+
+اگر هیچ‌کدام نشد، فایل را روی رایانهٔ خودتان از
 [go.dev/dl](https://go.dev/dl/) دانلود و منتقل کنید:
 
 ```sh
