@@ -1,0 +1,292 @@
+package natsservice
+
+import (
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/mynaparrot/plugnmeet-protocol/plugnmeet"
+	"github.com/nats-io/nats.go/jetstream"
+	log "github.com/sirupsen/logrus"
+)
+
+// Constants for bucket naming and user metadata keys
+const (
+	UserOnlineMaxPingDiff = time.Minute * 2
+
+	UserIdKey              = "id"
+	UserSidKey             = "sid"
+	UserNameKey            = "name"
+	UserRoomIdKey          = "room_id"
+	UserIsAdminKey         = "is_admin"
+	UserIsPresenterKey     = "is_presenter"
+	UserMetadataKey        = "metadata"
+	UserJoinedAt           = "joined_at"
+	UserReconnectedAt      = "reconnected_at"
+	UserDisconnectedAt     = "disconnected_at"
+	UserLastPingAt         = "last_ping_at"
+	UserStatusKey          = "status" // Note: This is different from RoomStatusKey
+	UserIsBlacklistedKey   = "is_blacklisted"
+	UserTurnCredentialsKey = "turn_credentials"
+	UserClientTypeKey      = "client_type" // persist client type for hybrid/web sessions
+
+	UserStatusAdded        = "added"
+	UserStatusOnline       = "online"
+	UserStatusDisconnected = "disconnected"
+	UserStatusOffline      = "offline"
+)
+
+// AddUser adds a new user to a room and stores their metadata in the consolidated bucket
+func (s *NatsService) AddUser(roomId, userId, name string, isAdmin, isPresenter bool, metadata *plugnmeet.UserMetadata, clientType plugnmeet.ClientType) error {
+	// Get the consolidated room bucket
+	kv, err := s.js.KeyValue(s.ctx, s.formatConsolidatedRoomBucket(roomId))
+	if err != nil {
+		// If the bucket doesn't exist, it means the room wasn't created properly.
+		return fmt.Errorf("failed to get consolidated room bucket: %w", err)
+	}
+
+	// Marshal metadata
+	mt, err := s.MarshalUserMetadata(metadata)
+	if err != nil {
+		return fmt.Errorf("failed to marshal metadata: %w", err)
+	}
+
+	// Prepare user data
+	data := map[string]string{
+		UserIdKey:              userId,
+		UserSidKey:             uuid.NewString(),
+		UserNameKey:            name,
+		UserRoomIdKey:          roomId,
+		UserIsAdminKey:         fmt.Sprintf("%v", isAdmin),
+		UserIsPresenterKey:     fmt.Sprintf("%v", isPresenter),
+		UserMetadataKey:        mt,
+		UserLastPingAt:         "0",
+		UserStatusKey:          UserStatusAdded,
+		UserIsBlacklistedKey:   "false",
+		UserTurnCredentialsKey: "",
+		UserClientTypeKey:      clientType.String(),
+	}
+
+	// Store user data in the key-value store using the user-specific prefix
+	for field, v := range data {
+		key := s.formatUserKey(userId, field)
+		rev, err := kv.PutString(s.ctx, key, v)
+		if err != nil {
+			return fmt.Errorf("failed to add user data to consolidated bucket for key %s: %w", field, err)
+		}
+		s.cs.setUserInfoCache(roomId, userId, field, v, rev)
+	}
+
+	// The watcher for user info is the same as the room watcher now.
+	return nil
+}
+
+// UpdateUserStatus updates the status of a user in a room
+func (s *NatsService) UpdateUserStatus(roomId, userId string, status string) error {
+	// Retrieve the consolidated room bucket
+	kv, err := s.js.KeyValue(s.ctx, s.formatConsolidatedRoomBucket(roomId))
+	if err != nil {
+		if errors.Is(err, jetstream.ErrBucketNotFound) {
+			return fmt.Errorf("no consolidated room bucket found with roomId: %s", roomId)
+		}
+		return err
+	}
+
+	// Update user status in the room bucket
+	rev, err := kv.PutString(s.ctx, s.formatUserKey(userId, UserStatusKey), status)
+	if err != nil {
+		return fmt.Errorf("failed to update user status: %w", err)
+	}
+	// Manually update the cache to avoid watch latency
+	s.cs.setUserInfoCache(roomId, userId, UserStatusKey, status, rev)
+
+	// Update user info based on status
+	now := fmt.Sprintf("%d", time.Now().UnixMilli())
+	switch status {
+	case UserStatusOnline:
+		// Check if user has joined before
+		joined, _ := kv.Get(s.ctx, s.formatUserKey(userId, UserJoinedAt))
+		if joined != nil && len(joined.Value()) > 0 {
+			rev, err := kv.PutString(s.ctx, s.formatUserKey(userId, UserReconnectedAt), now)
+			if err != nil {
+				return fmt.Errorf("failed to update reconnected time: %w", err)
+			}
+			// Manually update the cache
+			s.cs.setUserInfoCache(roomId, userId, UserReconnectedAt, now, rev)
+		} else {
+			rev, err := kv.PutString(s.ctx, s.formatUserKey(userId, UserJoinedAt), now)
+			if err != nil {
+				return fmt.Errorf("failed to update joined time: %w", err)
+			}
+			// Manually update the cache
+			s.cs.setUserInfoCache(roomId, userId, UserJoinedAt, now, rev)
+		}
+	case UserStatusDisconnected, UserStatusOffline:
+		rev, err := kv.PutString(s.ctx, s.formatUserKey(userId, UserDisconnectedAt), now)
+		if err != nil {
+			return fmt.Errorf("failed to update disconnected time: %w", err)
+		}
+		// Manually update the cache
+		s.cs.setUserInfoCache(roomId, userId, UserDisconnectedAt, now, rev)
+	}
+
+	return nil
+}
+
+// UpdateUserMetadata updates the metadata of a user
+func (s *NatsService) UpdateUserMetadata(roomId, userId string, metadata interface{}) (string, error) {
+	var mt *plugnmeet.UserMetadata
+	var err error
+
+	// Determine the type of metadata and unmarshal accordingly
+	switch v := metadata.(type) {
+	case string:
+		mt, err = s.UnmarshalUserMetadata(v)
+		if err != nil {
+			return "", fmt.Errorf("failed to unmarshal metadata: %w", err)
+		}
+	case plugnmeet.UserMetadata:
+		mt = &v
+	case *plugnmeet.UserMetadata:
+		mt = v
+	default:
+		return "", errors.New("invalid metadata data type")
+	}
+
+	// Marshal the updated metadata
+	marshal, err := s.MarshalUserMetadata(mt)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal metadata: %w", err)
+	}
+
+	// Update the user metadata in the key-value store
+	if err := s.UpdateUserKeyValue(roomId, userId, UserMetadataKey, marshal); err != nil {
+		return "", fmt.Errorf("failed to update user metadata: %w", err)
+	}
+
+	return marshal, nil
+}
+
+// DeleteUser marks a user as offline in the consolidated bucket.
+// Physical data deletion happens when the room bucket is deleted.
+func (s *NatsService) DeleteUser(roomId, userId string) {
+	_ = s.UpdateUserStatus(roomId, userId, UserStatusOffline)
+}
+
+// deleteAllUserConsumers deletes all NATS consumers associated with users in a room.
+// This function is intended for internal use during room cleanup.
+func (s *NatsService) deleteAllUserConsumers(roomId string) error {
+	kv, err := s.js.KeyValue(s.ctx, s.formatConsolidatedRoomBucket(roomId))
+	if err != nil {
+		if errors.Is(err, jetstream.ErrBucketNotFound) {
+			return nil // Room bucket already gone, nothing to do.
+		}
+		return err
+	}
+
+	// List all keys to find user-specific keys and extract user IDs.
+	keys, err := kv.ListKeys(s.ctx)
+	if err != nil {
+		return fmt.Errorf("failed to list keys for consumer deletion: %w", err)
+	}
+	defer keys.Stop()
+
+	deletedUsers := make(map[string]bool)
+	for key := range keys.Keys() {
+		if strings.HasPrefix(key, UserKeyPrefix) {
+			// parsing based on the "user_<userId>-FIELD_<field>" schema.
+			trimmed := strings.TrimPrefix(key, UserKeyPrefix)
+			parts := strings.SplitN(trimmed, UserKeyFieldPrefix, 2)
+
+			if len(parts) == 2 {
+				userId := parts[0]
+				if !deletedUsers[userId] {
+					s.DeleteConsumer(roomId, userId)
+					deletedUsers[userId] = true
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// UpdateUserKeyValue updates a specific key-value pair for a user
+func (s *NatsService) UpdateUserKeyValue(roomId, userId, key, val string) error {
+	// Retrieve the user info bucket
+	userKV, err := s.js.KeyValue(s.ctx, s.formatConsolidatedRoomBucket(roomId))
+	if err != nil {
+		if errors.Is(err, jetstream.ErrBucketNotFound) {
+			return fmt.Errorf("no consolidated room bucket found with roomId: %s", roomId)
+		}
+		return err
+	}
+
+	// Update the key-value pair in the user info bucket
+	rev, err := userKV.PutString(s.ctx, s.formatUserKey(userId, key), val)
+	if err != nil {
+		return fmt.Errorf("failed to update key-value pair: %w", err)
+	}
+	s.cs.setUserInfoCache(roomId, userId, key, val, rev)
+
+	return nil
+}
+
+// AddUserToBlockList sets the is_blacklisted flag for a user to true.
+func (s *NatsService) AddUserToBlockList(roomId, userId string) error {
+	// Get the consolidated room bucket
+	kv, err := s.js.KeyValue(s.ctx, s.formatConsolidatedRoomBucket(roomId))
+	if err != nil {
+		if errors.Is(err, jetstream.ErrBucketNotFound) {
+			return fmt.Errorf("no consolidated room bucket found with roomId: %s", roomId)
+		}
+		return err
+	}
+
+	// Directly set the blacklisted key to true. This will create the key if it doesn't exist.
+	rev, err := kv.PutString(s.ctx, s.formatUserKey(userId, UserIsBlacklistedKey), "true")
+	if err != nil {
+		return err
+	}
+	s.cs.setUserInfoCache(roomId, userId, UserIsBlacklistedKey, "true", rev)
+	return nil
+}
+
+func (s *NatsService) AddUserManuallyAndBroadcast(roomId, userId, name string, isAdmin, broadcast bool) (*plugnmeet.NatsKvUserInfo, error) {
+	mt := plugnmeet.UserMetadata{
+		IsAdmin:         isAdmin,
+		RecordWebcam:    new(false),
+		WaitForApproval: false,
+		LockSettings: &plugnmeet.LockSettings{
+			LockWebcam:     new(false),
+			LockMicrophone: new(false),
+		},
+	}
+	err := s.AddUser(roomId, userId, name, isAdmin, false, &mt, plugnmeet.ClientType_WEB)
+	if err != nil {
+		log.WithError(err).Errorln("failed to add ingress user to NATS")
+		return nil, err
+	}
+	if !broadcast {
+		return nil, nil
+	}
+
+	// Do proper user status update
+	err = s.UpdateUserStatus(roomId, userId, UserStatusOnline)
+	if err != nil {
+		return nil, err
+	}
+
+	userInfo, err := s.GetUserInfo(roomId, userId)
+	if err != nil {
+		return nil, err
+	}
+
+	err = s.BroadcastSystemEventToRoom(plugnmeet.NatsMsgServerToClientEvents_USER_JOINED, roomId, userInfo, nil)
+	if err != nil {
+		return nil, err
+	}
+	return userInfo, nil
+}

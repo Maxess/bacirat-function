@@ -1,0 +1,169 @@
+package models
+
+import (
+	"context"
+	"errors"
+	"strings"
+
+	"github.com/livekit/protocol/livekit"
+	"github.com/mynaparrot/plugnmeet-protocol/plugnmeet"
+	"github.com/mynaparrot/plugnmeet-protocol/utils"
+	"github.com/mynaparrot/plugnmeet-server/pkg/config"
+	"github.com/mynaparrot/plugnmeet-server/pkg/helpers"
+	"github.com/mynaparrot/plugnmeet-server/pkg/services/db"
+	livekitservice "github.com/mynaparrot/plugnmeet-server/pkg/services/livekit"
+	natsservice "github.com/mynaparrot/plugnmeet-server/pkg/services/nats"
+	"github.com/mynaparrot/plugnmeet-server/pkg/services/redis"
+	"github.com/sirupsen/logrus"
+	"go.uber.org/fx"
+)
+
+type WebhookModel struct {
+	ctx             context.Context
+	app             *config.AppConfig
+	ds              *dbservice.DatabaseService
+	rs              *redisservice.RedisService
+	lk              *livekitservice.LivekitService
+	rm              *RoomModel
+	analyticsModel  *AnalyticsModel
+	bm              *BreakoutRoomModel
+	nm              *NatsModel
+	webhookNotifier *helpers.WebhookNotifier
+	natsService     *natsservice.NatsService
+	logger          *logrus.Entry
+}
+
+type WebhookModelArgs struct {
+	fx.In
+	Ctx             context.Context
+	App             *config.AppConfig
+	Ds              *dbservice.DatabaseService
+	Rs              *redisservice.RedisService
+	NatsService     *natsservice.NatsService
+	Lk              *livekitservice.LivekitService
+	Rm              *RoomModel
+	AnalyticsModel  *AnalyticsModel
+	Bm              *BreakoutRoomModel
+	Nm              *NatsModel
+	WebhookNotifier *helpers.WebhookNotifier
+	Logger          *logrus.Logger
+}
+
+func NewWebhookModel(args WebhookModelArgs) *WebhookModel {
+	return &WebhookModel{
+		ctx:             args.Ctx,
+		app:             args.App,
+		ds:              args.Ds,
+		rs:              args.Rs,
+		lk:              args.Lk,
+		rm:              args.Rm,
+		analyticsModel:  args.AnalyticsModel,
+		bm:              args.Bm,
+		nm:              args.Nm,
+		webhookNotifier: args.WebhookNotifier,
+		natsService:     args.NatsService,
+		logger:          args.Logger.WithField("model", "webhook"),
+	}
+}
+
+func (m *WebhookModel) HandleWebhookEvents(e *livekit.WebhookEvent) {
+	switch e.GetEvent() {
+	case "room_started":
+		m.roomStarted(e)
+	case "room_finished":
+		m.roomFinished(e)
+
+	case "participant_joined":
+		if _, isTwin := nativeTwinPrimaryId(e.Participant); isTwin {
+			m.logger.Infof("skipping participant_joined webhook for native twin %s", e.Participant.GetIdentity())
+			return
+		}
+		m.participantJoined(e)
+	case "participant_left":
+		if _, isTwin := nativeTwinPrimaryId(e.Participant); isTwin {
+			m.logger.Infof("skipping participant_left webhook for native twin %s", e.Participant.GetIdentity())
+			return
+		}
+		m.participantLeft(e)
+
+	case "track_published":
+		m.trackPublished(e)
+	case "track_unpublished":
+		m.trackUnpublished(e)
+	}
+}
+
+func (m *WebhookModel) sendToWebhookNotifier(event *livekit.WebhookEvent) {
+	if event == nil || m.webhookNotifier == nil {
+		return
+	}
+	if event.Room == nil {
+		m.logger.Errorln("empty room info for event: ", event.GetEvent())
+		return
+	}
+
+	msg := utils.PrepareCommonWebhookNotifyEvent(event)
+	err := m.webhookNotifier.SendWebhookEvent(msg)
+	if err != nil {
+		m.logger.Errorln(err)
+	}
+}
+
+func (m *WebhookModel) sendCustomTypeWebhook(event *livekit.WebhookEvent, eventName string) {
+	if event == nil || m.webhookNotifier == nil {
+		return
+	}
+	if event.Room == nil {
+		m.logger.Errorln("empty room info for event: ", event.GetEvent())
+		return
+	}
+
+	msg := utils.PrepareCommonWebhookNotifyEvent(event)
+	msg.Event = &eventName
+	err := m.webhookNotifier.SendWebhookEvent(msg)
+	if err != nil {
+		m.logger.Errorln(err)
+	}
+}
+
+func (m *WebhookModel) isRequireManualTrigger(userId string) bool {
+	return strings.HasPrefix(userId, config.IngressUserIdPrefix) || strings.HasPrefix(userId, config.TTSAgentUserIdPrefix) || strings.HasPrefix(userId, config.SipUserIdPrefix)
+}
+
+// nativeTwinPrimaryId reports whether the given LiveKit participant is a hybrid
+// "native twin" (identity "[userID]-native") and returns the primary user id.
+// Detection prefers the `original_user_id` participant attribute (set at token
+// mint time); the twin identity suffix is the fallback.
+func nativeTwinPrimaryId(p *livekit.ParticipantInfo) (string, bool) {
+	if p == nil {
+		return "", false
+	}
+	if p.Attributes != nil {
+		if orig := p.Attributes["original_user_id"]; orig != "" {
+			return orig, true
+		}
+	}
+	if strings.HasSuffix(p.Identity, config.NativeTwinIdentitySuffix) {
+		return strings.TrimSuffix(p.Identity, config.NativeTwinIdentitySuffix), true
+	}
+	return "", false
+}
+
+// getRoomInfoFromNatsOrRedis attempts to retrieve room info from NATS,
+// falling back to Redis if NATS fails or returns nil.
+func (m *WebhookModel) getRoomInfoFromNatsOrRedis(roomId string, log *logrus.Entry) (*plugnmeet.NatsKvRoomInfo, error) {
+	rInfo, err := m.natsService.GetRoomInfo(roomId)
+	if err != nil || rInfo == nil {
+		if err != nil {
+			log.WithError(err).Warnln("failed to get room info from NATS, falling back to redis")
+		}
+
+		// Fallback to redis to retrieve room info
+		rInfo = m.rs.GetTemporaryRoomData(roomId)
+		if rInfo == nil {
+			return nil, errors.New("room not found in NATS or Redis")
+		}
+		rInfo.Status = natsservice.RoomStatusEnded
+	}
+	return rInfo, nil
+}

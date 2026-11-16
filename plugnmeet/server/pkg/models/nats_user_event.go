@@ -1,0 +1,301 @@
+package models
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/mynaparrot/plugnmeet-protocol/auth"
+	"github.com/mynaparrot/plugnmeet-protocol/plugnmeet"
+	"github.com/mynaparrot/plugnmeet-server/pkg/config"
+	natsservice "github.com/mynaparrot/plugnmeet-server/pkg/services/nats"
+	"github.com/sirupsen/logrus"
+	"google.golang.org/protobuf/encoding/protojson"
+)
+
+const usersListChunkSize = 50
+
+func (m *NatsModel) HandleInitialData(roomId, userId string) {
+	log := m.logger.WithFields(logrus.Fields{
+		"roomId": roomId,
+		"userId": userId,
+		"method": "HandleInitialData",
+	})
+
+	// send room info
+	rInfo, err := m.natsService.GetRoomInfo(roomId)
+	if err != nil {
+		log.WithError(err).Errorln("error getting room info")
+		_ = m.natsService.NotifyErrorMsg(roomId, err.Error(), &userId)
+		return
+	}
+	if rInfo == nil {
+		log.Errorln("room information not found")
+		_ = m.natsService.NotifyErrorMsg(roomId, "room information not found", &userId)
+		return
+	}
+
+	// send this user's info
+	userInfo, err := m.natsService.GetUserInfo(roomId, userId)
+	if err != nil {
+		log.WithError(err).Errorln("error getting user info")
+		_ = m.natsService.NotifyErrorMsg(roomId, err.Error(), &userId)
+		return
+	}
+	if userInfo == nil {
+		log.Errorln("user info not found")
+		_ = m.natsService.NotifyErrorMsg(roomId, "no user found", &userId)
+		return
+	}
+
+	initial := &plugnmeet.NatsInitialData{
+		Room:      rInfo,
+		LocalUser: userInfo,
+	}
+
+	// send important info first
+	err = m.natsService.BroadcastSystemEventToRoom(plugnmeet.NatsMsgServerToClientEvents_RES_INITIAL_DATA, roomId, initial, &userId)
+	if err != nil {
+		log.WithError(err).Warnln("error sending RES_INITIAL_DATA event")
+	}
+}
+
+func (m *NatsModel) HandleSendUsersList(roomId, userId string, event *plugnmeet.NatsMsgServerToClientEvents) {
+	log := m.logger.WithFields(logrus.Fields{
+		"roomId": roomId,
+		"userId": userId,
+		"method": "HandleSendUsersList",
+	})
+
+	if event == nil {
+		event = new(plugnmeet.NatsMsgServerToClientEvents_RES_JOINED_USERS_LIST)
+	}
+
+	// lightweight periodic sync: ids only, always small enough for a single message
+	if *event == plugnmeet.NatsMsgServerToClientEvents_RESP_ONLINE_USERS_LIST {
+		ids, err := m.natsService.GetOnlineUsersId(roomId)
+		if err != nil {
+			log.WithError(err).Errorln("failed to get online users ids")
+			return
+		}
+		// hidden users (recorder/RTMP bots, internal ids like TTS agents) are not
+		// real participants, but they may legitimately be in clients' stores while
+		// active (e.g. a TTS agent publishing audio). They must never trigger a
+		// resync (not in ids) nor be ghost-removed by client reconcile (listed in
+		// hiddenIds so clients skip them); their cleanup is handled exclusively by
+		// the webhook-driven USER_DISCONNECTED / USER_OFFLINE broadcasts.
+		visible := make([]string, 0, len(ids))
+		hidden := make([]string, 0)
+		for _, id := range ids {
+			if id == config.RecorderBot || id == config.RtmpBot || config.IsUserIdInternal(id) {
+				hidden = append(hidden, id)
+				continue
+			}
+			visible = append(visible, id)
+		}
+		idsJson, err := json.Marshal(struct {
+			Ids       []string `json:"ids"`
+			HiddenIds []string `json:"hiddenIds"`
+		}{Ids: visible, HiddenIds: hidden})
+		if err != nil {
+			log.WithError(err).Errorln("failed to marshal online users ids")
+			return
+		}
+		if err := m.natsService.BroadcastSystemEventToRoom(*event, roomId, idsJson, &userId); err != nil {
+			log.WithError(err).Warnf("error sending event %s", event.String())
+		}
+		return
+	}
+
+	// full list: send as chunks to stay below the NATS max payload limit
+	chunks, err := m.natsService.GetOnlineUsersListAsJsonChunks(roomId, usersListChunkSize)
+	if err != nil {
+		log.WithError(err).Errorln("failed to get online users list as json chunks")
+		return
+	}
+	for _, chunk := range chunks {
+		if err := m.natsService.BroadcastSystemEventToRoom(*event, roomId, chunk, &userId); err != nil {
+			log.WithError(err).Warnf("error sending event %s", event.String())
+			return
+		}
+	}
+}
+
+func (m *NatsModel) HandleMediaServerInfo(roomId, userId string, broadcast bool) *plugnmeet.MediaServerConnInfo {
+	log := m.logger.WithFields(logrus.Fields{
+		"roomId": roomId,
+		"userId": userId,
+		"method": "HandleMediaServerInfo",
+	})
+
+	userInfo, err := m.natsService.GetUserInfo(roomId, userId)
+	if err != nil || userInfo == nil {
+		msg := "error getting user info"
+		if err != nil {
+			log.WithError(err).Errorln(msg)
+		}
+		_ = m.natsService.NotifyErrorMsg(roomId, msg, &userId)
+		return nil
+	}
+
+	metadata, err := m.natsService.GetUserMetadataStruct(roomId, userId)
+	if err != nil {
+		log.WithError(err).Warnln("failed to get user metadata")
+	}
+
+	if metadata.GetWaitForApproval() {
+		log.Warn("user is waiting for approval")
+		_ = m.natsService.NotifyErrorMsg(roomId, "user is waiting for approval", &userId)
+		return nil
+	}
+
+	// client type comes from the user's NATS KV record (via GetUserInfo); WEB when unset
+	clientType := userInfo.GetClientType()
+
+	c := &plugnmeet.PlugNmeetTokenClaims{
+		RoomId:     roomId,
+		Name:       userInfo.Name,
+		UserId:     userInfo.UserId,
+		IsAdmin:    userInfo.IsAdmin,
+		ClientType: clientType,
+	}
+
+	canPublish := true
+	canSubscribe := true
+	if clientType == plugnmeet.ClientType_HYBRID_WEB {
+		canPublish = false
+		canSubscribe = true
+	}
+
+	token, err := auth.GenerateLivekitAccessToken(m.app.LivekitInfo.ApiKey, m.app.LivekitInfo.Secret, *m.app.Client.TokenValidity, c, canPublish, canSubscribe, "")
+	if err != nil {
+		log.WithError(err).Errorln("failed to generate livekit token")
+		_ = m.natsService.NotifyErrorMsg(roomId, err.Error(), &userId)
+		return nil
+	}
+
+	lkHost := strings.Replace(m.app.LivekitInfo.Host, "host.docker.internal", "localhost", 1) // without this you won't be able to connect
+	data := &plugnmeet.MediaServerConnInfo{
+		Url:   lkHost,
+		Token: token,
+	}
+
+	// Only mint the native publish-only twin token for hybrid sessions
+	if clientType == plugnmeet.ClientType_HYBRID_WEB {
+		nativeClaims := &plugnmeet.PlugNmeetTokenClaims{
+			RoomId:  roomId,
+			Name:    userInfo.Name,
+			UserId:  config.GetNativeTwinIdentity(userInfo.UserId),
+			IsAdmin: userInfo.IsAdmin,
+		}
+		nativeToken, err := auth.GenerateLivekitAccessToken(m.app.LivekitInfo.ApiKey, m.app.LivekitInfo.Secret, *m.app.Client.TokenValidity, nativeClaims, true, false, userInfo.UserId)
+		if err != nil {
+			log.WithError(err).Errorln("failed to generate native livekit token")
+			_ = m.natsService.NotifyErrorMsg(roomId, err.Error(), &userId)
+			return nil
+		}
+		data.NativeToken = nativeToken
+	}
+
+	// get turn credentials
+	ctx, cancel := context.WithTimeout(m.ctx, 5*time.Second)
+	defer cancel()
+	turnCred, err := m.turn.GetCredentials(ctx, roomId, userId)
+	if err != nil {
+		log.WithError(err).Errorln("failed to get turn credentials")
+		// we can ignore this error and continue
+	}
+
+	if turnCred != nil {
+		data.TurnCredentials = &plugnmeet.TurnCredentials{
+			Username:              turnCred.Username,
+			Password:              turnCred.Password,
+			Uris:                  turnCred.URIs,
+			ForceTurn:             turnCred.ForceTurn,
+			FallbackTurn:          turnCred.FallbackTurn,
+			FallbackTimerDuration: turnCred.FallbackTimerDuration,
+			FallbackOnFlapping:    turnCred.FallbackOnFlapping,
+		}
+		// store in nats so we can revoke it later
+		if val, err := protojson.Marshal(data.TurnCredentials); err == nil {
+			if err := m.natsService.UpdateUserKeyValue(roomId, userId, natsservice.UserTurnCredentialsKey, string(val)); err != nil {
+				log.WithError(err).Warnln("failed to store turn credentials")
+			}
+		}
+	}
+
+	if broadcast {
+		err = m.natsService.BroadcastSystemEventToRoom(plugnmeet.NatsMsgServerToClientEvents_RES_MEDIA_SERVER_DATA, roomId, data, &userId)
+		if err != nil {
+			log.WithError(err).Warnln("error sending RES_MEDIA_SERVER_DATA event")
+		}
+	}
+
+	return data
+}
+
+func (m *NatsModel) RenewPNMToken(roomId, userId, token string) {
+	// to renew token, we can add graceful period for expiry time
+	// because in may case because of network related issues,
+	// the client was not able to renew token
+	// as renew request is coming from nats, so it should be secure
+	gracefulPeriod := time.Hour * 3
+	// the token must belong to the nats caller, so a user can't renew someone else's token
+	token, err := m.authModel.RenewPNMToken(token, roomId, userId, gracefulPeriod)
+	if err != nil {
+		m.logger.Errorln(fmt.Errorf("error renewing pnm token for %s; roomId: %s; msg: %s", userId, roomId, err.Error()))
+		return
+	}
+
+	err = m.natsService.BroadcastSystemEventToRoom(plugnmeet.NatsMsgServerToClientEvents_RESP_RENEW_PNM_TOKEN, roomId, token, &userId)
+	if err != nil {
+		m.logger.Errorln(fmt.Errorf("error sending RESP_RENEW_PNM_TOKEN event for %s; roomId: %s; msg: %s", userId, roomId, err.Error()))
+	}
+}
+
+func (m *NatsModel) HandleClientPing(roomId, userId string) {
+	// check user status
+	// if we found offline/disconnected, then we'll update
+	//  because the server may receive this join status a bit lately
+	// as user has sent ping request, this indicates the user is online
+	// OnAfterUserJoined will check the current status and act if the user was not online.
+	m.OnAfterUserJoined(roomId, userId, "HandleClientPing")
+
+	lastPing := fmt.Sprintf("%d", time.Now().UnixMilli())
+	err := m.natsService.UpdateUserKeyValue(roomId, userId, natsservice.UserLastPingAt, lastPing)
+	if err != nil {
+		m.logger.Errorln(fmt.Sprintf("error updating user last ping for %s; roomId: %s; msg: %s", userId, roomId, err.Error()))
+	}
+
+	// send pong back to the user time to make sure that both are connected
+	err = m.natsService.BroadcastSystemEventToRoom(plugnmeet.NatsMsgServerToClientEvents_PONG, roomId, lastPing, &userId)
+	if err != nil {
+		m.logger.WithError(err).Warnln("failed to send PONG to user")
+	}
+}
+
+// HandleToDeliveryPrivateData will work as a medium to deliver private messages
+// it will extract the header from message and deliver binary data to the user through private channel
+func (m *NatsModel) HandleToDeliveryPrivateData(roomId, userId string, req *plugnmeet.NatsMsgClientToServer) {
+	header := new(plugnmeet.PrivateDataDelivery)
+	err := protojson.Unmarshal([]byte(req.Msg), header)
+	if err != nil {
+		m.logger.WithError(err).Errorln("error unmarshalling private data header")
+		return
+	}
+
+	err = m.natsService.BroadcastSystemEventToRoomWithBinMsg(plugnmeet.NatsMsgServerToClientEvents_DELIVERY_PRIVATE_DATA, roomId, req.Msg, req.BinMsg, &header.ToUserId)
+	if err != nil {
+		m.logger.WithError(err).Errorf("error sending delivery private data to user %s", header.ToUserId)
+	}
+
+	// like chat messages need to send back to sender as well
+	if header.EchoToSender {
+		err = m.natsService.BroadcastSystemEventToRoomWithBinMsg(plugnmeet.NatsMsgServerToClientEvents_DELIVERY_PRIVATE_DATA, roomId, req.Msg, req.BinMsg, &userId)
+		if err != nil {
+			m.logger.WithError(err).Errorf("error sending delivery private data to sender user %s", userId)
+		}
+	}
+}

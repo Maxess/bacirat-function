@@ -1,0 +1,108 @@
+package models
+
+import (
+	"context"
+
+	"github.com/mynaparrot/plugnmeet-protocol/plugnmeet"
+	"github.com/mynaparrot/plugnmeet-server/pkg/config"
+	"github.com/mynaparrot/plugnmeet-server/pkg/services/db"
+	livekitservice "github.com/mynaparrot/plugnmeet-server/pkg/services/livekit"
+	"github.com/mynaparrot/plugnmeet-server/pkg/services/nats"
+	"github.com/mynaparrot/plugnmeet-server/pkg/services/redis"
+	turnservice "github.com/mynaparrot/plugnmeet-server/pkg/services/turn"
+	"github.com/sirupsen/logrus"
+	"go.uber.org/fx"
+	"golang.org/x/sync/singleflight"
+	"google.golang.org/protobuf/encoding/protojson"
+)
+
+type NatsModel struct {
+	ctx            context.Context
+	app            *config.AppConfig
+	ds             *dbservice.DatabaseService
+	rs             *redisservice.RedisService
+	lk             *livekitservice.LivekitService
+	turn           *turnservice.TurnService
+	authModel      *AuthModel
+	natsService    *natsservice.NatsService
+	userModel      *UserModel
+	analyticsModel *AnalyticsModel
+	logger         *logrus.Entry
+	sfGroup        *singleflight.Group
+}
+
+type NatsModelArgs struct {
+	fx.In
+	Ctx            context.Context
+	App            *config.AppConfig
+	Ds             *dbservice.DatabaseService
+	Rs             *redisservice.RedisService
+	NatsService    *natsservice.NatsService
+	Lk             *livekitservice.LivekitService
+	Turn           *turnservice.TurnService
+	AnalyticsModel *AnalyticsModel
+	AuthModel      *AuthModel
+	UserModel      *UserModel
+	Logger         *logrus.Logger
+}
+
+func NewNatsModel(args NatsModelArgs) *NatsModel {
+	return &NatsModel{
+		ctx:            args.Ctx,
+		app:            args.App,
+		ds:             args.Ds,
+		rs:             args.Rs,
+		lk:             args.Lk,
+		turn:           args.Turn,
+		natsService:    args.NatsService,
+		authModel:      args.AuthModel,
+		userModel:      args.UserModel,
+		analyticsModel: args.AnalyticsModel,
+		logger:         args.Logger.WithField("model", "nats"),
+		sfGroup:        new(singleflight.Group),
+	}
+}
+
+func (m *NatsModel) HandleFromClientToServerReq(roomId, userId string, req *plugnmeet.NatsMsgClientToServer) {
+	if m.natsService.IsUserExistInBlockList(roomId, userId) {
+		return
+	}
+
+	switch req.Event {
+	case plugnmeet.NatsMsgClientToServerEvents_REQ_RENEW_PNM_TOKEN:
+		m.RenewPNMToken(roomId, userId, req.Msg)
+	case plugnmeet.NatsMsgClientToServerEvents_REQ_INITIAL_DATA:
+		m.HandleInitialData(roomId, userId)
+	case plugnmeet.NatsMsgClientToServerEvents_REQ_JOINED_USERS_LIST:
+		m.HandleSendUsersList(roomId, userId, nil)
+	case plugnmeet.NatsMsgClientToServerEvents_REQ_MEDIA_SERVER_DATA:
+		m.HandleMediaServerInfo(roomId, userId, true)
+	case plugnmeet.NatsMsgClientToServerEvents_PING:
+		m.HandleClientPing(roomId, userId)
+	case plugnmeet.NatsMsgClientToServerEvents_REQ_RAISE_HAND:
+		m.userModel.RaisedHand(roomId, userId, req.Msg)
+	case plugnmeet.NatsMsgClientToServerEvents_REQ_LOWER_HAND:
+		m.userModel.LowerHand(roomId, userId)
+	case plugnmeet.NatsMsgClientToServerEvents_REQ_LOWER_OTHER_USER_HAND:
+		m.userModel.LowerOtherUserHand(roomId, userId, req.Msg)
+	case plugnmeet.NatsMsgClientToServerEvents_PUSH_ANALYTICS_DATA:
+		ad := new(plugnmeet.AnalyticsDataMsg)
+		err := protojson.Unmarshal([]byte(req.Msg), ad)
+		if err != nil {
+			m.logger.Errorln(err)
+			return
+		}
+		// bind to the authenticated identity
+		ad.RoomId = roomId
+		ad.UserId = &userId
+		m.analyticsModel.HandleEvent(ad)
+	case plugnmeet.NatsMsgClientToServerEvents_REQ_ONLINE_USERS_LIST:
+		m.HandleSendUsersList(roomId, userId, new(plugnmeet.NatsMsgServerToClientEvents_RESP_ONLINE_USERS_LIST))
+	case plugnmeet.NatsMsgClientToServerEvents_REQ_PRIVATE_DATA_DELIVERY:
+		m.HandleToDeliveryPrivateData(roomId, userId, req)
+	case plugnmeet.NatsMsgClientToServerEvents_SESSION_DATA_SAVE:
+		m.HandleSessionDataSave(roomId, userId, req)
+	case plugnmeet.NatsMsgClientToServerEvents_SESSION_DATA_FETCH_REQUEST:
+		m.HandleSessionDataFetchRequest(roomId, userId, req)
+	}
+}

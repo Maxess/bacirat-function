@@ -1,0 +1,220 @@
+package controllers
+
+import (
+	"github.com/gofiber/fiber/v3"
+	"github.com/mynaparrot/plugnmeet-protocol/plugnmeet"
+	"github.com/mynaparrot/plugnmeet-protocol/utils"
+	"github.com/mynaparrot/plugnmeet-server/pkg/config"
+	"github.com/mynaparrot/plugnmeet-server/pkg/models"
+	"github.com/mynaparrot/plugnmeet-server/pkg/services/db"
+	natsservice "github.com/mynaparrot/plugnmeet-server/pkg/services/nats"
+	"go.uber.org/fx"
+	"google.golang.org/protobuf/proto"
+)
+
+// UserController holds dependencies for user-related handlers.
+type UserController struct {
+	AppConfig   *config.AppConfig
+	UserModel   *models.UserModel
+	RoomModel   *models.RoomModel
+	ds          *dbservice.DatabaseService
+	NatsService *natsservice.NatsService
+}
+
+type UserControllerArgs struct {
+	fx.In
+	AppConfig   *config.AppConfig
+	UserModel   *models.UserModel
+	RoomModel   *models.RoomModel
+	Ds          *dbservice.DatabaseService
+	NatsService *natsservice.NatsService
+}
+
+// NewUserController creates a new UserController.
+func NewUserController(args UserControllerArgs) *UserController {
+	return &UserController{
+		AppConfig:   args.AppConfig,
+		UserModel:   args.UserModel,
+		RoomModel:   args.RoomModel,
+		ds:          args.Ds,
+		NatsService: args.NatsService,
+	}
+}
+
+// HandleGenerateJoinToken handles generating a join token for a user.
+func (uc *UserController) HandleGenerateJoinToken(c fiber.Ctx) error {
+	req := new(plugnmeet.GenerateTokenReq)
+	if err := parseAndValidateRequest(c.Body(), req); err != nil {
+		return utils.SendCommonProtoJsonResponse(c, false, err.Error(), plugnmeet.StatusCode_INVALID_PARAMETERS)
+	}
+
+	if req.UserInfo == nil {
+		return utils.SendCommonProtoJsonResponse(c, false, "UserInfo required", plugnmeet.StatusCode_INVALID_PARAMETERS)
+	}
+
+	// don't generate token if user is blocked
+	exist := uc.NatsService.IsUserExistInBlockList(req.RoomId, req.UserInfo.UserId)
+	if exist {
+		return utils.SendCommonProtoJsonResponse(c, false, "this user is blocked to join this session", plugnmeet.StatusCode_USER_BLOCKED)
+	}
+
+	// Use the single point of truth to check if the room is active.
+	rr, _, _ := uc.RoomModel.IsRoomActive(&plugnmeet.IsRoomActiveReq{
+		RoomId: req.RoomId,
+	})
+
+	if !rr.GetIsActive() {
+		return utils.SendCommonProtoJsonResponse(c, false, "room is not active", plugnmeet.StatusCode_ROOM_NOT_FOUND)
+	}
+
+	token, err := uc.UserModel.GetPNMJoinToken(c.RequestCtx(), req, false)
+	if err != nil {
+		return utils.SendCommonProtoJsonResponse(c, false, err.Error(), plugnmeet.StatusCode_INTERNAL_SERVER_ERROR)
+	}
+
+	r := &plugnmeet.GenerateTokenRes{
+		Status:     true,
+		Msg:        "success",
+		StatusCode: plugnmeet.StatusCode_SUCCESS,
+		Token:      &token,
+	}
+
+	return utils.SendProtoJsonResponse(c, r)
+}
+
+// HandleUpdateUserLockSetting handles updating a user's lock settings.
+func (uc *UserController) HandleUpdateUserLockSetting(c fiber.Ctx) error {
+	isAdmin := fiber.Locals[bool](c, "isAdmin")
+	roomId := fiber.Locals[string](c, "roomId")
+	requestedUserId := fiber.Locals[string](c, "requestedUserId")
+	roomSid := fiber.Locals[string](c, "roomSid")
+
+	if !isAdmin {
+		return utils.SendCommonProtobufResponse(c, false, "only admin can perform this task")
+	}
+
+	req := new(plugnmeet.UpdateUserLockSettingsReq)
+	if err := proto.Unmarshal(c.Body(), req); err != nil {
+		return utils.SendCommonProtobufResponse(c, false, err.Error())
+	}
+
+	if roomId != req.RoomId {
+		return utils.SendCommonProtobufResponse(c, false, "requested roomId & token roomId mismatched")
+	}
+	if req.RoomSid != roomSid {
+		return utils.SendCommonProtobufResponse(c, false, "roomSid in token mismatched")
+	}
+
+	// now need to check if meeting is running or not
+	room, _ := uc.ds.GetRoomInfoBySid(roomSid, new(1))
+	if room == nil || room.ID == 0 {
+		return utils.SendCommonProtobufResponse(c, false, "room isn't running")
+	}
+
+	req.RequestedUserId = requestedUserId
+	if err := uc.UserModel.UpdateUserLockSettings(req); err != nil {
+		return utils.SendCommonProtobufResponse(c, false, err.Error())
+	}
+
+	return utils.SendCommonProtobufResponse(c, true, "success")
+}
+
+// HandleMuteUnMuteTrack handles muting or unmuting a user's track.
+func (uc *UserController) HandleMuteUnMuteTrack(c fiber.Ctx) error {
+	isAdmin := fiber.Locals[bool](c, "isAdmin")
+	roomId := fiber.Locals[string](c, "roomId")
+	requestedUserId := fiber.Locals[string](c, "requestedUserId")
+
+	if !isAdmin {
+		return utils.SendCommonProtobufResponse(c, false, "only admin can perform this task")
+	}
+
+	req := new(plugnmeet.MuteUnMuteTrackReq)
+	err := proto.Unmarshal(c.Body(), req)
+	if err != nil {
+		return utils.SendCommonProtobufResponse(c, false, err.Error())
+	}
+
+	if roomId != req.RoomId {
+		return utils.SendCommonProtobufResponse(c, false, "requested roomId & token roomId mismatched")
+	}
+
+	// always trust the token scope over any client-supplied value
+	req.Sid = fiber.Locals[string](c, "roomSid")
+
+	// now need to check if meeting is running or not
+	room, _ := uc.ds.GetRoomInfoBySid(req.Sid, new(1))
+	if room == nil || room.ID == 0 {
+		return utils.SendCommonProtobufResponse(c, false, "room isn't running")
+	}
+
+	req.RequestedUserId = requestedUserId
+	if err = uc.UserModel.MuteUnMuteTrack(c.RequestCtx(), req); err != nil {
+		return utils.SendCommonProtobufResponse(c, false, err.Error())
+	}
+
+	return utils.SendCommonProtobufResponse(c, true, "success")
+}
+
+// HandleRemoveParticipant handles removing a participant from a room.
+func (uc *UserController) HandleRemoveParticipant(c fiber.Ctx) error {
+	isAdmin := fiber.Locals[bool](c, "isAdmin")
+	roomId := fiber.Locals[string](c, "roomId")
+	requestedUserId := fiber.Locals[string](c, "requestedUserId")
+
+	if !isAdmin {
+		return utils.SendCommonProtobufResponse(c, false, "only admin can perform this task")
+	}
+
+	req := new(plugnmeet.RemoveParticipantReq)
+	err := proto.Unmarshal(c.Body(), req)
+	if err != nil {
+		return utils.SendCommonProtobufResponse(c, false, err.Error())
+	}
+
+	if roomId != req.RoomId {
+		return utils.SendCommonProtobufResponse(c, false, "requested roomId & token roomId mismatched")
+	}
+	if requestedUserId == req.UserId {
+		return utils.SendCommonProtobufResponse(c, false, "you can't remove yourself\"")
+	}
+
+	// always trust the token scope over any client-supplied value
+	req.Sid = fiber.Locals[string](c, "roomSid")
+
+	// now need to check if meeting is running or not
+	room, _ := uc.ds.GetRoomInfoBySid(req.Sid, new(1))
+	if room == nil || room.ID == 0 {
+		return utils.SendCommonProtobufResponse(c, false, "room isn't running")
+	}
+
+	if err = uc.UserModel.RemoveParticipant(req); err != nil {
+		return utils.SendCommonProtobufResponse(c, false, err.Error())
+	}
+
+	return utils.SendCommonProtobufResponse(c, true, "success")
+}
+
+// HandleSwitchPresenter handles switching the presenter in a room.
+func (uc *UserController) HandleSwitchPresenter(c fiber.Ctx) error {
+	isAdmin := fiber.Locals[bool](c, "isAdmin")
+	roomId := fiber.Locals[string](c, "roomId")
+	requestedUserId := fiber.Locals[string](c, "requestedUserId")
+
+	if !isAdmin {
+		return utils.SendCommonProtobufResponse(c, false, "only admin can perform this task")
+	}
+
+	req := new(plugnmeet.SwitchPresenterReq)
+	if err := proto.Unmarshal(c.Body(), req); err != nil {
+		return utils.SendCommonProtobufResponse(c, false, err.Error())
+	}
+
+	req.RoomId = roomId
+	req.RequestedUserId = requestedUserId
+	if err := uc.UserModel.SwitchPresenter(req); err != nil {
+		return utils.SendCommonProtobufResponse(c, false, err.Error())
+	}
+
+	return utils.SendCommonProtobufResponse(c, true, "success")
+}

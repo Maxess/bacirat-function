@@ -1,0 +1,341 @@
+package helpers
+
+import (
+	"context"
+	"sync"
+
+	"github.com/goccy/go-json"
+	"github.com/mynaparrot/plugnmeet-protocol/plugnmeet"
+	"github.com/mynaparrot/plugnmeet-protocol/webhook"
+	"github.com/mynaparrot/plugnmeet-server/pkg/config"
+	"github.com/mynaparrot/plugnmeet-server/pkg/services/db"
+	"github.com/mynaparrot/plugnmeet-server/pkg/services/redis"
+	"github.com/nats-io/nats.go"
+	"github.com/sirupsen/logrus"
+	"go.uber.org/fx"
+)
+
+// roomNotifier holds a dedicated worker and the cached webhook URLs for a single room.
+type roomNotifier struct {
+	worker *webhook.Notifier
+	urls   []string
+}
+
+type WebhookNotifier struct {
+	ctx                  context.Context
+	ds                   *dbservice.DatabaseService
+	rs                   *redisservice.RedisService
+	app                  *config.AppConfig
+	natsConn             *nats.Conn
+	isEnabled            bool
+	enabledForPerMeeting bool
+	defaultUrl           string
+	// notifiers will hold our new wrapper for each room
+	notifiers map[string]*roomNotifier
+	// mu will protect access to the notifiers map
+	mu     sync.Mutex
+	logger *logrus.Entry
+}
+
+type webhookRedisFields struct {
+	Urls            []string `json:"urls"`
+	PerformDeleting bool     `json:"perform_deleting"`
+}
+
+type WebhookNotifierArgs struct {
+	fx.In
+	Ctx      context.Context
+	App      *config.AppConfig
+	NatsConn *nats.Conn
+	Ds       *dbservice.DatabaseService
+	Rs       *redisservice.RedisService
+	Logger   *logrus.Logger
+}
+
+func NewWebhookNotifier(args WebhookNotifierArgs) *WebhookNotifier {
+	w := &WebhookNotifier{
+		ctx:                  args.Ctx,
+		app:                  args.App,
+		ds:                   args.Ds,
+		rs:                   args.Rs,
+		natsConn:             args.NatsConn,
+		isEnabled:            args.App.Client.WebhookConf.Enable,
+		enabledForPerMeeting: args.App.Client.WebhookConf.EnableForPerMeeting,
+		defaultUrl:           args.App.Client.WebhookConf.Url,
+		notifiers:            make(map[string]*roomNotifier),
+		logger:               args.Logger.WithField("helper", "webhookNotifier"),
+	}
+
+	return w
+}
+
+// SubscribeToCleanup listens for cleanup messages broadcast to all servers.
+func (w *WebhookNotifier) SubscribeToCleanup(lc fx.Lifecycle) {
+	log := w.logger.WithField("method", "SubscribeToCleanup")
+	var sub *nats.Subscription
+	var err error
+
+	lc.Append(fx.Hook{
+		OnStart: func(ctx context.Context) error {
+			sub, err = w.natsConn.Subscribe(redisservice.WebhookCleanupSubject, func(m *nats.Msg) {
+				roomId := string(m.Data)
+				log.WithFields(logrus.Fields{
+					"room_id": roomId,
+					"method":  "subscribeToCleanup",
+				}).Info("received webhook cleanup signal")
+				w.cleanupNotifier(roomId)
+			})
+			if err != nil {
+				log.WithError(err).Error("failed to subscribe to webhook cleanup subject")
+				return err
+			}
+			log.Info("Successfully subscribed to webhook cleanup subject")
+			return nil
+		},
+		OnStop: func(_ context.Context) error {
+			log.Info("Unsubscribing from webhook cleanup subject")
+			if sub != nil {
+				return sub.Unsubscribe()
+			}
+			return nil
+		},
+	})
+}
+
+// getOrCreateNotifier gets a notifier for a room, creating it just-in-time if it doesn't exist on this server instance.
+func (w *WebhookNotifier) getOrCreateNotifier(roomId string) *roomNotifier {
+	w.mu.Lock()
+	notifier, ok := w.notifiers[roomId]
+	w.mu.Unlock()
+
+	if ok {
+		return notifier
+	}
+
+	// Notifier does not exist on this server instance. Create it.
+	d, err := w.getData(roomId)
+	if err != nil || d == nil || len(d.Urls) == 0 {
+		// Log the error but don't create a notifier if there are no URLs.
+		if err != nil {
+			w.logger.WithField("room_id", roomId).WithError(err).Error("failed to get webhook data for notifier creation")
+		}
+		return nil
+	}
+
+	// Create the new wrapper with the fetched URLs and the worker.
+	newNotifier := &roomNotifier{
+		worker: webhook.NewNotifier(w.ctx, 1, 2, w.logger),
+		urls:   d.Urls,
+	}
+
+	// Lock again to safely add to the map.
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	// Double-check in case another goroutine created it in the meantime.
+	if existingNotifier, exists := w.notifiers[roomId]; exists {
+		// Another goroutine won the race. Discard our new one and use the existing one.
+		newNotifier.worker.Kill()
+		return existingNotifier
+	}
+
+	w.notifiers[roomId] = newNotifier
+	w.logger.WithField("room_id", roomId).Info("created new just-in-time webhook notifier for room")
+	return newNotifier
+}
+
+// cleanupNotifier stops the worker and removes the notifier for a room from the local map.
+func (w *WebhookNotifier) cleanupNotifier(roomId string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if notifier, ok := w.notifiers[roomId]; ok {
+		notifier.worker.Kill() // This will call Kill() on the worker.
+		delete(w.notifiers, roomId)
+		w.logger.WithFields(logrus.Fields{
+			"room_id": roomId,
+			"method":  "cleanupNotifier",
+		}).Info("cleaned up webhook queue for room")
+	}
+}
+
+func (w *WebhookNotifier) RegisterWebhook(roomId, sid string) {
+	log := w.logger.WithFields(logrus.Fields{
+		"room_id": roomId,
+		"sid":     sid,
+		"method":  "RegisterWebhook",
+	})
+	log.Info("request to register webhook")
+
+	if !w.isEnabled {
+		log.Debug("webhook is disabled, skipping registration")
+		return
+	}
+	if roomId == "" {
+		log.Warn("room_id is empty, skipping registration")
+		return
+	}
+
+	var urls []string
+	if w.defaultUrl != "" {
+		urls = append(urls, w.defaultUrl)
+		log.WithField("default_url", w.defaultUrl).Debug("added default webhook url")
+	}
+
+	if w.enabledForPerMeeting {
+		roomInfo, _ := w.ds.GetRoomInfoBySid(sid, nil)
+		if roomInfo != nil && roomInfo.WebhookUrl != "" {
+			urls = append(urls, roomInfo.WebhookUrl)
+			log.WithField("per_meeting_url", roomInfo.WebhookUrl).Debug("added per-meeting webhook url")
+		}
+	}
+
+	if len(urls) < 1 {
+		log.Info("no webhook urls found to register")
+		return
+	}
+	log.WithField("urls", urls).Info("found webhook urls to register")
+
+	d := &webhookRedisFields{
+		Urls:            urls,
+		PerformDeleting: false,
+	}
+
+	err := w.saveData(roomId, d)
+	if err != nil {
+		log.WithError(err).Errorln("failed to save webhook data")
+		return
+	}
+	log.Info("successfully registered webhook")
+}
+
+// DeleteWebhook will clean up webhook data from redis as well local state
+// this should call when analytics export process completed
+func (w *WebhookNotifier) DeleteWebhook(roomId string, log *logrus.Entry) {
+	log = log.WithField("method", "DeleteWebhook")
+
+	d, err := w.getData(roomId)
+	if err != nil {
+		log.WithError(err).Error("failed to get webhook data")
+		return
+	}
+	if d == nil {
+		// this meeting does not have any webhook url
+		return
+	}
+
+	if !d.PerformDeleting {
+		// this mean may be new session has been started for the same room
+		return
+	}
+
+	// Broadcast a cleanup message to all servers in the cluster.
+	// Only the server running the worker for this room will act on it.
+	if err := w.natsConn.Publish(redisservice.WebhookCleanupSubject, []byte(roomId)); err != nil {
+		log.WithError(err).Error("failed to publish webhook cleanup")
+	}
+
+	if err := w.rs.DeleteWebhookData(roomId); err != nil {
+		log.WithError(err).Error("failed to delete webhook data from redis")
+	}
+}
+
+func (w *WebhookNotifier) SendWebhookEvent(event *plugnmeet.CommonNotifyEvent) error {
+	if !w.isEnabled || event.Room.GetRoomId() == "" {
+		return nil
+	}
+	roomId := event.Room.GetRoomId()
+
+	// Handle state changes for room_started and room_finished
+	if event.GetEvent() == "room_started" || event.GetEvent() == "room_finished" {
+		d, err := w.getData(roomId)
+		if err != nil {
+			return err
+		}
+		if d != nil {
+			if event.GetEvent() == "room_started" && d.PerformDeleting {
+				d.PerformDeleting = false
+				_ = w.saveData(roomId, d)
+			} else if event.GetEvent() == "room_finished" && !d.PerformDeleting {
+				d.PerformDeleting = true
+				_ = w.saveData(roomId, d)
+			}
+		}
+	}
+
+	// Use the clean, separated getOrCreateNotifier function.
+	notifier := w.getOrCreateNotifier(roomId)
+	if notifier == nil {
+		// This is expected condition if no URLs are configured.
+		return nil
+	}
+
+	// Send the event to the queue using the static app config and the cached URLs.
+	notifier.worker.AddInNotifyQueue(event, w.app.Client.ApiKey, w.app.Client.Secret, notifier.urls)
+	return nil
+}
+
+// ForceToPutInQueue sends a webhook event synchronously without using the room's queue.
+// This method should be used for one-shot events outside the normal room lifecycle.
+// It directly queries the database for webhook URLs.
+func (w *WebhookNotifier) ForceToPutInQueue(event *plugnmeet.CommonNotifyEvent) {
+	if !w.isEnabled {
+		return
+	}
+	if event.Room.GetSid() == "" || event.Room.GetRoomId() == "" {
+		w.logger.Errorln("empty room info for", event.GetEvent())
+		return
+	}
+
+	var urls []string
+	if w.defaultUrl != "" {
+		urls = append(urls, w.defaultUrl)
+	}
+
+	if w.enabledForPerMeeting {
+		roomInfo, _ := w.ds.GetRoomInfoBySid(event.Room.GetSid(), nil)
+		if roomInfo != nil && roomInfo.WebhookUrl != "" {
+			urls = append(urls, roomInfo.WebhookUrl)
+		}
+	}
+
+	if len(urls) < 1 {
+		return
+	}
+
+	notifier := webhook.NewNotifier(w.ctx, 1, 2, w.logger)
+	defer notifier.StopGracefully()
+	notifier.AddInNotifyQueue(event, w.app.Client.ApiKey, w.app.Client.Secret, urls)
+}
+
+func (w *WebhookNotifier) saveData(roomId string, d *webhookRedisFields) error {
+	marshal, err := json.Marshal(d)
+	if err != nil {
+		return err
+	}
+
+	// we'll simply override any existing value & put new
+	if err := w.rs.AddWebhookData(roomId, marshal); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (w *WebhookNotifier) getData(roomId string) (*webhookRedisFields, error) {
+	data, err := w.rs.GetWebhookData(roomId)
+	if err != nil {
+		return nil, err
+	}
+
+	if data == nil {
+		return nil, nil
+	}
+
+	d := new(webhookRedisFields)
+	if err := json.Unmarshal(data, d); err != nil {
+		return nil, err
+	}
+
+	return d, nil
+}

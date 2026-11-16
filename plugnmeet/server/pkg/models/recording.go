@@ -1,0 +1,165 @@
+package models
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/mynaparrot/plugnmeet-protocol/plugnmeet"
+	"github.com/mynaparrot/plugnmeet-server/pkg/config"
+	"github.com/mynaparrot/plugnmeet-server/pkg/dbmodels"
+	"github.com/mynaparrot/plugnmeet-server/pkg/helpers"
+	"github.com/mynaparrot/plugnmeet-server/pkg/services/db"
+	"github.com/mynaparrot/plugnmeet-server/pkg/services/livekit"
+	natsservice "github.com/mynaparrot/plugnmeet-server/pkg/services/nats"
+	"github.com/mynaparrot/plugnmeet-server/pkg/services/redis"
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
+	"github.com/sirupsen/logrus"
+	"go.uber.org/fx"
+)
+
+type RecordingModel struct {
+	ctx             context.Context
+	app             *config.AppConfig
+	natsConn        *nats.Conn
+	js              jetstream.JetStream
+	ds              *dbservice.DatabaseService
+	rs              *redisservice.RedisService
+	lk              *livekitservice.LivekitService
+	analyticsModel  *AnalyticsModel
+	um              *UserModel
+	webhookNotifier *helpers.WebhookNotifier
+	natsService     *natsservice.NatsService
+	logger          *logrus.Entry
+}
+
+type RecordingModelArgs struct {
+	fx.In
+	Ctx             context.Context
+	App             *config.AppConfig
+	NatsConn        *nats.Conn
+	JS              jetstream.JetStream
+	Ds              *dbservice.DatabaseService
+	Rs              *redisservice.RedisService
+	NatsService     *natsservice.NatsService
+	AnalyticsModel  *AnalyticsModel
+	Um              *UserModel
+	WebhookNotifier *helpers.WebhookNotifier
+	Logger          *logrus.Logger
+}
+
+func NewRecordingModel(args RecordingModelArgs) *RecordingModel {
+	return &RecordingModel{
+		ctx:             args.Ctx,
+		app:             args.App,
+		natsConn:        args.NatsConn,
+		js:              args.JS,
+		ds:              args.Ds,
+		rs:              args.Rs,
+		analyticsModel:  args.AnalyticsModel,
+		um:              args.Um,
+		webhookNotifier: args.WebhookNotifier,
+		natsService:     args.NatsService,
+		logger:          args.Logger.WithField("model", "recording"),
+	}
+}
+
+func (m *RecordingModel) ProcessRecorderEvent(r *plugnmeet.RecorderToPlugNmeet, roomInfo *dbmodels.RoomInfo) {
+	switch r.Task {
+	case plugnmeet.RecordingTasks_START_RECORDING:
+		m.recordingStarted(r)
+
+	case plugnmeet.RecordingTasks_END_RECORDING:
+		m.recordingEnded(r)
+
+	case plugnmeet.RecordingTasks_START_RTMP:
+		m.rtmpStarted(r)
+
+	case plugnmeet.RecordingTasks_END_RTMP:
+		m.rtmpEnded(r)
+
+	case plugnmeet.RecordingTasks_RECORDING_PROCEEDED:
+		creation, err := m.addRecordingInfoToDB(r, roomInfo)
+		if err != nil {
+			m.logger.WithError(err).Errorln("error adding recording info to db")
+		}
+		// keep record of this file
+		m.addRecordingInfoFile(r, creation, roomInfo)
+	case plugnmeet.RecordingTasks_RECORDING_TRANSCODING_FINISHED:
+		// delete if we held any lock
+		_ = m.rs.DeleteLockKey(context.Background(), fmt.Sprintf(redisservice.MergeRecordingReqLockKey, r.GetRoomId()))
+		log := m.logger.WithFields(logrus.Fields{
+			"recording_id": r.RecordingId,
+			"room_sid":     r.RoomSid,
+			"table_id":     r.RoomTableId,
+			"room_id":      r.RoomId,
+			"recorder_id":  r.RecorderId,
+			"res_status":   r.Status,
+			"res_msg":      r.GetMsg(),
+		})
+		if r.Status {
+			log.Info("Received RECORDING_TRANSCODING_FINISHED event from transcoder")
+		} else {
+			log.Error("Received RECORDING_TRANSCODING_FINISHED event from transcoder")
+		}
+	}
+
+	m.sendToWebhookNotifier(r)
+}
+
+func (m *RecordingModel) sendToWebhookNotifier(r *plugnmeet.RecorderToPlugNmeet) {
+	n := m.webhookNotifier
+	if n != nil {
+		msg := &plugnmeet.CommonNotifyEvent{
+			Event: new(r.Task.String()),
+			Room: &plugnmeet.NotifyEventRoom{
+				Sid:    &r.RoomSid,
+				RoomId: &r.RoomId,
+			},
+			RecordingInfo: &plugnmeet.RecordingInfoEvent{
+				RecordId:    r.RecordingId,
+				RecorderId:  r.RecorderId,
+				RecorderMsg: r.Msg,
+				FilePath:    &r.FilePath,
+				FileSize:    &r.FileSize,
+			},
+		}
+		if r.Task == plugnmeet.RecordingTasks_RECORDING_PROCEEDED {
+			// this process may take longer time & webhook url may clean up
+			// so, here we'll use ForceToPutInQueue method to retrieve url from mysql table
+			n.ForceToPutInQueue(msg)
+		} else {
+			err := n.SendWebhookEvent(msg)
+			if err != nil {
+				m.logger.WithError(err).Errorln("error sending webhook event")
+			}
+		}
+	}
+
+	// send analytics
+	var val string
+	data := &plugnmeet.AnalyticsDataMsg{
+		EventType: plugnmeet.AnalyticsEventType_ANALYTICS_EVENT_TYPE_ROOM,
+		RoomId:    r.RoomId,
+	}
+
+	switch r.Task {
+	case plugnmeet.RecordingTasks_START_RECORDING:
+		data.EventName = plugnmeet.AnalyticsEvents_ANALYTICS_EVENT_ROOM_RECORDING_STATUS
+		val = plugnmeet.AnalyticsStatus_ANALYTICS_STATUS_STARTED.String() + ":" + r.RecorderId
+	case plugnmeet.RecordingTasks_END_RECORDING:
+		data.EventName = plugnmeet.AnalyticsEvents_ANALYTICS_EVENT_ROOM_RECORDING_STATUS
+		val = plugnmeet.AnalyticsStatus_ANALYTICS_STATUS_ENDED.String()
+	case plugnmeet.RecordingTasks_START_RTMP:
+		data.EventName = plugnmeet.AnalyticsEvents_ANALYTICS_EVENT_ROOM_RTMP_STATUS
+		val = plugnmeet.AnalyticsStatus_ANALYTICS_STATUS_STARTED.String() + ":" + r.RecorderId
+	case plugnmeet.RecordingTasks_END_RTMP:
+		data.EventName = plugnmeet.AnalyticsEvents_ANALYTICS_EVENT_ROOM_RTMP_STATUS
+		val = plugnmeet.AnalyticsStatus_ANALYTICS_STATUS_ENDED.String()
+	}
+
+	if val != "" {
+		data.HsetValue = &val
+		m.analyticsModel.HandleEvent(data)
+	}
+}

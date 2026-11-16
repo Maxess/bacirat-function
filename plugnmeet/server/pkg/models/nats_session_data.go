@@ -1,0 +1,217 @@
+package models
+
+import (
+	"sort"
+
+	"github.com/mynaparrot/plugnmeet-protocol/plugnmeet"
+	"google.golang.org/protobuf/encoding/protojson"
+)
+
+// HandleSessionDataSave stores an encrypted session-scoped value (e.g. whiteboard
+// or notepad data) sent by an authorized client. When the header carries a
+// request_id the outcome is acked back to the sender; otherwise the save stays
+// fire-and-forget (notepad sync and breakout seeding do not wait for it).
+func (m *NatsModel) HandleSessionDataSave(roomId, userId string, req *plugnmeet.NatsMsgClientToServer) {
+	header, dataType, authorized := m.parseAndAuthorizeSessionData(roomId, userId, req, false)
+	if header == nil {
+		return // unparsable header, so no request_id to answer
+	}
+
+	success := false
+	defer func() {
+		// single reply point, fired once the outcome is known
+		m.sendSessionDataSaveResponse(roomId, userId, header, success)
+	}()
+
+	if !authorized {
+		return // already logged inside
+	}
+
+	key := header.GetKey()
+	if key == "" || len(req.BinMsg) == 0 {
+		m.logger.Warnf("invalid session data save request from user %s; missing key or payload", userId)
+		return
+	}
+
+	// Target-room routing for client-mediated breakout seeding.
+	saveRoomId := roomId
+	if target := header.GetTargetRoomId(); target != "" {
+		if !m.canSeedSessionDataTo(roomId, target, userId) {
+			return // already logged inside
+		}
+		saveRoomId = target
+	}
+
+	if err := m.rs.SaveSessionData(saveRoomId, dataType, key, req.BinMsg); err != nil {
+		m.logger.WithError(err).WithField("saveRoomId", saveRoomId).Errorln("failed to save session data")
+		return
+	}
+	success = true
+}
+
+// HandleSessionDataFetchRequest fetches either a single session data entry (when
+// the header key is set) or all entries of a data type (when the key is unset)
+// and streams the results back to the requesting user.
+func (m *NatsModel) HandleSessionDataFetchRequest(roomId, userId string, req *plugnmeet.NatsMsgClientToServer) {
+	header, dataType, ok := m.parseAndAuthorizeSessionData(roomId, userId, req, true)
+	if !ok {
+		return
+	}
+
+	key := header.GetKey()
+	if key != "" {
+		value, err := m.rs.GetSessionData(roomId, dataType, key)
+		if err != nil {
+			m.logger.WithError(err).Errorln("failed to fetch session data")
+			return
+		}
+		m.sendSessionDataResponse(roomId, userId, dataType, key, value, true)
+		return
+	}
+
+	values, err := m.rs.GetAllSessionData(roomId, dataType)
+	if err != nil {
+		m.logger.WithError(err).Errorln("failed to fetch all session data")
+		return
+	}
+	if len(values) == 0 {
+		m.sendSessionDataResponse(roomId, userId, dataType, "", nil, true)
+		return
+	}
+
+	keys := make([]string, 0, len(values))
+	for k := range values {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	for i, k := range keys {
+		m.sendSessionDataResponse(roomId, userId, dataType, k, []byte(values[k]), i == len(keys)-1)
+	}
+}
+
+// canSeedSessionDataTo verifies that a SESSION_DATA_SAVE carrying a target_room_id
+// is allowed to write into the target room. It returns true only when BOTH hold:
+//  1. The sender is an ADMIN of the room the message arrived on (parentRoomId).
+//     parseAndAuthorizeSessionData already gated them as a parent-room
+//     presenter/admin for the data type; this adds the stricter admin requirement
+//     for cross-room writes.
+//  2. The target is a live breakout room DESCENDED from that room.
+func (m *NatsModel) canSeedSessionDataTo(parentRoomId, targetRoomId, userId string) bool {
+	sender, err := m.natsService.GetUserInfo(parentRoomId, userId)
+	if err != nil || sender == nil || !sender.GetIsAdmin() {
+		m.logger.Warnf("rejected session data seeding from user %s; not an admin of room %s", userId, parentRoomId)
+		return false
+	}
+
+	meta, err := m.natsService.GetRoomMetadataStruct(targetRoomId)
+	if err != nil || meta == nil || !meta.GetIsBreakoutRoom() {
+		m.logger.Warnf("rejected session data seeding to room %s from user %s; not a breakout room of %s", targetRoomId, userId, parentRoomId)
+		return false
+	}
+
+	// metadata stores "<parent roomId>:<parent table id>"; compare only the
+	// plain parent room id against the room the message arrived on.
+	targetParentRoomId, _, pErr := ParseBreakoutParentRoomRef(meta.GetParentRoomId())
+	if pErr != nil || targetParentRoomId != parentRoomId {
+		m.logger.Warnf("rejected session data seeding to room %s from user %s; not a breakout room of %s", targetRoomId, userId, parentRoomId)
+		return false
+	}
+
+	return true
+}
+
+// parseAndAuthorizeSessionData parses the protojson SessionDataHeader from the
+// message, validates the data type, and checks that the requesting user is allowed
+// to access it. It returns the header (nil only when the message cannot be
+// parsed), the proto SessionDataType, and whether the request is authorized.
+//
+// isFetch indicates whether the request is a fetch (read) or a save (write).
+// Any in-room member may fetch; saves remain presenter/admin-gated.
+func (m *NatsModel) parseAndAuthorizeSessionData(roomId, userId string, req *plugnmeet.NatsMsgClientToServer, isFetch bool) (*plugnmeet.SessionDataHeader, plugnmeet.SessionDataType, bool) {
+	header := new(plugnmeet.SessionDataHeader)
+	if err := protojson.Unmarshal([]byte(req.Msg), header); err != nil {
+		m.logger.WithError(err).Errorln("error unmarshalling session data header")
+		return nil, plugnmeet.SessionDataType_SESSION_DATA_TYPE_UNSPECIFIED, false
+	}
+
+	authorized := false
+	switch header.GetDataType() {
+	case plugnmeet.SessionDataType_SESSION_DATA_TYPE_WHITEBOARD:
+		authorized = m.natsService.IsUserPresenter(roomId, userId)
+		if !authorized && isFetch {
+			if userInfo, err := m.natsService.GetUserInfo(roomId, userId); err == nil && userInfo != nil {
+				authorized = true
+			}
+		}
+	case plugnmeet.SessionDataType_SESSION_DATA_TYPE_NOTEPAD:
+		if userInfo, err := m.natsService.GetUserInfo(roomId, userId); err == nil && userInfo != nil {
+			authorized = userInfo.GetIsPresenter() || userInfo.GetIsAdmin() || isFetch
+		}
+	default:
+		m.logger.Warnf("invalid session data type from user %s", userId)
+		return header, plugnmeet.SessionDataType_SESSION_DATA_TYPE_UNSPECIFIED, false
+	}
+
+	if !authorized {
+		m.logger.Warnf("unauthorized session data request from user %s; room: %s", userId, roomId)
+		return header, plugnmeet.SessionDataType_SESSION_DATA_TYPE_UNSPECIFIED, false
+	}
+	return header, header.GetDataType(), true
+}
+
+// sendSessionDataResponse sends a single SESSION_DATA_FETCH_RESPONSE back to a
+// specific user. The header carries the data entry key along with the binary value.
+func (m *NatsModel) sendSessionDataResponse(roomId, userId string, dataType plugnmeet.SessionDataType, key string, value []byte, last bool) {
+	header := &plugnmeet.SessionDataHeader{
+		DataType: dataType,
+		Key:      &key,
+		Last:     last,
+	}
+	msg, err := protojson.Marshal(header)
+	if err != nil {
+		m.logger.WithError(err).Errorln("failed to marshal session data header")
+		return
+	}
+
+	err = m.natsService.BroadcastSystemEventToRoomWithBinMsg(plugnmeet.NatsMsgServerToClientEvents_SESSION_DATA_FETCH_RESPONSE, roomId, string(msg), value, &userId)
+	if err != nil {
+		m.logger.WithError(err).Errorln("failed to send session data response")
+	}
+}
+
+// buildSessionDataSaveAckHeader builds the header echoed back with a
+// SESSION_DATA_SAVE_RESPONSE: the request's data_type/key/target_room_id plus the
+// caller's request_id and the outcome.
+func buildSessionDataSaveAckHeader(header *plugnmeet.SessionDataHeader, success bool) *plugnmeet.SessionDataHeader {
+	key := header.GetKey()
+	ack := &plugnmeet.SessionDataHeader{
+		DataType:  header.GetDataType(),
+		Key:       &key,
+		RequestId: header.RequestId,
+		Success:   &success,
+	}
+	if target := header.GetTargetRoomId(); target != "" {
+		ack.TargetRoomId = &target
+	}
+	return ack
+}
+
+// sendSessionDataSaveResponse acks a save to the sender only. Saves without a
+// request_id are never answered.
+func (m *NatsModel) sendSessionDataSaveResponse(roomId, userId string, header *plugnmeet.SessionDataHeader, success bool) {
+	if header.GetRequestId() == "" {
+		return
+	}
+
+	msg, err := protojson.Marshal(buildSessionDataSaveAckHeader(header, success))
+	if err != nil {
+		m.logger.WithError(err).Errorln("failed to marshal session data save response")
+		return
+	}
+
+	err = m.natsService.BroadcastSystemEventToRoomWithBinMsg(plugnmeet.NatsMsgServerToClientEvents_SESSION_DATA_SAVE_RESPONSE, roomId, string(msg), nil, &userId)
+	if err != nil {
+		m.logger.WithError(err).Errorln("failed to send session data save response")
+	}
+}

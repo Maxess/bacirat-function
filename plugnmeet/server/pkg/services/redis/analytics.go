@@ -1,0 +1,65 @@
+package redisservice
+
+func (s *RedisService) AnalyticsGetKeyType(key string) (string, error) {
+	return s.rc.Type(s.ctx, key).Result()
+}
+
+func (s *RedisService) AddAnalyticsHSETType(key string, val map[string]string) error {
+	pipe := s.rc.Pipeline()
+	pipe.HSet(s.ctx, key, val)
+	pipe.Expire(s.ctx, key, s.defaultTTL)
+
+	_, err := pipe.Exec(s.ctx)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *RedisService) GetAnalyticsAllHashTypeVals(key string) (map[string]string, error) {
+	return s.rc.HGetAll(s.ctx, key).Result()
+}
+
+func (s *RedisService) IncrementAnalyticsVal(key string, val int64) error {
+	pipe := s.rc.Pipeline()
+	pipe.IncrBy(s.ctx, key, val)
+	pipe.Expire(s.ctx, key, s.defaultTTL)
+
+	_, err := pipe.Exec(s.ctx)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *RedisService) AddAnalyticsStringType(key, val string) error {
+	_, err := s.rc.Set(s.ctx, key, val, s.defaultTTL).Result()
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *RedisService) GetAnalyticsStringTypeVal(key string) (string, error) {
+	return s.rc.Get(s.ctx, key).Result()
+}
+
+func (s *RedisService) AddAnalyticsUser(key string, val map[string]string) error {
+	pipe := s.rc.Pipeline()
+	pipe.HSet(s.ctx, key, val)
+	pipe.Expire(s.ctx, key, s.defaultTTL)
+
+	_, err := pipe.Exec(s.ctx)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *RedisService) AnalyticsGetAllUsers(key string) (map[string]string, error) {
+	result, err := s.rc.HGetAll(s.ctx, key).Result()
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}

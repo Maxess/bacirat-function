@@ -1,0 +1,746 @@
+# Changelog
+
+## [2.5.7](https://github.com/mynaparrot/plugNmeet-server/compare/v2.5.6...v2.5.7) (2026-11-03)
+
+
+### Bug Fixes
+
+* **nats:** scope client inboxPrefix and ACL by roomId and userId ([583b4a7](https://github.com/mynaparrot/plugNmeet-server/commit/583b4a73ed255d2b0b04fb5f9c5977a13385b19c))
+
+## [2.5.6](https://github.com/mynaparrot/plugNmeet-server/compare/v2.5.5...v2.5.6) (2026-11-02)
+
+
+### Bug Fixes
+
+* **analytics:** preserve defaults for invalid metadata ([17b8747](https://github.com/mynaparrot/plugNmeet-server/commit/17b8747465c1284915ac4a8cad30fc349eaea376))
+* **lti:** enforce recording room ownership, isolate LTI JWT issuer, and harden OAuth verification ([35f9a48](https://github.com/mynaparrot/plugNmeet-server/commit/35f9a4847be52eb1accdf10208a488aa4a83f1f5))
+* **security:** isolate download token issuers, bind NATS events to authenticated identity, and harden remaining API surfaces ([6aad197](https://github.com/mynaparrot/plugNmeet-server/commit/6aad197a3c3bf35afa1d07d287cf36e5a6bfd3d2))
+* validate remote url before download + few more validation added ([5d513aa](https://github.com/mynaparrot/plugNmeet-server/commit/5d513aab12a1f0cd13adf0d7603b13c069bc5d15))
+
+## [2.5.5](https://github.com/mynaparrot/plugNmeet-server/compare/v2.5.4...v2.5.5) (2026-11-02)
+
+
+### Bug Fixes
+
+* **security:** harden whiteboard file handling and API session validation (GHSA-9px7-66rq-fv45) ([2fd9fc4](https://github.com/mynaparrot/plugNmeet-server/commit/2fd9fc46ebeeef87581685330fc03566c2b4a3f7))
+
+## [2.5.4](https://github.com/mynaparrot/plugNmeet-server/compare/v2.5.3...v2.5.4) (2026-10-28)
+
+
+### Bug Fixes
+
+* added response signal back when session save confirm ([aca20e1](https://github.com/mynaparrot/plugNmeet-server/commit/aca20e1d50cda499a2a32ba9e7e7d3cc3c2796fc))
+* after proceeded preload file use latest metadata to clean PreloadFile value only ([a594041](https://github.com/mynaparrot/plugNmeet-server/commit/a5940411fdde701efab12647afccef650d8e4a99))
+* breakout room connection event merged with parent room ([d26b87f](https://github.com/mynaparrot/plugNmeet-server/commit/d26b87f18fd39133a6784afe68594821a6d12604))
+* **breakout-room:** attribute breakout-room usage costs to the parent room ([#933](https://github.com/mynaparrot/plugNmeet-server/issues/933)) ([7f34fe3](https://github.com/mynaparrot/plugNmeet-server/commit/7f34fe346914156e13abc84cf2877df9b93bfedc))
+* bump go to `1.27.3` ([c3a9a1c](https://github.com/mynaparrot/plugNmeet-server/commit/c3a9a1c923aa273ee6c17df8f4c95d788859468b))
+* **deps:** update module github.com/gabriel-vasile/mimetype to v1.4.16 ([3e924c2](https://github.com/mynaparrot/plugNmeet-server/commit/3e924c2388d3c5ceeb24e8e8b80c686e77a10c4a))
+* **deps:** update module github.com/gammazero/workerpool to v1.2.2 ([4485a0e](https://github.com/mynaparrot/plugNmeet-server/commit/4485a0e9839b9e683d55b8745dfeceae19af935f))
+* IDE was displaying error ([076e36a](https://github.com/mynaparrot/plugNmeet-server/commit/076e36a5963156b30fd5e22009fa9911c272fd53))
+* **insights:** recover transcription after provider disconnects and stop billing while muted ([#930](https://github.com/mynaparrot/plugNmeet-server/issues/930)) ([d9fa8b0](https://github.com/mynaparrot/plugNmeet-server/commit/d9fa8b0a50556f456488999af4e2eba05f6d89f4))
+* missed to add `.>` for any suffix e.g. recorder id ([97c321e](https://github.com/mynaparrot/plugNmeet-server/commit/97c321ee33d88fc4f153de22943f7bedebd1dca2))
+* **poll:** refactor poll storage and make concurrent voting atomic ([#931](https://github.com/mynaparrot/plugNmeet-server/issues/931)) ([463eaa2](https://github.com/mynaparrot/plugNmeet-server/commit/463eaa29e049f57211f6275271e34555374a1c8f))
+* **recorder:** added new permission STREAM.UPDATE for KV ([7a6613e](https://github.com/mynaparrot/plugNmeet-server/commit/7a6613e6cdacdb4bcddbde77dcda8151ae48ea10))
+* reverted back the permission ([d53296d](https://github.com/mynaparrot/plugNmeet-server/commit/d53296db7e94445a87fcdfe36709f6f419f39a48))
+
+## [2.5.3](https://github.com/mynaparrot/plugNmeet-server/compare/v2.5.2...v2.5.3) (2026-10-11)
+
+
+### Bug Fixes
+
+* **breakout-room:** enforce server-verified user identity in join room ([1b558c1](https://github.com/mynaparrot/plugNmeet-server/commit/1b558c1da47d2cdb47be28b46acfc16c85c2afe1))
+* **polls:** enforce server-authoritative user identity in submit response ([d7039ce](https://github.com/mynaparrot/plugNmeet-server/commit/d7039ceda7a8b9fbf9a202f5aaacbdf99819ae70))
+* **turn:** fallback now requires meaningful, measured evidence that the current connection is struggling, rather than simply waiting for a timer ([c5eabef](https://github.com/mynaparrot/plugNmeet-server/commit/c5eabef225d0ec55766ffe39112b15b1c8b0a9d1))
+
+## [2.5.2](https://github.com/mynaparrot/plugNmeet-server/compare/v2.5.1...v2.5.2) (2026-10-04)
+
+
+### Bug Fixes
+
+* added config option to set ttl. fixed issue: [#915](https://github.com/mynaparrot/plugNmeet-server/issues/915) ([95d5bbc](https://github.com/mynaparrot/plugNmeet-server/commit/95d5bbce718f55c1e03cb0a8f9cbbc4c9828bb60))
+* analytics export should always perform as soon as room end ([507ec9a](https://github.com/mynaparrot/plugNmeet-server/commit/507ec9a99bd3c2f2e122cb5a1ee0b4090442d815))
+* bump mupdf to `1.28.5` ([d2248c6](https://github.com/mynaparrot/plugNmeet-server/commit/d2248c6adfda11c6d6928d200f52d43daa4fd1df))
+* wrong placement of log ([644554d](https://github.com/mynaparrot/plugNmeet-server/commit/644554dba786bc8d5ef242e7b8b65c6ff4dbffd8))
+
+## [2.5.1](https://github.com/mynaparrot/plugNmeet-server/compare/v2.5.0...v2.5.1) (2026-09-20)
+
+
+### Bug Fixes
+
+* broadcast online/offline events to everyone as single event ([75ff088](https://github.com/mynaparrot/plugNmeet-server/commit/75ff0889a413eb9fb5477075a00bb4298d63dbca))
+* fan-out notification to everyone no need private ([87b9bd2](https://github.com/mynaparrot/plugNmeet-server/commit/87b9bd207a4129f112f0097b7eb882b72527aa1e))
+* send users' list more efficiently ([12eb2dd](https://github.com/mynaparrot/plugNmeet-server/commit/12eb2dd37002a04cd6228a09dac07fed002e9887))
+
+## [2.5.0](https://github.com/mynaparrot/plugNmeet-server/compare/v2.4.0...v2.5.0) (2026-09-10)
+
+
+### Features
+
+* add server-first session data store for whiteboard and notepad sync ([5d15d97](https://github.com/mynaparrot/plugNmeet-server/commit/5d15d97a336091bfc50a961354961f02c9d8acfa))
+* **breakout-room:** completly redesigned breakout room's architecture ([#905](https://github.com/mynaparrot/plugNmeet-server/issues/905)) ([56a95f0](https://github.com/mynaparrot/plugNmeet-server/commit/56a95f0ddc1358c5d57cf4a200bc316712152bfb))
+* **polls:** redesigned + AI integration ([#908](https://github.com/mynaparrot/plugNmeet-server/issues/908)) ([a4f532c](https://github.com/mynaparrot/plugNmeet-server/commit/a4f532c254d8e44adb16ee2187dc72a3267ae31e))
+* **refactor:** renamed to `Shared Notepad` ([ff3c4ac](https://github.com/mynaparrot/plugNmeet-server/commit/ff3c4ac2ce2358f4e313bd08050e017ea4eb994e))
+* replaced `Etherpad` with `BlockNote` + `AI` ([#896](https://github.com/mynaparrot/plugNmeet-server/issues/896)) ([cef0de7](https://github.com/mynaparrot/plugNmeet-server/commit/cef0de7c7dac520aea52513530c40453ba08a9b5))
+* **whiteboard:** add `AI Text-to-Diagram` support to the whiteboard ([5a42aca](https://github.com/mynaparrot/plugNmeet-server/commit/5a42aca866ea72744530dcaf514c7014acd30be1))
+
+
+### Bug Fixes
+
+* breakout room should not generate userID ([f478466](https://github.com/mynaparrot/plugNmeet-server/commit/f478466b01b5580e3cede4317b1459f107802605))
+* breakout room should not generate userID ([5e37a89](https://github.com/mynaparrot/plugNmeet-server/commit/5e37a89a71b00685227d8ac5f93b7e1ab7cb7c58))
+* bump `MUPDF` to `1.28.2` ([2995ef0](https://github.com/mynaparrot/plugNmeet-server/commit/2995ef0ecd24c7dc3e1a41d8a9b3a602458e9e3e))
+* bump proto ([6bf3b3c](https://github.com/mynaparrot/plugNmeet-server/commit/6bf3b3cdcd16b98a0c67aa4b490923c526602a0e))
+* if no presenter online then initial sync can be done with redis ([3e01d73](https://github.com/mynaparrot/plugNmeet-server/commit/3e01d73ef1ebed550fa21f0a3c173557bf87b393))
+* poll expiry checker moved to janitor ([0b11b8b](https://github.com/mynaparrot/plugNmeet-server/commit/0b11b8b9be71b8eca53824cb8cd663e3e862e099))
+* removed etherpad as we're no longer using it ([c270154](https://github.com/mynaparrot/plugNmeet-server/commit/c27015450936f0de8820d1b7efc4716e6af40bd7))
+* SharedNotepad merged into room features + clean up ([a67ec14](https://github.com/mynaparrot/plugNmeet-server/commit/a67ec149fc120ae31327f00469a097eefccf22fa))
+
+## [2.4.0](https://github.com/mynaparrot/plugNmeet-server/compare/v2.3.0...v2.4.0) (2026-08-11)
+
+
+### Features
+
+* hybrid integration (nativeBridge) ([#889](https://github.com/mynaparrot/plugNmeet-server/issues/889)) ([ccf01db](https://github.com/mynaparrot/plugNmeet-server/commit/ccf01db3da5839a8ba8b8c66ae18704131d23da6))
+
+
+### Bug Fixes
+
+* bump `MuPDF` ([996ca4b](https://github.com/mynaparrot/plugNmeet-server/commit/996ca4b25a5558cf52867c11f9732c6ea5d670e4))
+* bump deps ([9344da6](https://github.com/mynaparrot/plugNmeet-server/commit/9344da6a57c5af3205a0f9025fd7f5ed3c560ea4))
+* copy `options` properly + clean up code ([e5d87e0](https://github.com/mynaparrot/plugNmeet-server/commit/e5d87e016edcf9b1d1d1a6f2113caca0a7f554be))
+* dynamically calculated A4 page orientation e.g. landscape or  portrait based on converted image file ([1968e26](https://github.com/mynaparrot/plugNmeet-server/commit/1968e26fb6051a454e49e5a1d435073cb7df677e))
+* few improvements in openAI + agent ([e1d8b86](https://github.com/mynaparrot/plugNmeet-server/commit/e1d8b86fc8fa8f0ef61dd90a373cf94bc1f8df5d))
+* get correct user in different LK related services ([d63e712](https://github.com/mynaparrot/plugNmeet-server/commit/d63e71258f12b465b697b4dd6fb3545f810d1a81))
+* **insights:** added new provider `OpenAI` ([#883](https://github.com/mynaparrot/plugNmeet-server/issues/883)) ([3ab03cf](https://github.com/mynaparrot/plugNmeet-server/commit/3ab03cfe67f6cc0e631d4e44530d17cd748772ed))
+* missed to add latest tag, fixed: https://github.com/mynaparrot/plugNmeet-install/issues/43 ([2b2e32f](https://github.com/mynaparrot/plugNmeet-server/commit/2b2e32f275cb6a301e36ab58806c621671e8ea7a))
+* missing checks for admin + cleanup ([#895](https://github.com/mynaparrot/plugNmeet-server/issues/895)) ([951d0a6](https://github.com/mynaparrot/plugNmeet-server/commit/951d0a6a934b46ec461abd68fa367da1c0f22284))
+* prevent to change lock setting for admin ([ff6e9e9](https://github.com/mynaparrot/plugNmeet-server/commit/ff6e9e950509625f53e58a6166c50b17d15f3e74))
+* use multiple worker in case too many pages during converting PDF to image ([1c9d99e](https://github.com/mynaparrot/plugNmeet-server/commit/1c9d99e787c28b557d8ceda2a43271dc750b29cc))
+* we should not verify it like that way ([ceabfa4](https://github.com/mynaparrot/plugNmeet-server/commit/ceabfa4acec4ab515cb428c758cc0eea4272ef88))
+
+## [2.3.0](https://github.com/mynaparrot/plugNmeet-server/compare/v2.2.0...v2.3.0) (2026-07-06)
+
+
+### Features
+
+* add emoji reaction ([575bf5e](https://github.com/mynaparrot/plugNmeet-server/commit/575bf5e3769129a972adf63d562b01c154fcd986))
+* add emoji reaction ([09713b1](https://github.com/mynaparrot/plugNmeet-server/commit/09713b11ac086159ae58ea6d65b2eb02211ebd1d))
+* set raised-hand timestamp on raise/lower ([92aa317](https://github.com/mynaparrot/plugNmeet-server/commit/92aa3172b35ac0314fc41695da30f67180f3b2e5))
+* set raised-hand timestamp on raise/lower ([5cb09ba](https://github.com/mynaparrot/plugNmeet-server/commit/5cb09ba1c6ef255b0fbe852f4c6bfedcad3e1c85))
+* storage hook ([5f9f23b](https://github.com/mynaparrot/plugNmeet-server/commit/5f9f23b215f88762e6c9da26dbcf7c4e298eb38c))
+* storage hook ([55ad7a7](https://github.com/mynaparrot/plugNmeet-server/commit/55ad7a7e4892da64c0db33e006bb1484c16d688d))
+* **whiteboard:** export to PDF ([4f08913](https://github.com/mynaparrot/plugNmeet-server/commit/4f089138035efce565a5b40c7a99f8a434f740ba))
+* **whiteboard:** export to PDF ([f3360ac](https://github.com/mynaparrot/plugNmeet-server/commit/f3360ac32d71ba562e885cd74ea7ecfe5ef6491b))
+
+
+### Bug Fixes
+
+* added option to set hook timeout ([ace1894](https://github.com/mynaparrot/plugNmeet-server/commit/ace18940db88e48d480ecb34c7077048c6d33363))
+* adding missing cast conversion ([f3e1861](https://github.com/mynaparrot/plugNmeet-server/commit/f3e18617a28be140120afd49c1849582f3cf240a))
+* bug in updating lock ([777cc9d](https://github.com/mynaparrot/plugNmeet-server/commit/777cc9dac0d455c802597de06e62dc5f9d15bd44))
+* check pipeline first and fallback to default path ([7542b78](https://github.com/mynaparrot/plugNmeet-server/commit/7542b780756772775751194e1cb143736a34d303))
+* cleaned up confused code ([9006f9b](https://github.com/mynaparrot/plugNmeet-server/commit/9006f9b434b32ab62a57dbed59a16658e066d048))
+* context was canceled before publishing ([a5c6ebf](https://github.com/mynaparrot/plugNmeet-server/commit/a5c6ebf4c764384aecbdf8b8b28e17c658af57fe))
+* detect error if any, during initialization ([ae17b3f](https://github.com/mynaparrot/plugNmeet-server/commit/ae17b3f319595b15d86bc15b4d3b51c909c173b4))
+* don't send raw error message to client ([7e499b1](https://github.com/mynaparrot/plugNmeet-server/commit/7e499b1d6a40812ce28649ae04c7e0ed217e67ea))
+* ensure file names are unique and following same format ([ebdbfc4](https://github.com/mynaparrot/plugNmeet-server/commit/ebdbfc4ebb0030963596c81ac33edb4ba210d409))
+* ensure we're in the right dir e.g. `/app` ([c745978](https://github.com/mynaparrot/plugNmeet-server/commit/c745978d894d478f5fa0e9155feb00df3a5697b6))
+* fallback to default ([86c4839](https://github.com/mynaparrot/plugNmeet-server/commit/86c483995cf2ea5d97d88c4c549c69c172d1db5e))
+* **feat:** storage hooks ([8aaf82d](https://github.com/mynaparrot/plugNmeet-server/commit/8aaf82d3fe394e01be1c691cecaf237a09f980c8))
+* **feat:** storage hooks ([f1e5925](https://github.com/mynaparrot/plugNmeet-server/commit/f1e5925d26a069aac58ea527664178388b19e379))
+* handle correctly with recording metadata ([b1a1c91](https://github.com/mynaparrot/plugNmeet-server/commit/b1a1c9136bcf00f0c9da893960a66b62902ae521))
+* **hooks:** use same pattern for communicating with hooks scripts ([336f0d0](https://github.com/mynaparrot/plugNmeet-server/commit/336f0d04b18e804cdf9ad92111e5d6276d353513))
+* implemented hook for all types file operation ([6305d3f](https://github.com/mynaparrot/plugNmeet-server/commit/6305d3fbfa745a631511224edc2de26ab31f527d))
+* implemented long-lived hook ([ed62106](https://github.com/mynaparrot/plugNmeet-server/commit/ed62106c855fa66afeccb31d3478949857fc18d3))
+* migrate insights `SummarizeJobQueue` to NATS stream ([362bf35](https://github.com/mynaparrot/plugNmeet-server/commit/362bf355c92d976c19db72c3d460dae767716a4a))
+* moved `raised_hand` to its own `UserRaisedHand` message ([3c9519e](https://github.com/mynaparrot/plugNmeet-server/commit/3c9519ef68ac6277549a2edbbafe6e57a81f7f3f))
+* optimized query code ([371e8eb](https://github.com/mynaparrot/plugNmeet-server/commit/371e8eb27657a3744bb74b4bac46a3752fa48f02))
+* panicking during conversion ([14967f4](https://github.com/mynaparrot/plugNmeet-server/commit/14967f4189eceb086d8ed6cda636aa6bf89b20ec))
+* race condition while closing app ([20dfe44](https://github.com/mynaparrot/plugNmeet-server/commit/20dfe446e23dc3dac179bdb1d791be4164c71327))
+* **refactor:** implemented multi pools hook script support ([fc7bf1c](https://github.com/mynaparrot/plugNmeet-server/commit/fc7bf1cfe3a6bd8acac36f4f4561eaeca7564dc4))
+* **refactor:** moved all related code to `BootstrapModule` ([dbcc9c7](https://github.com/mynaparrot/plugNmeet-server/commit/dbcc9c7d3f501dc8b14f8b3608036f34f9970a78))
+* **refactor:** refactored args to use struct for easy to read ([c092422](https://github.com/mynaparrot/plugNmeet-server/commit/c0924226cfe289c6e66b99e30e7f78154fefec77))
+* **refactor:** refactored args to use struct for easy to read ([274c08d](https://github.com/mynaparrot/plugNmeet-server/commit/274c08d4dd1a6f2ab66181d071f49de12647b287))
+* **refactor:** renamed to `hooks` in config ([1a59a6f](https://github.com/mynaparrot/plugNmeet-server/commit/1a59a6f5c3023664c94563ca8dc3ca52984ec285))
+* **refactor:** renamed to `hooks` in config ([91c62a9](https://github.com/mynaparrot/plugNmeet-server/commit/91c62a9105628d0c366be8c935d8a41164579dfd))
+* **refactor:** support for both `long-lived` and `one-shot` commands ([2ca5aab](https://github.com/mynaparrot/plugNmeet-server/commit/2ca5aab23a16a29f7d55cf7d47f998de47ff143f))
+* set `attachment` manually ([7cdee60](https://github.com/mynaparrot/plugNmeet-server/commit/7cdee604627db9da64f76b9c25444b739b2c0c98))
+* use extension based for better reading code ([4a613cf](https://github.com/mynaparrot/plugNmeet-server/commit/4a613cf156ee831649854441fcc61e043d1cdbf4))
+* use proto to handle hooks code ([97c3bbd](https://github.com/mynaparrot/plugNmeet-server/commit/97c3bbd49516d9a5490497618bc21d8b13e80cd7))
+* yaml lib replaced with `goccy/go-yaml` ([f95709d](https://github.com/mynaparrot/plugNmeet-server/commit/f95709d8ff68fc809f0960deb4300cf7cef2821a))
+
+## [2.2.0](https://github.com/mynaparrot/plugNmeet-server/compare/v2.1.9...v2.2.0) (2026-05-30)
+
+
+### Features
+
+* added more details proxy config based on fiber v3 + prometheus basic auth ([a864a9d](https://github.com/mynaparrot/plugNmeet-server/commit/a864a9d7ed3ff00adbe6819a7b5b879b51953221))
+* added new API `BroadcastToRoom` ([203e950](https://github.com/mynaparrot/plugNmeet-server/commit/203e95009149ff596363dfae634ad9a5232390e4))
+* added new API `BroadcastToRoom` ([b925d24](https://github.com/mynaparrot/plugNmeet-server/commit/b925d24e842c6504ebdc55909828d7fdb0231595))
+* added new API endpoint `uploadWhiteboardFile` ([95173fb](https://github.com/mynaparrot/plugNmeet-server/commit/95173fb3fea5f0358470aae8f7d56d12d5b66562))
+* added new API endpoint `uploadWhiteboardFile` ([3474ee8](https://github.com/mynaparrot/plugNmeet-server/commit/3474ee8c8e95345bfcf2b99c92c3b272cc4f7592))
+* added recorder bot controlling options ([ec5dc97](https://github.com/mynaparrot/plugNmeet-server/commit/ec5dc9726c7e86949a35def7bc111ccbccdd6943))
+* allow to use direct link as `document_link` for `uploadWhiteboardFile` as well ([4c91bd4](https://github.com/mynaparrot/plugNmeet-server/commit/4c91bd492929661d67f5b687354cfc7f2f544dfd))
+* **API:** added merge recordings API ([753f51e](https://github.com/mynaparrot/plugNmeet-server/commit/753f51e1726c59ac3214fffb6a628266330a31b9))
+* migrate project from `google wire` to `uber fx` ([e191e38](https://github.com/mynaparrot/plugNmeet-server/commit/e191e38aa3c6b17098f31f5597a635adaf1e2e4f))
+* migrate project from `google wire` to `uber fx` ([7e591f1](https://github.com/mynaparrot/plugNmeet-server/commit/7e591f13885154331e5ba8c3cf59bdf1a80d17a5))
+
+
+### Bug Fixes
+
+* `MergeRecordingsReq` now support roomId as well ([00ff03a](https://github.com/mynaparrot/plugNmeet-server/commit/00ff03a2599ec6dcc3dd319fb74d6a2179b3b01c))
+* add base docker for faster build ([9dd5ee6](https://github.com/mynaparrot/plugNmeet-server/commit/9dd5ee666cceef8c80b6a28e03163c1d7768b36f))
+* added better way to download file ([34edd65](https://github.com/mynaparrot/plugNmeet-server/commit/34edd65d63e2bb68941c592febc1851d94f60e0c))
+* adopt idiomatic fx for dependency management ([3a8394f](https://github.com/mynaparrot/plugNmeet-server/commit/3a8394f42fa8d9eff9534be5c52c35b6c8b7e032))
+* backed previous value will delete upcoming releases ([720de60](https://github.com/mynaparrot/plugNmeet-server/commit/720de60255bf2f8b90b5090b1fb553215c9b9936))
+* better error handling ([d6f6232](https://github.com/mynaparrot/plugNmeet-server/commit/d6f623273b65bfb5282ea98d5fcceb7a2e6b94ca))
+* bump proto ([bc5bbac](https://github.com/mynaparrot/plugNmeet-server/commit/bc5bbac3b17251b6340b20915b9b2be17f2cee91))
+* connection provider should use self-closing ([fbbe6b8](https://github.com/mynaparrot/plugNmeet-server/commit/fbbe6b8d24b2c88d052d230cb426086c7721cd21))
+* disable features when `SelfInsertEncryptionKey` enabled ([6633cb2](https://github.com/mynaparrot/plugNmeet-server/commit/6633cb24ece714549d79f2c69e4cb0ed6a23dd52))
+* fast url validation ([6c715d5](https://github.com/mynaparrot/plugNmeet-server/commit/6c715d5c4886650cf98ea11b24cdf90167023432))
+* few clean up ([c943220](https://github.com/mynaparrot/plugNmeet-server/commit/c943220a0a58dfbfc093884379fbbd2ccb059609))
+* handle conversion in a separate goroutine ([f7fa998](https://github.com/mynaparrot/plugNmeet-server/commit/f7fa998c71cc9c80309e6b8729ae35ed77585400))
+* improve file upload/download ([2ac8125](https://github.com/mynaparrot/plugNmeet-server/commit/2ac81251a5a6476d6db8841801afd63182f15120))
+* install curl ([18f176c](https://github.com/mynaparrot/plugNmeet-server/commit/18f176cd0d91329fc20323c66fce87077722c63b))
+* invalid status code was returning ([7409152](https://github.com/mynaparrot/plugNmeet-server/commit/7409152a53cd58a5e2856c339ebc09f2350bd07a))
+* moved `to_user_id` to root ([5886163](https://github.com/mynaparrot/plugNmeet-server/commit/5886163d071a20e1f2293c9f57935ea20795b9d3))
+* moved connection related logic to single file ([a4941c5](https://github.com/mynaparrot/plugNmeet-server/commit/a4941c5f43131eaed021f3284624372316650002))
+* moved default values to proto ([b56f5ca](https://github.com/mynaparrot/plugNmeet-server/commit/b56f5cac70748dc6a83a2d3d0348087a690ae667))
+* moved some other deps part to base ([c86d69f](https://github.com/mynaparrot/plugNmeet-server/commit/c86d69fca4aba4633af2c797e2a50a29ce1f2bfd))
+* must need to use `strings.Contains` for header matching ([402c6b2](https://github.com/mynaparrot/plugNmeet-server/commit/402c6b20df9d96668e00084c9d88fd3c985d711b))
+* prevent concurrent uploading by API for the same room ([1302997](https://github.com/mynaparrot/plugNmeet-server/commit/130299762ab86c28b29a9539a3dc8fc112f74bce))
+* **refactor:** adopt idiomatic fx for dependency management ([07dedb7](https://github.com/mynaparrot/plugNmeet-server/commit/07dedb7807019d8ff8a44e503ddfe3531b26cc85))
+* replace `QEMU` with native runner ([71b497f](https://github.com/mynaparrot/plugNmeet-server/commit/71b497f6c7183c8b368424d244d80494794a0d7f))
+* replaced by `fiber.Locals` ([bc178e6](https://github.com/mynaparrot/plugNmeet-server/commit/bc178e63bbd5c2a93f5a915ac37ec46680cf1d4d))
+* replaced with `c.RequestCtx()` ([cff65fb](https://github.com/mynaparrot/plugNmeet-server/commit/cff65fb74202b0a91de6c42f492ddc46be7f6466))
+* router for v3 where need to specify both `GET` and `HEAD` ([b74f2e7](https://github.com/mynaparrot/plugNmeet-server/commit/b74f2e7be5536c6bd1ef05e95c1c0791e6d677e6))
+* send proper http status code ([d47cb04](https://github.com/mynaparrot/plugNmeet-server/commit/d47cb04a94a36fe25ab12ecff830972381ae3535))
+* updated logic for `UploadBase64EncodedData` ([55d0599](https://github.com/mynaparrot/plugNmeet-server/commit/55d0599439e8a1961532506dcdd333d9179a469a))
+* upgrade gofiber v3 ([b5f2a3e](https://github.com/mynaparrot/plugNmeet-server/commit/b5f2a3e42bbf3614895ad945962250ad9bc03f8f))
+* upgrade to gofiber v3 ([90e176c](https://github.com/mynaparrot/plugNmeet-server/commit/90e176c12d7c2b2a761bac7a875a97629d82c5a0))
+* use `favicon` middleware ([1bc3eaa](https://github.com/mynaparrot/plugNmeet-server/commit/1bc3eaa87a20ec96a60671947f991d0be3d87c4a))
+* use `fx.In` for easy initialization ([eb4d1b1](https://github.com/mynaparrot/plugNmeet-server/commit/eb4d1b106b97e1c88541e5f60905994c5778dc96))
+* use `mutool` `draw` command ([d4ba4af](https://github.com/mynaparrot/plugNmeet-server/commit/d4ba4af68473b19d43885be5ed1e7190ad111731))
+* use `Room-Id` as header value so that can include in signature validation ([0779ab0](https://github.com/mynaparrot/plugNmeet-server/commit/0779ab09c4a41598d3e81f596b07d87c731a8253))
+* use plain user info to avoid confusion ([0731e74](https://github.com/mynaparrot/plugNmeet-server/commit/0731e745966a8540b9888c8d45302202ad824eeb))
+* use same file path checking for all download type ([c2b25b5](https://github.com/mynaparrot/plugNmeet-server/commit/c2b25b5617647ed06979329246aabb521b36e0b4))
+* validate resumableIdentifier + made MakeSafeFilename less sensitive ([d4042e7](https://github.com/mynaparrot/plugNmeet-server/commit/d4042e790caccf3e552f22cf01ed16f225aba0de))
+
+## [2.1.9](https://github.com/mynaparrot/plugNmeet-server/compare/v2.1.8...v2.1.9) (2026-05-07)
+
+
+### Bug Fixes
+
+* bump actions ([3b067ee](https://github.com/mynaparrot/plugNmeet-server/commit/3b067ee7fbf92cbccf633dc9282a8a651936033a))
+* bump deps ([7948141](https://github.com/mynaparrot/plugNmeet-server/commit/7948141d1d8fc90ac53910622b489753b396358b))
+* bump proto ([da564ba](https://github.com/mynaparrot/plugNmeet-server/commit/da564ba44edc66e61f0545627fe0a8b0d78ca041))
+* lock to prevent duplicate task while another is processing ([e89604a](https://github.com/mynaparrot/plugNmeet-server/commit/e89604a8ba5c852c6a66500e72e9ff305f1e8251))
+
+## [2.1.8](https://github.com/mynaparrot/plugNmeet-server/compare/v2.1.7...v2.1.8) (2026-04-24)
+
+
+### Bug Fixes
+
+* added new `max_preloaded_wb_file_size` config option ([a1fb850](https://github.com/mynaparrot/plugNmeet-server/commit/a1fb850820889d370d8360134751c57e3a4527d5))
+* don't check `ContentLength` if server didn't set it, need to check after download ([e0888fb](https://github.com/mynaparrot/plugNmeet-server/commit/e0888fba22876138cd8d773eeba2ead135c7ac4f))
+* invalid status code was added ([604a44c](https://github.com/mynaparrot/plugNmeet-server/commit/604a44c44bd71b4dd21012ca88c3ddd4836cc79d))
+
+## [2.1.7](https://github.com/mynaparrot/plugNmeet-server/compare/v2.1.6...v2.1.7) (2026-04-21)
+
+
+### Bug Fixes
+
+* added description for easy understanding ([b67219f](https://github.com/mynaparrot/plugNmeet-server/commit/b67219fb00a4ab1cea7ec76cadda5832b68224eb))
+* added status code in auth related response ([c5a9f5f](https://github.com/mynaparrot/plugNmeet-server/commit/c5a9f5f8278b179a6696c7fb48d3beb5ecc0928d))
+* adjusted with new options ([97bd547](https://github.com/mynaparrot/plugNmeet-server/commit/97bd547b42f9283a467630f98bd9e169f68424ff))
+* bump to go `1.26` ([30e02b7](https://github.com/mynaparrot/plugNmeet-server/commit/30e02b7dab973fce72b434044db37684d16aedc4))
+* clear logs ([a8fee75](https://github.com/mynaparrot/plugNmeet-server/commit/a8fee75617b9a1ea3deb43fe2d9bcb7af23becfe))
+* consider CPU usage during selecting recorder ([cc9870a](https://github.com/mynaparrot/plugNmeet-server/commit/cc9870aaaece04a72c23fda608c8304f2848543f))
+* **deps:** update module github.com/microsoft/cognitive-services-speech-sdk-go to v1.49.0 ([90ae974](https://github.com/mynaparrot/plugNmeet-server/commit/90ae97444412289207664b505ac24b0e58d555d9))
+* **deps:** update module github.com/microsoft/cognitive-services-speech-sdk-go to v1.49.0 ([56566d8](https://github.com/mynaparrot/plugNmeet-server/commit/56566d86955cc986cb7e351e3228c497ba117258))
+* **feat:** new option `fallback_on_flapping` for turn server ([033cb4a](https://github.com/mynaparrot/plugNmeet-server/commit/033cb4ab4e5ba5e74c62b0f9d89f57c9e31c2918))
+
+## [2.1.6](https://github.com/mynaparrot/plugNmeet-server/compare/v2.1.5...v2.1.6) (2026-04-09)
+
+
+### Bug Fixes
+
+* acquire lock as soon as request arrive ([6bbae57](https://github.com/mynaparrot/plugNmeet-server/commit/6bbae5766391babaa0a4b64c5c020fc8ac9dbff7))
+* added comments and renamed methods ([b8298f6](https://github.com/mynaparrot/plugNmeet-server/commit/b8298f66f19f9663e914a1535e90268b53d746b0))
+* added missing context ([933fd13](https://github.com/mynaparrot/plugNmeet-server/commit/933fd13247ec61922821ae26699d2fe8c294d402))
+* added/clean logs ([d6366ec](https://github.com/mynaparrot/plugNmeet-server/commit/d6366ec67ac849d10d79958c02014226dec14e77))
+* check status immediately after calling ([8fc8521](https://github.com/mynaparrot/plugNmeet-server/commit/8fc8521ba2038467705180a5c3fe229c067d0402))
+* clean up code ([e1df472](https://github.com/mynaparrot/plugNmeet-server/commit/e1df472feb57fd295ad655920475715f9e1fe49c))
+* confusing log was displaying ([6f420ce](https://github.com/mynaparrot/plugNmeet-server/commit/6f420cee9c6176ae3be14696780100ce9e01dac9))
+* **critical:** duplicate event was sending because of using same subject for both JS and Core pub/sub ([83c0535](https://github.com/mynaparrot/plugNmeet-server/commit/83c053590bf3946e4ea76dae86a8a594d4486c8a))
+* **deps:** update module google.golang.org/genai to v1.53.0 ([c94f417](https://github.com/mynaparrot/plugNmeet-server/commit/c94f41793ffc7502a3ee3553920c7b90f908acbf))
+* **deps:** update module google.golang.org/genai to v1.53.0 ([ba3d28e](https://github.com/mynaparrot/plugNmeet-server/commit/ba3d28e7e95705876a528f6ee417da26d5891159))
+* handle user disconnection more efficiently ([87f8a27](https://github.com/mynaparrot/plugNmeet-server/commit/87f8a2718b203d58018ef1f30009dca71b7ebd45))
+* log duration took ([3c670b0](https://github.com/mynaparrot/plugNmeet-server/commit/3c670b01085a6bff1e0fcbe6890faefe55d16b38))
+* reworked on `OnAfterRoomEnded` to handle session termination more efficiently ([7285ca3](https://github.com/mynaparrot/plugNmeet-server/commit/7285ca3c323040e624acfec15f5349f71f73797a))
+* update local cache during update to prevent nats `watch` latency problem ([a540966](https://github.com/mynaparrot/plugNmeet-server/commit/a540966edb1f60ede5b4c0fdeba825271502bea1))
+* update proto ([a33ff7b](https://github.com/mynaparrot/plugNmeet-server/commit/a33ff7bd6b9c2a13c99a24bbdd04eec4672c1093))
+
+## [2.1.5](https://github.com/mynaparrot/plugNmeet-server/compare/v2.1.4...v2.1.5) (2026-04-04)
+
+
+### Bug Fixes
+
+* bug fix and improved LTI ([42d25cc](https://github.com/mynaparrot/plugNmeet-server/commit/42d25cc1e7d3404d9ea899871f4d34056aeddf44))
+* bump deps ([d0809a1](https://github.com/mynaparrot/plugNmeet-server/commit/d0809a1e2016fde2a1d0ff74de654c6cbd052788))
+* bump deps ([9626944](https://github.com/mynaparrot/plugNmeet-server/commit/9626944c38e80884565dd534040bf050df264963))
+* db counter should update when user conncted/disconncted ([b09d589](https://github.com/mynaparrot/plugNmeet-server/commit/b09d589d04dd4c111042f45365a5884ddde1edbe))
+* **deps:** update module github.com/go-jose/go-jose/v4 to v4.1.4 [security] ([0db6d9b](https://github.com/mynaparrot/plugNmeet-server/commit/0db6d9b9f7683d2213e29b4b0939d36257549a2b))
+* **deps:** update module github.com/go-jose/go-jose/v4 to v4.1.4 [security] ([24ccdb4](https://github.com/mynaparrot/plugNmeet-server/commit/24ccdb4638f322b52c5145b5fd310285f86bd226))
+* **deps:** update module github.com/goccy/go-json to v0.10.6 ([a44ef26](https://github.com/mynaparrot/plugNmeet-server/commit/a44ef262ffb844f1b641822682a37bda136fb5be))
+* **deps:** update module github.com/goccy/go-json to v0.10.6 ([f7baa2b](https://github.com/mynaparrot/plugNmeet-server/commit/f7baa2b4d8f0959af3c6b3a50e3773f4bc3f11a4))
+* just for safety although strickly controlled by caller ([2e7569f](https://github.com/mynaparrot/plugNmeet-server/commit/2e7569fc79e560c3de0f4e8ed3a48b6b679968f9))
+* **LTI:** build URL correct way ([4e012f3](https://github.com/mynaparrot/plugNmeet-server/commit/4e012f34ab0ff0f206180805528758ee2e3689c6))
+* migrate manual worker pool to `gammazero/workerpool` ([6f5d5ad](https://github.com/mynaparrot/plugNmeet-server/commit/6f5d5add048b4071ba723daf19473f6dda35c7e8))
+* **nats:** Implemented new system pub/sub core channel and moved `sendAnalyticsData` to use it. ([75e41a2](https://github.com/mynaparrot/plugNmeet-server/commit/75e41a22215d36df5e34fef44764d8657bb1b726))
+* update messages ([1a7a64c](https://github.com/mynaparrot/plugNmeet-server/commit/1a7a64cea50e4e75b6356650de9ef2602068a8db))
+* use latest image ([ce714ec](https://github.com/mynaparrot/plugNmeet-server/commit/ce714ec79258431123312ddad99d072e67b20d15))
+* use title to identify ([98b12bd](https://github.com/mynaparrot/plugNmeet-server/commit/98b12bd4791ef6d16c71617ec6b9b961e36b192e))
+
+## [2.1.4](https://github.com/mynaparrot/plugNmeet-server/compare/v2.1.3...v2.1.4) (2026-03-02)
+
+
+### Bug Fixes
+
+* bump deps ([35d5d35](https://github.com/mynaparrot/plugNmeet-server/commit/35d5d3574d04988bcfcec26536c5c458d04aaada))
+* configurable option to `fallback_turn` when connection bad ([e05b55e](https://github.com/mynaparrot/plugNmeet-server/commit/e05b55e1a1b02952c12de9065486264186c09a87))
+* **deps:** update module buf.build/go/protovalidate to v1.1.2 ([79b81ad](https://github.com/mynaparrot/plugNmeet-server/commit/79b81ad221320efb25e2495d095c051ff483562c))
+* **deps:** update module buf.build/go/protovalidate to v1.1.2 ([04a2ec7](https://github.com/mynaparrot/plugNmeet-server/commit/04a2ec7a132ac75f09f78e155805bee2ff5cab9f))
+* **deps:** update module buf.build/go/protovalidate to v1.1.3 ([541ac68](https://github.com/mynaparrot/plugNmeet-server/commit/541ac684b0f23b38afecfc6e2a707e3aa82071fa))
+* **deps:** update module buf.build/go/protovalidate to v1.1.3 ([82a259a](https://github.com/mynaparrot/plugNmeet-server/commit/82a259ab1fbf9c07b26a206aa8f7b6885bb286ca))
+* **deps:** update module github.com/gofiber/fiber/v2 to v2.52.12 [security] ([736860a](https://github.com/mynaparrot/plugNmeet-server/commit/736860af443ef30e304e44d54af89bc3d1cb6304))
+* **deps:** update module github.com/gofiber/fiber/v2 to v2.52.12 [security] ([d39747d](https://github.com/mynaparrot/plugNmeet-server/commit/d39747db851549642d663a417b6d8248d609a8f2))
+* **deps:** update module github.com/microsoft/cognitive-services-speech-sdk-go to v1.48.2 ([cf84a12](https://github.com/mynaparrot/plugNmeet-server/commit/cf84a12a9b0d0dc27718c6fb1f0cb361819ee3e5))
+* **deps:** update module github.com/microsoft/cognitive-services-speech-sdk-go to v1.48.2 ([3e41609](https://github.com/mynaparrot/plugNmeet-server/commit/3e41609ec0b17bba2d4721ba1293bff6d2ee93b2))
+* ensure max 64 characters ([dace4f2](https://github.com/mynaparrot/plugNmeet-server/commit/dace4f2b371470d9ab2a51c3c11901e18ecdb530))
+* **feat:** option to auto download client ([22449f1](https://github.com/mynaparrot/plugNmeet-server/commit/22449f159f6e98c157644a507e34785c2c93fbb5))
+* **feat:** option to configure custom turn servers ([1fc45a7](https://github.com/mynaparrot/plugNmeet-server/commit/1fc45a75ebe19c669b78f398a5ba399f7801ef22))
+* **feat:** option to configure custom turn servers ([1cd9b65](https://github.com/mynaparrot/plugNmeet-server/commit/1cd9b6592aa99760d643a82bc912f2f8ecd5a19e))
+* nats connection tag name ([5cb471b](https://github.com/mynaparrot/plugNmeet-server/commit/5cb471b97ca119c9a7b4866b8784048cf8ab4f65))
+* option to set `fallbackTimerDuration` in server config ([a58048a](https://github.com/mynaparrot/plugNmeet-server/commit/a58048a109b7de04c68f06343c54c9dada482eb9))
+* the value of `customIdentifier` can't be too long ([55990a6](https://github.com/mynaparrot/plugNmeet-server/commit/55990a6addec2a8318e6edd3f54dcd947a048cf1))
+* use `jetstream.InterestPolicy` as `Retention` ([212275a](https://github.com/mynaparrot/plugNmeet-server/commit/212275a998609589ce3fbd824a21c9eb7589b394))
+
+## [2.1.3](https://github.com/mynaparrot/plugNmeet-server/compare/v2.1.2...v2.1.3) (2026-02-11)
+
+
+### Bug Fixes
+
+* added `HEAD` as `AllowMethods` ([52169a0](https://github.com/mynaparrot/plugNmeet-server/commit/52169a0d49607098f98176ddc23388b3360228a7))
+* **deps:** update module github.com/gabriel-vasile/mimetype to v1.4.13 ([cdfeae1](https://github.com/mynaparrot/plugNmeet-server/commit/cdfeae1c14a3b75674e9a18906e154bd05b091f4))
+* **deps:** update module github.com/gabriel-vasile/mimetype to v1.4.13 ([b5102dc](https://github.com/mynaparrot/plugNmeet-server/commit/b5102dcbec60e39b9abd5385785eeb0ca3ce69b7))
+* **deps:** update module github.com/gofiber/fiber/v2 to v2.52.11 [security] ([1916cca](https://github.com/mynaparrot/plugNmeet-server/commit/1916cca89a9d835b0e327b9403a1402f7a13398a))
+* **deps:** update module github.com/gofiber/fiber/v2 to v2.52.11 [security] ([cb3b3b3](https://github.com/mynaparrot/plugNmeet-server/commit/cb3b3b36f30cd00e064e17e36e92ab5847d1ef88))
+* **deps:** update module github.com/livekit/server-sdk-go/v2 to v2.13.3 ([e81330b](https://github.com/mynaparrot/plugNmeet-server/commit/e81330b366b5c310b16480a9a7494a1f5030b9b8))
+* **deps:** update module github.com/livekit/server-sdk-go/v2 to v2.13.3 ([b2432a6](https://github.com/mynaparrot/plugNmeet-server/commit/b2432a681a374edac0fd6399d87652ee7b52456b))
+* **feature:** implemented PONG from server to client to detect backend server's responsiveness ([c0cb832](https://github.com/mynaparrot/plugNmeet-server/commit/c0cb83227d563eb8f24f79288231bbf4575e15de))
+
+## [2.1.2](https://github.com/mynaparrot/plugNmeet-server/compare/v2.1.1...v2.1.2) (2026-01-31)
+
+
+### Bug Fixes
+
+* deliver private messages routed by server through private channel ([e638788](https://github.com/mynaparrot/plugNmeet-server/commit/e6387888f3257169dfa770e658a4108ad2e9bd35))
+* fallback watching with `GetUserInfo` as well ([98c3006](https://github.com/mynaparrot/plugNmeet-server/commit/98c300637bb6a70e22a89b95528989b1b5f9b8b2))
+* more verification before getting from cache ([3782da1](https://github.com/mynaparrot/plugNmeet-server/commit/3782da13f97ef30503aca9b38bc30b45c6c3f7a0))
+
+## [2.1.1](https://github.com/mynaparrot/plugNmeet-server/compare/v2.1.0...v2.1.1) (2026-01-30)
+
+
+### Bug Fixes
+
+* adjusted time ([c05e5b3](https://github.com/mynaparrot/plugNmeet-server/commit/c05e5b343a87aad200e023b743e7edb294b677aa))
+* bug regarding `enabled_self_insert_encryption_key` ([cc55908](https://github.com/mynaparrot/plugNmeet-server/commit/cc559083f779b2810de74f88091d09e1c8e2d685))
+* bump deps ([7945378](https://github.com/mynaparrot/plugNmeet-server/commit/7945378b906e9b9dd07ff1188951a5aeaa848f05))
+* clean + re-arranged code ([81fb5ee](https://github.com/mynaparrot/plugNmeet-server/commit/81fb5ee612bdc1ede8ab7b62d0c924b2961c9b0a))
+* clean up + bump proto ([dca96b0](https://github.com/mynaparrot/plugNmeet-server/commit/dca96b075f1f5c72dee38aadb12812e1d16a4620))
+* clean up ProcessRecorderEvent ([b39d712](https://github.com/mynaparrot/plugNmeet-server/commit/b39d712b2e41a54179e05c4a144fd5998cae6d38))
+* cleaned up + merged ([c5654d5](https://github.com/mynaparrot/plugNmeet-server/commit/c5654d575aa10acec2946adf91a98abd8917a3c9))
+* cleaned up + merged ([5f37afe](https://github.com/mynaparrot/plugNmeet-server/commit/5f37afe1e97d6e1393f2cdec00d215246e106f48))
+* cleaning up ([99ace5d](https://github.com/mynaparrot/plugNmeet-server/commit/99ace5d64574e0d9684427166a89f1359f49eb14))
+* data race ([833dde2](https://github.com/mynaparrot/plugNmeet-server/commit/833dde2a3bd78c27f72912e400be5b03c6ee8c24))
+* delay end to avoid race condition ([8d41272](https://github.com/mynaparrot/plugNmeet-server/commit/8d41272aa20f461b525154c9356d29a8bb8f5147))
+* **deps:** update module github.com/redis/go-redis/v9 to v9.17.3 ([7127d3f](https://github.com/mynaparrot/plugNmeet-server/commit/7127d3fadd338faab3f7d66b043e29f8e5542892))
+* **deps:** update module github.com/redis/go-redis/v9 to v9.17.3 ([4f90208](https://github.com/mynaparrot/plugNmeet-server/commit/4f90208b93684e2beba8e59d9f3c7b96b8261919))
+* **deps:** update module google.golang.org/genai to v1.43.0 ([f74048b](https://github.com/mynaparrot/plugNmeet-server/commit/f74048b496565072f015d24c518df117ff5e8cfd))
+* **deps:** update module google.golang.org/genai to v1.43.0 ([0b9e613](https://github.com/mynaparrot/plugNmeet-server/commit/0b9e61394feece5e5f6745b5f91d20bc46b551db))
+* don't trigger for internal ([eb67710](https://github.com/mynaparrot/plugNmeet-server/commit/eb67710aeae6302b8f4133e7f9cfcc1c492bced5))
+* fallback to redis cache ([f8d1766](https://github.com/mynaparrot/plugNmeet-server/commit/f8d1766a5d73693883ced8a4f698587682c9e04e))
+* lk logging issue + bump SDK ([4003f28](https://github.com/mynaparrot/plugNmeet-server/commit/4003f28494238fe9b8cd562e8877c4ea06727287))
+* merged `ExternalDisplayLink` ([d707169](https://github.com/mynaparrot/plugNmeet-server/commit/d707169bf110500458490c660eab4a403f17fba2))
+* merged `ExternalMediaPlayer` ([498c313](https://github.com/mynaparrot/plugNmeet-server/commit/498c313180a3f5995c131226d44846f4c9170953))
+* merged `recorder` ([0f5a677](https://github.com/mynaparrot/plugNmeet-server/commit/0f5a677207f89dc454985fa7205251ce950c48ea))
+* merged `room duration` ([37ecb23](https://github.com/mynaparrot/plugNmeet-server/commit/37ecb23fe0fc15692e7bf0843352f7165bd15264))
+* merged `RoomDuration` ([8b67809](https://github.com/mynaparrot/plugNmeet-server/commit/8b67809b8bdfe934b86937191653c594b61c3236))
+* merged `waiting room` ([6dab935](https://github.com/mynaparrot/plugNmeet-server/commit/6dab9352c9ecbaa458f4bd18006dfa2765f7cc65))
+* merged blocklist into user's field ([3688d2d](https://github.com/mynaparrot/plugNmeet-server/commit/3688d2db69395082a49d2469ca9ea13fb42dac7d))
+* migrate chat to core pub/sub ([fa6fbae](https://github.com/mynaparrot/plugNmeet-server/commit/fa6fbaed151374c49cd5ac815fc817a6bb110c21))
+* migrated breakout rooms stats in redis ([b4ed045](https://github.com/mynaparrot/plugNmeet-server/commit/b4ed0459e112c1b564b3e08b74ee2fc0543c7d9e))
+* migrated into redis as nats KV TTL seems not working properly ([edd565a](https://github.com/mynaparrot/plugNmeet-server/commit/edd565afd747c4b4d53012b6ad35e1f429cbc60f))
+* migrated webhookData in redis ([ac666e6](https://github.com/mynaparrot/plugNmeet-server/commit/ac666e6729d25e2d84d1ae3318a51283af1352fa))
+* moved cache under NATS service to manage ([e999355](https://github.com/mynaparrot/plugNmeet-server/commit/e99935550163b1d9abd6b200ad003978fe8d2b2b))
+* nats optimisation ([5c8e3a6](https://github.com/mynaparrot/plugNmeet-server/commit/5c8e3a654bb598b75debb5cf52c8699197c57f24))
+* nats optimisation ([220bfb0](https://github.com/mynaparrot/plugNmeet-server/commit/220bfb07c9f528a53dcdad737ccbcfa289d4141b))
+* optimized `WebhookNotifier` ([c51f3e7](https://github.com/mynaparrot/plugNmeet-server/commit/c51f3e7168d32f2f0345e7a318484b2f7ee1fda7))
+* optimized KV for `etherpad` ([baef5eb](https://github.com/mynaparrot/plugNmeet-server/commit/baef5ebf911f4f953a671c0f66c984e0935ff333))
+* optimized KVs ([d354aaf](https://github.com/mynaparrot/plugNmeet-server/commit/d354aafa9f9ab9eec96d69646887654d77e34783))
+* organized nats KV/stream better way ([e26f05c](https://github.com/mynaparrot/plugNmeet-server/commit/e26f05c79add85e26fc1a3bec7b2e9b564a4219d))
+* periodically sync users and reconcile ([b6b361a](https://github.com/mynaparrot/plugNmeet-server/commit/b6b361a182ad34542d4abf2385bbec01b5f26cc2))
+* prevents a panic when sending to a closed channel ([40bc3ca](https://github.com/mynaparrot/plugNmeet-server/commit/40bc3ca11c06580df6be23286e08f5f4996d9f87))
+* refactored the way `IsRoomActive` worked before ([5b4aa22](https://github.com/mynaparrot/plugNmeet-server/commit/5b4aa22639e68a2cabd4b77684eb821f17557379))
+* **refactor:** improved the way to handle recorder ([0aa95af](https://github.com/mynaparrot/plugNmeet-server/commit/0aa95af64cac4a5fd68f60aaa9d3626f185e568b))
+* **refactor:** recorders will use single KV bucket ([c9115b9](https://github.com/mynaparrot/plugNmeet-server/commit/c9115b95c5197d34dbf341057f0b1a4ce8be1cb5))
+* retrieve room files from cache as well ([ce91154](https://github.com/mynaparrot/plugNmeet-server/commit/ce9115434dc89a5176a96bdedc63b9357484ff2e))
+* seperated mutex to avoid panic error ([366ef61](https://github.com/mynaparrot/plugNmeet-server/commit/366ef6141552a22ce1a432c59b81778a09121a05))
+* temporary room data status should be `RoomStatusEnded` ([d873668](https://github.com/mynaparrot/plugNmeet-server/commit/d87366858219b2660f55bada46f916c9f06d201d))
+* update status immediately ([5b38e03](https://github.com/mynaparrot/plugNmeet-server/commit/5b38e0367301fe7743a150831175144fe77f2a5c))
+* use hash with key expiration ([a2d3e9c](https://github.com/mynaparrot/plugNmeet-server/commit/a2d3e9c5644d550738402bc05724ddb6094c325a))
+* use nats core pub/sub for high-performance, loss-tolerant events like `TRANSCRIPTION_OUTPUT_TEXT` ([90ef6d1](https://github.com/mynaparrot/plugNmeet-server/commit/90ef6d14c81c56bc2ac60d6cf83881e7aaa62c34))
+* use nats core pub/sub for high-performance, loss-tolerant events like `TRANSCRIPTION_OUTPUT_TEXT` ([0e59d7a](https://github.com/mynaparrot/plugNmeet-server/commit/0e59d7ab9943f36a954fa2d513b5dcf252abc17d))
+* use new status `RoomStatusTriggeredEnd` when triggered end ([b23fa36](https://github.com/mynaparrot/plugNmeet-server/commit/b23fa367e72c6e4f7615473603de97c2f55a2787))
+* use redis temporary storage to retrieve room info ([a9ce286](https://github.com/mynaparrot/plugNmeet-server/commit/a9ce286b8fcb4ed633f65f2bf887276718085eb2))
+* webhook data cleanup moved to defer of `PrepareToExportAnalytics` method ([2b909a6](https://github.com/mynaparrot/plugNmeet-server/commit/2b909a66db539c7295ba347cc8952a71d9d7342f))
+
+## [2.1.0](https://github.com/mynaparrot/plugNmeet-server/compare/v2.0.3...v2.1.0) (2026-01-21)
+
+
+### Features
+
+* SIP dial in ([4d6e3bf](https://github.com/mynaparrot/plugNmeet-server/commit/4d6e3bf455bb6ebc93e812898bc0f0b6affbcfbc))
+* SIP dial in ([ede2dda](https://github.com/mynaparrot/plugNmeet-server/commit/ede2dda4e652c93925fa43d350c8aa82c6119ea0))
+
+
+### Bug Fixes
+
+* bump proto ([bd817d1](https://github.com/mynaparrot/plugNmeet-server/commit/bd817d19e51d5153674253dc3c518f21edf34607))
+* mask phone number in proper way ([0f39025](https://github.com/mynaparrot/plugNmeet-server/commit/0f39025cab3ef3d13128a1e53d58957fbf318986))
+* recording file size record ([8ad5b79](https://github.com/mynaparrot/plugNmeet-server/commit/8ad5b798b77af29d890d85b9dfed0e3dac1e1855))
+* removed deprecated `speechServices` ([30c1c10](https://github.com/mynaparrot/plugNmeet-server/commit/30c1c1043416819e51421968832267b5f3a5ecc2))
+* replace BBB `%%CONFNAME%%` with correct value ([ade869b](https://github.com/mynaparrot/plugNmeet-server/commit/ade869bd90a75d3d2816018f26781ba3ec3362fb))
+* runtime nil pointer error ([9dbc161](https://github.com/mynaparrot/plugNmeet-server/commit/9dbc161100221f18ef7529da0e20fdbbb2c5ef31))
+* SIP user name ([3c0107b](https://github.com/mynaparrot/plugNmeet-server/commit/3c0107b02976ee9c97825a9e8b992bef8dc40ad4))
+* use sip provided name ([bfc1c24](https://github.com/mynaparrot/plugNmeet-server/commit/bfc1c24557dc24b3bd434795372a3a0971e76861))
+
+## [2.0.3](https://github.com/mynaparrot/plugNmeet-server/compare/v2.0.2...v2.0.3) (2026-01-13)
+
+
+### Bug Fixes
+
+* added option to set CDN url for static_assets_path ([8b7a41a](https://github.com/mynaparrot/plugNmeet-server/commit/8b7a41a38ff725f737025f9ae8ed00a6f1b40dcc))
+* **refactor:** migrate whiteboard & dataChannel to use nats core pub/sub for low latency as jetstream seems very slow ([e7c1663](https://github.com/mynaparrot/plugNmeet-server/commit/e7c1663efe5450d98eec8fccc4fce850771c722a))
+* round filesize in 2 precision ([b0f4d92](https://github.com/mynaparrot/plugNmeet-server/commit/b0f4d92a35c9422ea2f881e8f732f58465dddbcf))
+* save original size ([1535d6b](https://github.com/mynaparrot/plugNmeet-server/commit/1535d6b159ea3eabc5484b0c87d75b79e77c40a5))
+* update `ToFixed` logic ([de0b8a2](https://github.com/mynaparrot/plugNmeet-server/commit/de0b8a29229ace10548bbc460737d2f34b44fbd0))
+
+## [2.0.2](https://github.com/mynaparrot/plugNmeet-server/compare/v2.0.1...v2.0.2) (2025-12-21)
+
+
+### Bug Fixes
+
+* incorrect path problem ([375fb1f](https://github.com/mynaparrot/plugNmeet-server/commit/375fb1f8897af9669ae20f03449e5c2a8415176a))
+
+## [2.0.1](https://github.com/mynaparrot/plugNmeet-server/compare/v2.0.0...v2.0.1) (2025-12-21)
+
+
+### Bug Fixes
+
+* dir navigation problem ([cd2f301](https://github.com/mynaparrot/plugNmeet-server/commit/cd2f30117189990a89c94795e37184d907cb331b))
+
+## [2.0.0](https://github.com/mynaparrot/plugNmeet-server/compare/v1.9.4...v2.0.0) (2025-12-20)
+
+
+### ⚠ BREAKING CHANGES
+
+* breaking changes in new UI + API
+
+### Features
+
+* ability to download transcription in vtt format ([bab5746](https://github.com/mynaparrot/plugNmeet-server/commit/bab5746c161da3349b0e358e33e242ca16a2640f))
+* breaking changes in new UI + API ([e637442](https://github.com/mynaparrot/plugNmeet-server/commit/e63744216cda41c92192c84f8c7449289bcba1dc))
+* chat with AI ([13ede93](https://github.com/mynaparrot/plugNmeet-server/commit/13ede937c144f772d5fed9ba033819b27ab1f3bf))
+* DB auto migration ([c66f2ba](https://github.com/mynaparrot/plugNmeet-server/commit/c66f2baf790e304667e03ce2096e3684046c41ae))
+* estimated cost calculation ([0b48530](https://github.com/mynaparrot/plugNmeet-server/commit/0b485303766be50cee9218c83850c1548d4a05e9))
+* Insights framework ([5b35582](https://github.com/mynaparrot/plugNmeet-server/commit/5b355825c52ead3bbfb7f939dd5d6a60b9836df0))
+* meeting summerization ([53985c9](https://github.com/mynaparrot/plugNmeet-server/commit/53985c9eaae0372d33df0e9eb0e7cc0d74e9d934))
+* **recording:** recording metadata ([404de39](https://github.com/mynaparrot/plugNmeet-server/commit/404de3956ae7496b6a2c1cabc7a25009d03a7ccd))
+* server config option to enable/disable `insights` ([e8808c5](https://github.com/mynaparrot/plugNmeet-server/commit/e8808c59ec50a2241a96bf3927cd1adf6a7ebaf2))
+
+
+### Bug Fixes
+
+* added option to request/response media server info ([72d1082](https://github.com/mynaparrot/plugNmeet-server/commit/72d10826397b9cf36c7fd4ac169a160b3c464153))
+* adjusted with new API ([ddde79e](https://github.com/mynaparrot/plugNmeet-server/commit/ddde79e9a5a26f81c17279928fe7ffd88abd7a5d))
+* **api:** prevent to list without roomId or roomSid ([4c3b60e](https://github.com/mynaparrot/plugNmeet-server/commit/4c3b60e41564852e699298b6926ac880a7ceeecd))
+* bump deps ([62fd2ca](https://github.com/mynaparrot/plugNmeet-server/commit/62fd2caa1ba203b32b716ffaded97b6d25eb4178))
+* bump proto ([57345c7](https://github.com/mynaparrot/plugNmeet-server/commit/57345c7839378cd6a24be15f3ade8529b4cc1dcd))
+* bump proto ([9475dec](https://github.com/mynaparrot/plugNmeet-server/commit/9475decaadefe211872befb9bee4b6c13ae8dcbe))
+* dependencies update ([5017670](https://github.com/mynaparrot/plugNmeet-server/commit/5017670fdee65f8a93e892055c291ea51e625a2a))
+* **deps:** update module github.com/gabriel-vasile/mimetype to v1.4.11 ([aecb7f7](https://github.com/mynaparrot/plugNmeet-server/commit/aecb7f731ec4d71b4e9a3c83039920ff3d2b465f))
+* **deps:** update module github.com/gabriel-vasile/mimetype to v1.4.11 ([e41faa3](https://github.com/mynaparrot/plugNmeet-server/commit/e41faa376273c02dfadbb477b5c04672173717af))
+* docker dev build ([8651446](https://github.com/mynaparrot/plugNmeet-server/commit/8651446e85742d88b2a9f3eb2120599d7c81e61a))
+* docker run ([b4cf071](https://github.com/mynaparrot/plugNmeet-server/commit/b4cf071d9b64412493a819fa57a141bd262f8287))
+* language segment ([f3fe1d0](https://github.com/mynaparrot/plugNmeet-server/commit/f3fe1d07f6ec972f6b49a0551ee15d5e032b254e))
+* meeting summary webhook wasn't sending ([a3c6389](https://github.com/mynaparrot/plugNmeet-server/commit/a3c63898c542f47d02ee08e8644623a53f4422b6))
+* **refactor:** few optimization ([6053166](https://github.com/mynaparrot/plugNmeet-server/commit/6053166d30d8f555b1e0f2ce061e52c4d90759a2))
+* reverted back restrictions ([7a75f1b](https://github.com/mynaparrot/plugNmeet-server/commit/7a75f1b82628333a890fb44fefb14d7c951f4f98))
+* rolled backed SDK version ([9c32bbd](https://github.com/mynaparrot/plugNmeet-server/commit/9c32bbd8deea7b217b003632f2ec877572c00039))
+* the same summary was triggered multiple times ([f688b38](https://github.com/mynaparrot/plugNmeet-server/commit/f688b383d70d8256d6a515116cc023cfaa172451))
+* update BBB metadata to match with new format ([28c6a96](https://github.com/mynaparrot/plugNmeet-server/commit/28c6a96832feeb18bef7e19e8c7c1d34d5afadf3))
+* use correct ARCH ([b2da2a5](https://github.com/mynaparrot/plugNmeet-server/commit/b2da2a5f328d6d6e5cadb0d7854d3ed59f38ec49))
+* use the same pattern ([92b4ea9](https://github.com/mynaparrot/plugNmeet-server/commit/92b4ea9b007ada8725af041b976bca313accf253))
+
+## [1.9.4](https://github.com/mynaparrot/plugNmeet-server/compare/v1.9.3...v1.9.4) (2025-10-28)
+
+
+### Bug Fixes
+
+* add address as well ([5c689bc](https://github.com/mynaparrot/plugNmeet-server/commit/5c689bc55a3539ff206c2e53891df8c52ccb3b63))
+* add more logs in webhook + user application context ([dd95c73](https://github.com/mynaparrot/plugNmeet-server/commit/dd95c734041676168099f2fe171a2715d63584e1))
+* added repo links ([7aa919e](https://github.com/mynaparrot/plugNmeet-server/commit/7aa919ecf3383112c9bc0b8e3a304e77ea82268e))
+* added support for `pnm-RecorderTranscoderJobs` ([bac6b01](https://github.com/mynaparrot/plugNmeet-server/commit/bac6b01b312be242970527f5cd05970a7e7806dc))
+* better to use `ON DELETE RESTRICT` to make `FOREIGN KEY` to work as it suppose to do. ([16e6d7e](https://github.com/mynaparrot/plugNmeet-server/commit/16e6d7e723baa0c5153e40df3c6a7ee641d35057))
+* **bug:** breakout room invalid duration compare ([02c4f36](https://github.com/mynaparrot/plugNmeet-server/commit/02c4f36f3694bd186e5484083933b571b699a7a3))
+* **bug:** collaborator wasn't cleanup properly when right update ([6382eee](https://github.com/mynaparrot/plugNmeet-server/commit/6382eeeee3ba554e758659678f85c7a527c4a6d0))
+* check reconnect status before proceeding ([7101933](https://github.com/mynaparrot/plugNmeet-server/commit/710193368719e2a885462962afdf1831328e02b4))
+* close nats properly + cleanup ([a1ce9cd](https://github.com/mynaparrot/plugNmeet-server/commit/a1ce9cd3116e248b7f64581a6b0c3009241e7c07))
+* consider to clean from media server as well ([beceb63](https://github.com/mynaparrot/plugNmeet-server/commit/beceb6315df09eb55ae1f42c26daf1809d14dde2))
+* **deps:** update github.com/mynaparrot/plugnmeet-protocol digest to de19e61 ([a7a2652](https://github.com/mynaparrot/plugNmeet-server/commit/a7a2652d82c5d75df2df7d0c96e6d9484a41943f))
+* **deps:** update github.com/mynaparrot/plugnmeet-protocol digest to de19e61 ([f48f8d1](https://github.com/mynaparrot/plugNmeet-server/commit/f48f8d15c5f072f6c1c38fd4b62814f32e20e40f))
+* extract id from name ([185ff41](https://github.com/mynaparrot/plugNmeet-server/commit/185ff419a739457fdafcb2e6c12e66ee269312f5))
+* **feat:** store uploaded file metadata ([0f654b6](https://github.com/mynaparrot/plugNmeet-server/commit/0f654b688800d08f4461407e9e15159fae05ec3e))
+* improved presenter and room lock settings ([7079ba8](https://github.com/mynaparrot/plugNmeet-server/commit/7079ba8c978b0e26a74807d0afc14a0f32acd9d0))
+* limit maximum of 100 data ([5094d9b](https://github.com/mynaparrot/plugNmeet-server/commit/5094d9b500f5dad0e356366663fc04202c565384))
+* log version number of all server components ([77f8098](https://github.com/mynaparrot/plugNmeet-server/commit/77f809827455664d3b09f8ad91b6d646274fcbff))
+* missed to clean up ([ce7fd0c](https://github.com/mynaparrot/plugNmeet-server/commit/ce7fd0c142c99ed90cf3bdffca4450377fab5c7e))
+* missed to clean up ([5d3834f](https://github.com/mynaparrot/plugNmeet-server/commit/5d3834f59fe1dd1dfa9cfd547bd4473b33d51254))
+* moved logging to proto for sharing ([c6d5825](https://github.com/mynaparrot/plugNmeet-server/commit/c6d58253e2c62ae9cd50cf384bf4e6cd279e0df8))
+* no need to open in another goroutine ([b1365aa](https://github.com/mynaparrot/plugNmeet-server/commit/b1365aa31cf39fd7a694ed99970a5ee8c5e177cd))
+* preloadFile whiteboard file wasn't added properly ([472be4d](https://github.com/mynaparrot/plugNmeet-server/commit/472be4da12415e3900eeb41be308d77b6866db9d))
+* prevent non-websocket users connections ([ef0612b](https://github.com/mynaparrot/plugNmeet-server/commit/ef0612b12885c0c3622e901aeabefa620a127c9e))
+* removed buggy code ([db8d72b](https://github.com/mynaparrot/plugNmeet-server/commit/db8d72ba1ca2611ebd1ce7497e6cc1a887e5eb9b))
+* trigger from webhook if user status online but disconnected from media server ([9663d92](https://github.com/mynaparrot/plugNmeet-server/commit/9663d927b00f5a5497c127f7592645de1c06b9b6))
+* use better way to handle janitor's task in distributed mode. ([0abdc14](https://github.com/mynaparrot/plugNmeet-server/commit/0abdc14e66d598ee27d67d93a7c3ad50b3842595))
+* use graceful period for verification ([32282c4](https://github.com/mynaparrot/plugNmeet-server/commit/32282c4a7a6a257d6cb624c92ca86165d8e90a67))
+
+## [1.9.3](https://github.com/mynaparrot/plugNmeet-server/compare/v1.9.2...v1.9.3) (2025-09-20)
+
+
+### Bug Fixes
+
+* **analytics:** Make event handling stateless and remove lock ([699c496](https://github.com/mynaparrot/plugNmeet-server/commit/699c4963ab375597926beb6609b55eca83576e3e))
+* **analytics:** Optimize export process with Redis SCAN ([942d976](https://github.com/mynaparrot/plugNmeet-server/commit/942d976e3a2aa881292ffd846500917edd625f92))
+* **analytics:** Prevent race condition in analytics export ([0107211](https://github.com/mynaparrot/plugNmeet-server/commit/010721160ed17ed2d1b5c213311b7398307eacab))
+* **bug:** accidentally deleted important method to handle `HandleGetClientFiles` ([d251223](https://github.com/mynaparrot/plugNmeet-server/commit/d251223cd323325d5e46fc98e64627cd03cb2560))
+* **cleanup:** added more logs ([1b4da4b](https://github.com/mynaparrot/plugNmeet-server/commit/1b4da4b786fabead9660018621afc67543ac6432))
+* **db:** added option to configure database read replicas ([f5197ee](https://github.com/mynaparrot/plugNmeet-server/commit/f5197ee6699d55c70b05e1e7ebb7b287218f7641))
+* **db:** single key `room_id_is_running` enough ([c8dbae7](https://github.com/mynaparrot/plugNmeet-server/commit/c8dbae7336c949fd91fe871d7098fa7d89c6cf6d))
+* **DI:** dependency inject improvement ([5573565](https://github.com/mynaparrot/plugNmeet-server/commit/55735653f78664ab2374edb45467c32a5f6fdcf3))
+* **etherpad:** Make etherpad stateless to prevent race conditions ([7eb1d54](https://github.com/mynaparrot/plugNmeet-server/commit/7eb1d541438f21ba3748893abe1753ecaf22c370))
+* **etherpad:** prevent to clean up if nodeId empty ([b7b50cb](https://github.com/mynaparrot/plugNmeet-server/commit/b7b50cbdc148b9ba5dfb350aaf8d97efd71f9fe5))
+* **improve:** grouped routers + more logs ([2bb7100](https://github.com/mynaparrot/plugNmeet-server/commit/2bb7100f0fe29dcec6d04d48b7aa77e4901a12b2))
+* **improve:** implemented better logging and other improvements ([13fd15b](https://github.com/mynaparrot/plugNmeet-server/commit/13fd15b61220ad81ee16ee6af0456ad87abae560))
+* **improve:** Optimize Redis implementation for performance ([8cde76b](https://github.com/mynaparrot/plugNmeet-server/commit/8cde76b3716cf53271cd7e4808e9edab5a28f9bb))
+* **logging:** added more logs ([012f04d](https://github.com/mynaparrot/plugNmeet-server/commit/012f04de0c4fe292181904501a1a5cce3de567a6))
+* **logging:** implemented better logging ([b36b0d6](https://github.com/mynaparrot/plugNmeet-server/commit/b36b0d63553b610457c8807757e922177126496b))
+* **nats:** Implement worker pool for message processing ([a38e8c9](https://github.com/mynaparrot/plugNmeet-server/commit/a38e8c95fc874f4890d460f8e6089d72100ad217))
+* **poll:** backward incompatibility ([cdbf51c](https://github.com/mynaparrot/plugNmeet-server/commit/cdbf51ccc20008d61d0e6b53730842e8994674b9))
+* rearranged room ended sequence + context aware ([02911a1](https://github.com/mynaparrot/plugNmeet-server/commit/02911a1be2137d61b310cd8cadff4a2e3ab67852))
+* **refactor:** removed config global variable ([ed02e72](https://github.com/mynaparrot/plugNmeet-server/commit/ed02e72c14fde6c46d5a707f421635e74a20db89))
+* **room:** fixed critical race condition while quick room end/create situation ([20011dd](https://github.com/mynaparrot/plugNmeet-server/commit/20011dd7caa66c6a85e3d93c8d7fb2e0793b2b2d))
+* **room:** Hold temporary room data on exit for webhook race condition ([6a207bd](https://github.com/mynaparrot/plugNmeet-server/commit/6a207bd50b56cbdb2096210e7b49ddb1467b0011))
+* use application context as parent + cleanup ([929ee66](https://github.com/mynaparrot/plugNmeet-server/commit/929ee6661af140db04ab257b5dcdfe51f19966b1))
+* use application context when locking ([bc1293e](https://github.com/mynaparrot/plugNmeet-server/commit/bc1293e5687241dc52949f54716198d76dae8e15))
+* use application level context ([af55c4b](https://github.com/mynaparrot/plugNmeet-server/commit/af55c4b299e48460906a33cf8cb05a2821484edd))
+* use better way to check user's online status ([2b4963d](https://github.com/mynaparrot/plugNmeet-server/commit/2b4963df692230129fc34ffc6bc0c072bca87dd9))
+* version display ([41cb9f2](https://github.com/mynaparrot/plugNmeet-server/commit/41cb9f24fdc0aeb6cbdaa0c07f647f284a9e860a))
+
+## [1.9.2](https://github.com/mynaparrot/plugNmeet-server/compare/v1.9.1...v1.9.2) (2025-09-13)
+
+
+### Bug Fixes
+
+* bump dependencies ([f5e47e2](https://github.com/mynaparrot/plugNmeet-server/commit/f5e47e2b7901cb27d8751d23d8ad6326425343d9))
+* dependencies upgrade ([f600715](https://github.com/mynaparrot/plugNmeet-server/commit/f6007152d3e528a8b490d704e78a6885a0fe907b))
+* protocol update ([7398578](https://github.com/mynaparrot/plugNmeet-server/commit/7398578170d575923c9c93805c5c15eab2b657e0))
+* update readme ([443043e](https://github.com/mynaparrot/plugNmeet-server/commit/443043eacaca187971d09a1e043dfe0017e192ac))
+
+## [1.9.1](https://github.com/mynaparrot/plugNmeet-server/compare/v1.9.0...v1.9.1) (2025-08-12)
+
+
+### Bug Fixes
+
+* nil checker to avoid `nil pointer dereference` error ([0f5fc9d](https://github.com/mynaparrot/plugNmeet-server/commit/0f5fc9d25e911ccbed9394f8387ac620a5abf885))
+* protocol upgrade ([5f7185f](https://github.com/mynaparrot/plugNmeet-server/commit/5f7185fd502f0f3cf651750571a7d7ffea353d1e))
+
+## [1.9.0](https://github.com/mynaparrot/plugNmeet-server/compare/v1.8.4...v1.9.0) (2025-07-15)
+
+
+### Features
+
+* dependencies injection using wire ([0d6ddef](https://github.com/mynaparrot/plugNmeet-server/commit/0d6ddefc6b718d7c546ab0b582c21ed46062cf02))
+* dependencies injection using wire ([a9e78ff](https://github.com/mynaparrot/plugNmeet-server/commit/a9e78ff03942386ce3d6177f8a7e8aabbd2f0a17))
+
+
+### Bug Fixes
+
+* cleaned up logic ([4aa5b49](https://github.com/mynaparrot/plugNmeet-server/commit/4aa5b4930286af2d5379cafc3b914bcf36cde083))
+* **cleanup:** remove unnecessary goroutine ([b5f6d0a](https://github.com/mynaparrot/plugNmeet-server/commit/b5f6d0a82a232ad3d97ef82ffe4bfe47a86407ac))
+* **deps:** update github.com/mynaparrot/plugnmeet-protocol digest to b2a5cc6 ([ce7e129](https://github.com/mynaparrot/plugNmeet-server/commit/ce7e12944665765bc7918d6fe1d5425bd413748a))
+* **deps:** update github.com/mynaparrot/plugnmeet-protocol digest to b2a5cc6 ([3e40713](https://github.com/mynaparrot/plugNmeet-server/commit/3e4071398f9c55b6e305a242f789f0d53126e3e4))
+* **deps:** update module github.com/ansrivas/fiberprometheus/v2 to v2.12.0 ([b5c2b26](https://github.com/mynaparrot/plugNmeet-server/commit/b5c2b26cc02fc0be77bbdf660350fccb9a0ab04e))
+* **deps:** update module github.com/ansrivas/fiberprometheus/v2 to v2.12.0 ([3bda07e](https://github.com/mynaparrot/plugNmeet-server/commit/3bda07e3d1b7abd4f863547e21aca9a2245d03c6))
+* **improve:** handle time way more efficiently ([c379ec2](https://github.com/mynaparrot/plugNmeet-server/commit/c379ec254cb0acf025eb1d7e32e71e0aa44b3601))
+* **improve:** improve webhook notifier to handle each room's request in separate queue ([762809c](https://github.com/mynaparrot/plugNmeet-server/commit/762809c4db604251d62c5dc2bac39d6934562d80))
+* **improve:** move `os.Signal` in bootup and remove unnecessary goroutine ([4eeed0c](https://github.com/mynaparrot/plugNmeet-server/commit/4eeed0cfedd7f18307b807066a92e1831e3e7be6))
+* **improve:** optimized database query and added index ([d9c1354](https://github.com/mynaparrot/plugNmeet-server/commit/d9c135411b4af76bad8d86f4f05708e568d58014))
+* **improve:** various improvement regarding file handling ([d4453fe](https://github.com/mynaparrot/plugNmeet-server/commit/d4453fe7535fd1604591dfa5256a7800b0d9cb0a))
+* mistakenly removed post method ([13a6994](https://github.com/mynaparrot/plugNmeet-server/commit/13a69947066217a10ce9f58d82aa3cfd1f926fdb))
+
+## [1.8.4](https://github.com/mynaparrot/plugNmeet-server/compare/v1.8.3...v1.8.4) (2025-06-27)
+
+
+### Bug Fixes
+
+* bug + clean up ([45bca50](https://github.com/mynaparrot/plugNmeet-server/commit/45bca50d19638a3f7e273d2a38f6d7fdd05f8bbc))
+* bump proto ([acb2bbf](https://github.com/mynaparrot/plugNmeet-server/commit/acb2bbf9a0d80041483313c3404189a813795f1e))
+* **deps:** protocol update ([a321514](https://github.com/mynaparrot/plugNmeet-server/commit/a32151457d29ff33ca8fd5be7a27f9f12a731c50))
+* **deps:** update module github.com/ansrivas/fiberprometheus/v2 to v2.10.0 ([7364863](https://github.com/mynaparrot/plugNmeet-server/commit/7364863bad7628530fce3f17a8a40fca038a6ce0))
+* **deps:** update module github.com/ansrivas/fiberprometheus/v2 to v2.10.0 ([cfbb9f3](https://github.com/mynaparrot/plugNmeet-server/commit/cfbb9f336e38382a4802a700b194f0cc92b5e81c))
+* few more improvements + clean up ([689d676](https://github.com/mynaparrot/plugNmeet-server/commit/689d6762807e7e356da69c3a1d3b3df14578e882))
+* few optimization and code clean up ([bb7eb7e](https://github.com/mynaparrot/plugNmeet-server/commit/bb7eb7ebfa7542d4a1bcaba03f75f2c14df6422d))
+* **improve:** added better room creation lock system ([4353828](https://github.com/mynaparrot/plugNmeet-server/commit/4353828429cc23fde29fa66c6b4315c92096be9f))
+* **improve:** added few more tests ([4893ebe](https://github.com/mynaparrot/plugNmeet-server/commit/4893ebe6c701028a203e2d64c24f2abe78564952))
+* **improve:** added nats data cache feature ([7760b08](https://github.com/mynaparrot/plugNmeet-server/commit/7760b08fde40035fd0c6423c6c3cbea8a5f8a84b))
+* **improve:** added nats data cache feature ([5502704](https://github.com/mynaparrot/plugNmeet-server/commit/5502704e69d64f5475a3c80a5475b19b80f1e6e8))
+* updated text ([4081b07](https://github.com/mynaparrot/plugNmeet-server/commit/4081b0751d680fe3e3c8cab50922f45873fc34c0))
+
+## [1.8.3](https://github.com/mynaparrot/plugNmeet-server/compare/v1.8.2...v1.8.3) (2025-05-05)
+
+
+### Bug Fixes
+
+* **bug:** ingress was removing because of invalid inactivity checking ([c08ec4a](https://github.com/mynaparrot/plugNmeet-server/commit/c08ec4ab3f060183c328d0d40a692ab8ab455ce6))
+* **bug:** user's online status wasn't updated properly in the latest version of nats-server ([f9d9793](https://github.com/mynaparrot/plugNmeet-server/commit/f9d97932e902832455f7f4ce6e13bd8f702679ab))
+* **deps:** deps update ([90d40b3](https://github.com/mynaparrot/plugNmeet-server/commit/90d40b3a6faa84da20889687d286fa62acb13b0e))
+* **deps:** deps update ([a03f37e](https://github.com/mynaparrot/plugNmeet-server/commit/a03f37e3cc9efa3baf7c7866157460c27350c1b7))
+* user appropriate library where necessary ([dcb7e6e](https://github.com/mynaparrot/plugNmeet-server/commit/dcb7e6e4c866ffab512e8fef9afab7e9fb5205b6))
+
+## [1.8.2](https://github.com/mynaparrot/plugNmeet-server/compare/v1.8.1...v1.8.2) (2025-04-10)
+
+
+### Bug Fixes
+
+* added option to insert a self provided e2ee key ([386cbdd](https://github.com/mynaparrot/plugNmeet-server/commit/386cbdd1ce79e32ce206f18164fc7ed84abffc64))
+* api to upload base64 encoded files ([f7b9923](https://github.com/mynaparrot/plugNmeet-server/commit/f7b992311ab4ef0a0214030444bb8fd1b420ca43))
+* bump proto ([21b0c2d](https://github.com/mynaparrot/plugNmeet-server/commit/21b0c2de01356ad588d53244c51e17d788d98214))
+* deps update ([264d0ee](https://github.com/mynaparrot/plugNmeet-server/commit/264d0eecf750ece8ebc77cd8361997003e4df019))
+* **deps:** update module github.com/go-jose/go-jose/v4 to v4.0.5 [security] ([42be81b](https://github.com/mynaparrot/plugNmeet-server/commit/42be81ba43c996af7d0ee9bcb4cfe79b1c11fd21))
+* **deps:** update module github.com/go-jose/go-jose/v4 to v4.0.5 [security] ([084bc36](https://github.com/mynaparrot/plugNmeet-server/commit/084bc367dbf9ac2fa021ccf0fb42caa651cbd01d))
+* **deps:** update module github.com/redis/go-redis/v9 to v9.7.1 ([85b851b](https://github.com/mynaparrot/plugNmeet-server/commit/85b851baf731dbb9ac672750db36bdf59f2350a5))
+* **deps:** update module github.com/redis/go-redis/v9 to v9.7.1 ([be23bbe](https://github.com/mynaparrot/plugNmeet-server/commit/be23bbe3e8efd00e5a20e00b2354cb6fc011a2f2))
+* **deps:** update module github.com/redis/go-redis/v9 to v9.7.3 [security] ([6f845c7](https://github.com/mynaparrot/plugNmeet-server/commit/6f845c732f077f72629eeb20e9b980b72d2397e3))
+* **deps:** update module github.com/redis/go-redis/v9 to v9.7.3 [security] ([607dac6](https://github.com/mynaparrot/plugNmeet-server/commit/607dac6f292b4ac644f9ae5af6cb645f9c362c9f))
+* display runtime version too ([7ac5d23](https://github.com/mynaparrot/plugNmeet-server/commit/7ac5d23a29f686d969905b382a0803e5b77ede36))
+* moved poll to its own features option with backward compatibility ([b361af4](https://github.com/mynaparrot/plugNmeet-server/commit/b361af4161d6b134be037084c86f8bbc3c252e1f))
+* upgrade urfave/cli to `v3` ([887bc76](https://github.com/mynaparrot/plugNmeet-server/commit/887bc76ebb8a5df0410af1286772635e489613ea))
+
+## [1.8.1](https://github.com/mynaparrot/plugNmeet-server/compare/v1.8.0...v1.8.1) (2025-02-20)
+
+
+### Bug Fixes
+
+* bump proto ([9fcde46](https://github.com/mynaparrot/plugNmeet-server/commit/9fcde46144b7a0511dc77d218276b5f32f99e97b))
+* **deps:** update module github.com/bufbuild/protovalidate-go to v0.9.2 ([e924e7b](https://github.com/mynaparrot/plugNmeet-server/commit/e924e7b1f0bb481b367b62f794438b1e3b5098c1))
+* just for safety ([17ba8f4](https://github.com/mynaparrot/plugNmeet-server/commit/17ba8f4eafbfc40982d533743a8f6285176e03bc))
+* moved to proto for reusing ([517d3ad](https://github.com/mynaparrot/plugNmeet-server/commit/517d3ad38c3067964fda5318e9517a7380e4dfc7))
+* option to use nkey ([9bd1964](https://github.com/mynaparrot/plugNmeet-server/commit/9bd196401a8bb09c792f4b93496564a7404682d3))
+* optional for encrypting the nats request payloads ([4bfd3e9](https://github.com/mynaparrot/plugNmeet-server/commit/4bfd3e9d72982eb21f633a8682ac1056ee70125e))
+* prevent using reserved name ([e5b3b13](https://github.com/mynaparrot/plugNmeet-server/commit/e5b3b13ec04e5d70a399ac326d81d32fdbfad434))
+* recording server will authenticate with plugNmeet server for nats ([dee6082](https://github.com/mynaparrot/plugNmeet-server/commit/dee608242b7590e09d4a4c9a6515eb19e8c1167f))
+* replacing with nkey for new installations ([30e1463](https://github.com/mynaparrot/plugNmeet-server/commit/30e146336d63c78b85f043caabb6f1be8528a708))
+* some clean up ([2472ad3](https://github.com/mynaparrot/plugNmeet-server/commit/2472ad3ccabda7a7de0006a5deec60996675342f))
+* use proper format ([a20d0b6](https://github.com/mynaparrot/plugNmeet-server/commit/a20d0b6b99016483d5ebf32eb96a9cb2a8066cad))
+
+## [1.8.0](https://github.com/mynaparrot/plugNmeet-server/compare/v1.7.8...v1.8.0) (2025-02-01)
+
+
+### Features
+
+* option to keep deleted recordings in backup ([7d1ee5d](https://github.com/mynaparrot/plugNmeet-server/commit/7d1ee5db73d3689d7137233ba0dbe48294eb82a6))
+
+
+### Bug Fixes
+
+* deps update ([93fff85](https://github.com/mynaparrot/plugNmeet-server/commit/93fff85fe110fc79da5a602c51d2f91c8031e321))
+* **deps:** update module github.com/goccy/go-json to v0.10.5 ([93ef56e](https://github.com/mynaparrot/plugNmeet-server/commit/93ef56eeeb28292a1d0409684bc71a624bd414aa))
+* **deps:** update module github.com/livekit/server-sdk-go/v2 to v2.4.2 ([d689646](https://github.com/mynaparrot/plugNmeet-server/commit/d6896460b5184218044ba81fd4dfc7f6b9405235))
+* few updates ([3944420](https://github.com/mynaparrot/plugNmeet-server/commit/394442074371516ac16ccef00a4ad70aa6d08d72))
+* remove duplicate tag ([377903f](https://github.com/mynaparrot/plugNmeet-server/commit/377903f6347033da290c381c12540021259d201c))
+
+## [1.7.8](https://github.com/mynaparrot/plugNmeet-server/compare/v1.7.7...v1.7.8) (2025-01-18)
+
+
+### Bug Fixes
+
+* bump nodejs ([2779eab](https://github.com/mynaparrot/plugNmeet-server/commit/2779eab3538a008d693e9a577b07aa78c5640a0e))
+* **ci:** added beta release ([e7497e2](https://github.com/mynaparrot/plugNmeet-server/commit/e7497e2a84f3768007ecb1a787feea0ee87b883c))
+* **ci:** always-update ([1134c50](https://github.com/mynaparrot/plugNmeet-server/commit/1134c50f91c84c7fc9eabf5e82f9b50ffdc01472))
+* **ci:** bump beta version ([b79a0ea](https://github.com/mynaparrot/plugNmeet-server/commit/b79a0eadd93a0e06070f12dc087c4f18ec49247a))
+* **ci:** bump beta version ([24c9082](https://github.com/mynaparrot/plugNmeet-server/commit/24c90821b4e9309ec6666ddcc19caf0f6069168d))
+* **ci:** removed rebase again ([db27ad5](https://github.com/mynaparrot/plugNmeet-server/commit/db27ad54d16a4b39c9b5347ee2f06a8164a95266))
+* **ci:** To rebase again ([e1681fc](https://github.com/mynaparrot/plugNmeet-server/commit/e1681fc79aede64a5a9cc297d7a4505461767eb8))
+* **ci:** To rebase again ([161b04e](https://github.com/mynaparrot/plugNmeet-server/commit/161b04ed775d25a873617c229a0a8bfb23989672))
+* **ci:** To rebase again ([4a34670](https://github.com/mynaparrot/plugNmeet-server/commit/4a3467056d97d57245219b0f7cb6d406c3a1fd92))
+* deps update ([0d58c13](https://github.com/mynaparrot/plugNmeet-server/commit/0d58c1323a618e4fe6c2bdcb2fd853409851e3a5))
+* **deps:** update module github.com/gabriel-vasile/mimetype to v1.4.8 ([703623d](https://github.com/mynaparrot/plugNmeet-server/commit/703623d55bbcd8a2b9c613dbe07446670e3f2ccb))
+* **deps:** update module github.com/livekit/server-sdk-go/v2 to v2.4.1 ([89cac3f](https://github.com/mynaparrot/plugNmeet-server/commit/89cac3f4eed56abf6a60ac3ef51df88b62503738))
+* evaluate response from recorder ([7b81c4a](https://github.com/mynaparrot/plugNmeet-server/commit/7b81c4a6bba042d2887fbdd1a872349a46850527))
+* use `StatusServiceUnavailable` ([554e1f5](https://github.com/mynaparrot/plugNmeet-server/commit/554e1f5e8167ccf2bb91b796f5ffc2369f598908))
+
+## [1.7.7](https://github.com/mynaparrot/plugNmeet-server/compare/v1.7.6...v1.7.7) (2024-12-20)
+
+
+### Bug Fixes
+
+* **bug:** Ingress was not working in the new Nats solution. Ref: https://github.com/mynaparrot/plugNmeet-server/discussions/611 ([2fc55a4](https://github.com/mynaparrot/plugNmeet-server/commit/2fc55a4e5c02787962a4e77804cfb83b38c7d975))
+* **deps:** deps update ([3d8d4b9](https://github.com/mynaparrot/plugNmeet-server/commit/3d8d4b933cdb6fd8a992ddc672d22c83795a2be6))
+* **deps:** upgrade `nats.go` ([bc3a121](https://github.com/mynaparrot/plugNmeet-server/commit/bc3a121a67920d5c082d6d6f6c4d2f570258f9bb))
+* **update:** few clean ups ([3d632ec](https://github.com/mynaparrot/plugNmeet-server/commit/3d632ecd5f4394d5759b2ab8c89facf3ffeb5142))
+
+## [1.7.6](https://github.com/mynaparrot/plugNmeet-server/compare/v1.7.5...v1.7.6) (2024-12-07)
+
+
+### Bug Fixes
+
+* **deps:** dependencies update ([ef83e0d](https://github.com/mynaparrot/plugNmeet-server/commit/ef83e0daaecb76dc884f53c4c5187d65619d3968))
+* **deps:** update module github.com/nats-io/nkeys to v0.4.8 ([6b213d9](https://github.com/mynaparrot/plugNmeet-server/commit/6b213d95a7abacff4092e25fd3a9e4f8f2a3377e))
+* missed to add `Replicas` ([fb6cba0](https://github.com/mynaparrot/plugNmeet-server/commit/fb6cba0c453c61797578662b56c2254263a52f5e))
+
+## [1.7.5](https://github.com/mynaparrot/plugNmeet-server/compare/v1.7.4...v1.7.5) (2024-11-25)
+
+
+### Bug Fixes
+
+* added option `-trimpath` ([6b355d9](https://github.com/mynaparrot/plugNmeet-server/commit/6b355d9a89c668e400fefbcfea4dcfae54e14bee))
+* **bump:** bump version ([de8f4dd](https://github.com/mynaparrot/plugNmeet-server/commit/de8f4dd1f0dd5086684738c7d762360cfccd28d8))
+* clean up ([6e12ff1](https://github.com/mynaparrot/plugNmeet-server/commit/6e12ff16e7e5dea4e2c41c64dee5e1e8cdb13053))
+* **deps:** update github.com/mynaparrot/plugnmeet-protocol digest to 4d9a8f6 ([d9ec4b4](https://github.com/mynaparrot/plugNmeet-server/commit/d9ec4b43c9abebe5ee05a59ffc9e01b417090691))
+* **deps:** update module github.com/bufbuild/protovalidate-go to v0.7.3 ([0c51ba8](https://github.com/mynaparrot/plugNmeet-server/commit/0c51ba89ad3037b71bf5a3f7ae83272811c0a78e))
+* **deps:** update module github.com/gabriel-vasile/mimetype to v1.4.7 ([56f5d3b](https://github.com/mynaparrot/plugNmeet-server/commit/56f5d3becfacba5c535cf45615c2fdeaf898274d))
+* **deps:** update module github.com/livekit/protocol to v1.27.1 ([373f1ba](https://github.com/mynaparrot/plugNmeet-server/commit/373f1ba67264263816b1fb0a912f935d44781e5e))
+* **deps:** update module github.com/livekit/server-sdk-go/v2 to v2.3.1 ([d5df05d](https://github.com/mynaparrot/plugNmeet-server/commit/d5df05db06f3f9644971bf8d75b90bf956fd6dd6))
+
+## [1.7.4](https://github.com/mynaparrot/plugNmeet-server/compare/v1.7.3...v1.7.4) (2024-11-04)
+
+
+### Bug Fixes
+
+* **deps:** update module github.com/gabriel-vasile/mimetype to v1.4.6 ([fc6df57](https://github.com/mynaparrot/plugNmeet-server/commit/fc6df57253b8ff035cc87e3d76d651e2391a9419))
+* **deps:** update module github.com/redis/go-redis/v9 to v9.7.0 ([8d7dc9a](https://github.com/mynaparrot/plugNmeet-server/commit/8d7dc9ad888af695cdcab2562e881d76b73b0a15))
+* missing EmptyTimeout & MaxParticipants in webhook ([879d5b1](https://github.com/mynaparrot/plugNmeet-server/commit/879d5b1591553fc3c43f9f11b5ac3a8ad2d618d2))
+* release-please-action ([3223400](https://github.com/mynaparrot/plugNmeet-server/commit/3223400ec426f66fd8bbf2628877e6801105be37))

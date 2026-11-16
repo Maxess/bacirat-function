@@ -1,0 +1,119 @@
+package turnservice
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/mynaparrot/plugnmeet-protocol/plugnmeet"
+	"github.com/mynaparrot/plugnmeet-server/pkg/config"
+	"github.com/mynaparrot/plugnmeet-server/pkg/turn"
+	"github.com/mynaparrot/plugnmeet-server/pkg/turn/cloudflare"
+	"github.com/mynaparrot/plugnmeet-server/pkg/turn/coturn"
+)
+
+// defaultFallbackTimerDuration is the UX-first default consolidation window
+// (30 seconds) that the client mirrors when no valid timer value is provided.
+const defaultFallbackTimerDuration = 30 * time.Second
+
+// TurnService is the main entry point for interacting with the TURN framework.
+type TurnService struct {
+	config   *config.TurnConfig
+	provider turn.Provider
+}
+
+func New(conf *config.AppConfig) (*TurnService, error) {
+	// The service is disabled if the config block is missing or explicitly disabled.
+	if conf.TurnServer == nil || !conf.TurnServer.Enabled {
+		return &TurnService{
+			config:   conf.TurnServer,
+			provider: nil, // No provider loaded
+		}, nil
+	}
+
+	ts := &TurnService{
+		config: conf.TurnServer,
+		// forceTurn is deprecated, we'll use the value from credentials
+	}
+
+	// This factory logic selects the correct provider.
+	switch ts.config.Provider {
+	case "coturn":
+		ts.provider = coturn.NewCoturnProvider()
+	case "cloudflare":
+		ts.provider = cloudflare.NewCloudflareProvider()
+	default:
+		return nil, fmt.Errorf("unknown TURN provider: '%s'", ts.config.Provider)
+	}
+
+	return ts, nil
+}
+
+// GetCredentials returns TURN credentials from the configured provider.
+// It returns nil if the service is disabled.
+func (s *TurnService) GetCredentials(ctx context.Context, roomId, userId string) (*turn.Credentials, error) {
+	if s.config == nil || !s.config.Enabled || s.provider == nil {
+		// If the feature is disabled, we simply return nothing.
+		// This is not an error condition.
+		return nil, nil
+	}
+
+	providerConf, err := s.config.GetProvider()
+	if err != nil {
+		return nil, err
+	}
+
+	credentials, err := s.provider.GetTURNServerCredentials(ctx, providerConf, roomId, userId)
+	if err != nil {
+		return nil, err
+	}
+
+	credentials.ForceTurn = s.config.ForceTurn
+	// Only enable fallback if force_turn is false
+	if !s.config.ForceTurn && s.config.FallbackTurn {
+		credentials.FallbackTurn = true
+
+		// Add the duration logic here. Only a valid positive duration is
+		// sent to the client; the value must be milliseconds on the wire
+		// (the client honors it only when > 0 as well).
+		duration := s.config.FallbackTimerDuration
+		if duration <= 0 {
+			duration = defaultFallbackTimerDuration // default 30s, mirrors the client
+		}
+		credentials.FallbackTimerDuration = duration.Milliseconds()
+	}
+
+	if s.config.FallbackOnFlapping != nil && s.config.FallbackOnFlapping.Enabled {
+		// Set default values if not provided in config
+		maxPoorConnCount := s.config.FallbackOnFlapping.MaxPoorConnCount
+		if maxPoorConnCount == 0 {
+			maxPoorConnCount = 3
+		}
+		checkDurationInSec := s.config.FallbackOnFlapping.CheckDurationInSec
+		if checkDurationInSec == 0 {
+			checkDurationInSec = 120
+		}
+		credentials.FallbackOnFlapping = &plugnmeet.FallbackOnFlapping{
+			Enabled:            s.config.FallbackOnFlapping.Enabled,
+			MaxPoorConnCount:   maxPoorConnCount,
+			CheckDurationInSec: checkDurationInSec,
+		}
+	}
+
+	return credentials, nil
+}
+
+// RevokeCredentials revokes TURN credentials using the configured provider.
+func (s *TurnService) RevokeCredentials(ctx context.Context, creds *turn.Credentials) error {
+	if s.config == nil || !s.config.Enabled || s.provider == nil {
+		// If the feature is disabled, we simply return nothing.
+		return nil
+	}
+
+	providerConf, err := s.config.GetProvider()
+	if err != nil {
+		return err
+	}
+
+	return s.provider.RevokeTURNServerCredentials(ctx, providerConf, creds)
+}

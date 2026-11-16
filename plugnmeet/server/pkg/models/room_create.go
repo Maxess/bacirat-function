@@ -1,0 +1,403 @@
+package models
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/mynaparrot/plugnmeet-protocol/plugnmeet"
+	"github.com/mynaparrot/plugnmeet-protocol/utils"
+	"github.com/mynaparrot/plugnmeet-server/pkg/dbmodels"
+	"github.com/mynaparrot/plugnmeet-server/pkg/insights"
+	natsservice "github.com/mynaparrot/plugnmeet-server/pkg/services/nats"
+	"github.com/sirupsen/logrus"
+	"github.com/spf13/cast"
+)
+
+func (m *RoomModel) CreateRoom(userCtx context.Context, r *plugnmeet.CreateRoomReq) (*plugnmeet.ActiveRoomInfo, error) {
+	log := m.logger.WithFields(logrus.Fields{
+		"room_id":       r.GetRoomId(),
+		"breakout_room": r.GetMetadata().GetIsBreakoutRoom(),
+		"method":        "CreateRoom",
+	})
+	started := time.Now()
+	log.Infoln("Room creation request received")
+
+	// Validate the roomId to ensure it doesn't contain our internal patterns.
+	if strings.Contains(r.RoomId, natsservice.UserKeyFieldPrefix) {
+		err := fmt.Errorf("RoomId cannot contain the reserved pattern '%s'", natsservice.UserKeyFieldPrefix)
+		log.WithError(err).Errorln()
+		return nil, err
+	}
+	if strings.HasPrefix(r.RoomId, natsservice.UserKeyPrefix) {
+		err := fmt.Errorf("RoomId cannot start with the reserved pattern '%s'", natsservice.UserKeyPrefix)
+		log.WithError(err).Errorln()
+		return nil, err
+	}
+
+	// we'll lock the same room creation until the room is created
+	lockValue, err := acquireRoomCreationLockWithRetry(userCtx, m.rs, r.GetRoomId(), log)
+	if err != nil {
+		return nil, err // Error already logged by helper
+	}
+
+	// Defer unlock using the obtained lockValue for safety.
+	defer func() {
+		unlockCtx, cancel := context.WithTimeout(userCtx, 5*time.Second)
+		defer cancel()
+		if unlockErr := m.rs.UnlockRoomCreation(unlockCtx, r.GetRoomId(), lockValue); unlockErr != nil {
+			// UnlockRoomCreation in RedisService should log details
+			log.WithError(unlockErr).Error("Error trying to clean up room creation lock")
+		} else {
+			log.Infof("Room creation lock released after %s", time.Since(started))
+		}
+	}()
+
+	// check if room already exists in db or not
+	roomDbInfo, err := m.ds.GetRoomInfoByRoomId(r.RoomId, 1)
+	if err != nil {
+		log.WithError(err).Error("Could not get room info from db")
+		return nil, err
+	}
+
+	// handle existing room logic
+	if roomDbInfo != nil && roomDbInfo.Sid != "" {
+		log.Info("Found existing active room in db, attempting to handle it")
+		ari, err := m.handleExistingRoom(r, roomDbInfo, log)
+		if err != nil {
+			log.WithError(err).Error("Failed to handle existing room")
+			return nil, err
+		}
+		if ari != nil {
+			log.Info("Successfully handled existing room, returning info")
+			return ari, nil
+		}
+		// otherwise, we'll keep going
+		log.Info("Existing room record was stale or mismatched, proceeding to create a new session")
+	}
+
+	// initialize room defaults
+	m.setRoomDefaults(r)
+
+	// reject pre-assignments that could never be created
+	if err := m.validatePreassignedBreakoutRooms(r, log); err != nil {
+		return nil, err
+	}
+
+	// prepare DB model
+	roomDbInfo, sid := m.prepareRoomDbInfo(r, roomDbInfo)
+
+	// save info to db
+	if _, err := m.ds.InsertOrUpdateRoomInfo(roomDbInfo); err != nil {
+		log.WithError(err).Error("Failed to insert or update room in db")
+		return nil, err
+	}
+	log = log.WithFields(logrus.Fields{
+		"room_sid": sid,
+	})
+	log.WithField("webhook_url", roomDbInfo.WebhookUrl).Info("Room info added to DB")
+
+	if !r.Metadata.IsBreakoutRoom {
+		sipDialInFeatures := r.Metadata.RoomFeatures.SipDialInFeatures
+		// in setRoomDefaults we've already verified if the feature can be enabled or not
+		if sipDialInFeatures.IsAllow && sipDialInFeatures.EnableDialInOnCreate {
+			ruleId, pin, err := m.lk.CreateSIPDispatchRule(r.RoomId, sipDialInFeatures.HidePhoneNumber, log)
+			if err != nil {
+				// just log as this isn't a critical error
+				log.WithError(err).Error("failed to create SIP dispatch rule")
+			} else {
+				sipDialInFeatures.IsActive = true
+				sipDialInFeatures.DispatchRuleId = &ruleId
+				sipDialInFeatures.Pin = &pin
+				sipDialInFeatures.PhoneNumbers = m.app.LivekitSipInfo.PhoneNumbers
+			}
+		}
+	}
+
+	// now create room bucket
+	mt, err := m.natsService.AddRoom(roomDbInfo.ID, r.RoomId, sid, r.EmptyTimeout, r.MaxParticipants, r.Metadata)
+	if err != nil {
+		log.WithError(err).Error("Failed to add room to NATS")
+		return nil, err
+	}
+	log.WithField("table_id", roomDbInfo.ID).Info("Room info added to NATS")
+
+	// preload whiteboard file if needed
+	if !r.Metadata.IsBreakoutRoom {
+		go m.prepareWhiteboardPreloadFile(r.Metadata, r.RoomId, sid, log)
+	}
+
+	ari := &plugnmeet.ActiveRoomInfo{
+		RoomId:       r.RoomId,
+		Sid:          sid,
+		RoomTitle:    roomDbInfo.RoomTitle,
+		IsRunning:    1,
+		CreationTime: roomDbInfo.CreationTime,
+		WebhookUrl:   roomDbInfo.WebhookUrl,
+		Metadata:     mt,
+	}
+
+	// create and send room_created webhook
+	go m.sendRoomCreatedWebhook(ari, r.EmptyTimeout, r.MaxParticipants)
+
+	log.Infof("Successfully finished room creation after %s", time.Since(started))
+	return ari, nil
+}
+
+// handleExistingRoom to handle logic if room already exists
+func (m *RoomModel) handleExistingRoom(r *plugnmeet.CreateRoomReq, roomDbInfo *dbmodels.RoomInfo, log *logrus.Entry) (*plugnmeet.ActiveRoomInfo, error) {
+	log = log.WithField("subMethod", "handleExistingRoom")
+	log.Info("Checking NATS for live room info")
+
+	rInfo, err := m.natsService.GetRoomInfo(r.RoomId)
+	if err != nil {
+		log.WithError(err).Error("failed to get room info from NATS")
+		return nil, err
+	}
+
+	if rInfo == nil {
+		log.Info("No active room found in NATS, proceeding to create a new session")
+		return nil, nil
+	}
+
+	if rInfo.DbTableId != roomDbInfo.ID {
+		log.WithFields(logrus.Fields{
+			"nats_db_id": rInfo.DbTableId,
+			"db_id":      roomDbInfo.ID,
+		}).Warn("NATS room info does not match DB record, proceeding to create a new session")
+		return nil, nil
+	}
+
+	// The room is active and matches the DB record.
+	log.Info("Found matching active room in NATS, updating status")
+	if err := m.natsService.UpdateRoomStatus(r.RoomId, natsservice.RoomStatusActive); err != nil {
+		log.WithError(err).Error("Failed to update room status to active")
+		return nil, err
+	}
+
+	return &plugnmeet.ActiveRoomInfo{
+		RoomId:       rInfo.RoomId,
+		Sid:          rInfo.RoomSid,
+		RoomTitle:    roomDbInfo.RoomTitle,
+		IsRunning:    1,
+		CreationTime: roomDbInfo.CreationTime,
+		WebhookUrl:   roomDbInfo.WebhookUrl,
+		Metadata:     rInfo.Metadata,
+	}, nil
+}
+
+// setRoomDefaults to Sets default values and metadata
+func (m *RoomModel) setRoomDefaults(r *plugnmeet.CreateRoomReq) {
+	// assign all the default features
+	utils.PrepareDefaultRoomFeatures(r)
+
+	// set default values
+	utils.SetCreateRoomDefaultValues(r, m.app.UploadFileSettings.MaxSize, m.app.UploadFileSettings.MaxSizeWhiteboardFile, m.app.UploadFileSettings.AllowedTypes)
+
+	// set default lock settings
+	utils.SetRoomDefaultLockSettings(r)
+
+	// set default room settings
+	utils.SetDefaultRoomSettings(m.app.RoomDefaultSettings, r)
+
+	// copyright
+	copyrightConf := m.app.Client.CopyrightConf
+	if copyrightConf == nil {
+		r.Metadata.CopyrightConf = &plugnmeet.CopyrightConf{
+			Display: true,
+			Text:    "Powered by <a href=\"https://www.plugnmeet.org\" target=\"_blank\">plugNmeet</a>",
+		}
+	} else {
+		d := &plugnmeet.CopyrightConf{
+			Display: copyrightConf.Display,
+			Text:    copyrightConf.Text,
+		}
+		if r.Metadata.CopyrightConf != nil && !copyrightConf.AllowOverride {
+			r.Metadata.CopyrightConf = d
+		} else if r.Metadata.CopyrightConf == nil {
+			r.Metadata.CopyrightConf = d
+		}
+	}
+
+	if r.Metadata.IsBreakoutRoom && r.Metadata.RoomFeatures.EnableAnalytics {
+		r.Metadata.RoomFeatures.EnableAnalytics = false
+	}
+
+	if r.Metadata.RoomFeatures.InsightsFeatures != nil {
+		if r.Metadata.RoomFeatures.InsightsFeatures.IsAllow && (m.app.Insights == nil || !m.app.Insights.Enabled) {
+			r.Metadata.RoomFeatures.InsightsFeatures.IsAllow = false
+		}
+		if r.Metadata.RoomFeatures.InsightsFeatures.IsAllow {
+			if r.Metadata.RoomFeatures.InsightsFeatures.TranscriptionFeatures != nil {
+				maxSelectedTranscriptionTransLangs := 2
+				if _, serviceCnf, err := m.app.Insights.GetProviderAccountForService(insights.ServiceTypeTranscription); err == nil {
+					if num, ok := serviceCnf.Options["max_selected_trans_langs"]; ok {
+						maxSelectedTranscriptionTransLangs = cast.ToInt(num)
+					}
+				}
+				r.Metadata.RoomFeatures.InsightsFeatures.TranscriptionFeatures.MaxSelectedTransLangs = int32(maxSelectedTranscriptionTransLangs)
+			}
+
+			if r.Metadata.RoomFeatures.InsightsFeatures.ChatTranslationFeatures != nil {
+				maxSelectedChatTransLangs := 5
+				if _, serviceCnf, err := m.app.Insights.GetProviderAccountForService(insights.ServiceTypeTranslation); err == nil {
+					if num, ok := serviceCnf.Options["max_selected_trans_langs"]; ok {
+						maxSelectedChatTransLangs = cast.ToInt(num)
+					}
+				}
+				r.Metadata.RoomFeatures.InsightsFeatures.ChatTranslationFeatures.MaxSelectedTransLangs = int32(maxSelectedChatTransLangs)
+			}
+		}
+	}
+
+	if r.Metadata.RoomFeatures.SipDialInFeatures != nil {
+		if (m.app.LivekitSipInfo == nil || !m.app.LivekitSipInfo.Enabled) && r.Metadata.RoomFeatures.SipDialInFeatures.IsAllow {
+			r.Metadata.RoomFeatures.SipDialInFeatures.IsAllow = false
+		}
+	}
+}
+
+// validatePreassignedBreakoutRooms rejects pre-assignment lists that can never
+// be created: the count must fit both the server-wide maximum breakout rooms
+// and the room's own allowed_number_rooms, and a user may not be pre-assigned
+// to more than one room. It must run after setRoomDefaults so the implicit
+// allowed_number_rooms default (6) is accounted for. Breakout rooms themselves
+// clear pre-assigned rooms, so this is a no-op for them.
+func (m *RoomModel) validatePreassignedBreakoutRooms(r *plugnmeet.CreateRoomReq, log *logrus.Entry) error {
+	features := r.Metadata.RoomFeatures.BreakoutRoomFeatures
+	if features == nil || len(features.PreassignedRooms) == 0 {
+		return nil
+	}
+	count := uint32(len(features.PreassignedRooms))
+
+	if s := m.app.RoomDefaultSettings; s != nil && s.MaxNumBreakoutRooms != nil {
+		serverMax := *s.MaxNumBreakoutRooms
+		if serverMax > 0 && count > serverMax {
+			err := fmt.Errorf("preassigned_rooms count (%d) exceeds the server maximum breakout rooms (%d)", count, serverMax)
+			log.WithError(err).Errorln()
+			return err
+		}
+	}
+	if allowedRooms := features.AllowedNumberRooms; allowedRooms > 0 && count > allowedRooms {
+		err := fmt.Errorf("preassigned_rooms count (%d) exceeds allowed_number_rooms (%d)", count, allowedRooms)
+		log.WithError(err).Errorln()
+		return err
+	}
+
+	// a user can only be pre-assigned to a single room; crossed assignments
+	// would be rejected at breakout-room creation time, so reject them here
+	// so API callers get an immediate error.
+	assignedUsers := make(map[string]struct{})
+	for _, room := range features.PreassignedRooms {
+		for _, u := range room.UserIds {
+			if _, ok := assignedUsers[u]; ok {
+				err := fmt.Errorf("user (%s) is pre-assigned to multiple breakout rooms", u)
+				log.WithError(err).Errorln()
+				return err
+			}
+			assignedUsers[u] = struct{}{}
+		}
+	}
+	return nil
+}
+
+// prepareRoomDbInfo Prepares DB model for room
+func (m *RoomModel) prepareRoomDbInfo(r *plugnmeet.CreateRoomReq, existing *dbmodels.RoomInfo) (*dbmodels.RoomInfo, string) {
+	sId := uuid.New().String()
+	isBreakoutRoom := 0
+	parentRoomID := ""
+	if r.Metadata.IsBreakoutRoom {
+		isBreakoutRoom = 1
+		parentRoomID = r.Metadata.ParentRoomId
+	}
+
+	if existing == nil {
+		existing = &dbmodels.RoomInfo{
+			RoomTitle:          r.Metadata.RoomTitle,
+			RoomId:             r.RoomId,
+			Sid:                sId,
+			JoinedParticipants: 0,
+			IsRunning:          1,
+			WebhookUrl:         "",
+			IsBreakoutRoom:     isBreakoutRoom,
+			ParentRoomID:       parentRoomID,
+		}
+	} else {
+		existing.Sid = sId
+		existing.IsBreakoutRoom = isBreakoutRoom
+		existing.ParentRoomID = parentRoomID
+	}
+	if r.Metadata.WebhookUrl != nil {
+		existing.WebhookUrl = *r.Metadata.WebhookUrl
+	}
+	return existing, sId
+}
+
+// prepareWhiteboardPreloadFile preload whiteboard file
+func (m *RoomModel) prepareWhiteboardPreloadFile(meta *plugnmeet.RoomMetadata, roomId, roomSid string, log *logrus.Entry) {
+	wbf := meta.RoomFeatures.WhiteboardFeatures
+	if wbf == nil || !wbf.IsAllow || wbf.PreloadFile == nil || *wbf.PreloadFile == "" {
+		return
+	}
+	preloadFile := *wbf.PreloadFile
+	log = log.WithFields(logrus.Fields{
+		"preload_file_url": preloadFile,
+		"subMethod":        "prepareWhiteboardPreloadFile",
+	})
+
+	log.Info("Preparing preloaded whiteboard file")
+	maxSize := *m.app.RoomDefaultSettings.MaxPreloadedWhiteboardFileSizeByte
+
+	if _, err := m.fileModel.DownloadAndProcessWhiteboardFile(roomId, roomSid, preloadFile, maxSize, nil, log); err != nil {
+		log.WithError(err).Error("Failed to download and process preloaded whiteboard file")
+		if notifyErr := m.natsService.NotifyErrorMsg(roomId, "notifications.preloaded-whiteboard-file-processing-error", nil); notifyErr != nil {
+			log.WithError(notifyErr).Error("failed to send notification for whiteboard processing error")
+		}
+	}
+
+	// Read the latest metadata from NATS instead of broadcasting the creation-time
+	// snapshot, which would revert any metadata change made while the file was
+	// processing (e.g. whiteboardFileId from the conversion above).
+	latestMeta, err := m.natsService.GetRoomMetadataStruct(roomId)
+	if err != nil {
+		log.WithError(err).Error("failed to get room metadata to clear preload file")
+		return
+	}
+	if latestMeta == nil || latestMeta.RoomFeatures == nil || latestMeta.RoomFeatures.WhiteboardFeatures == nil {
+		log.Warn("room metadata not found, skipping clearing of preload file")
+		return
+	}
+
+	// clear only the preload file, keep the rest of the metadata untouched
+	latestMeta.RoomFeatures.WhiteboardFeatures.PreloadFile = nil
+	if updateErr := m.natsService.UpdateAndBroadcastRoomMetadata(roomId, latestMeta); updateErr != nil {
+		log.WithError(updateErr).Error("failed to update room metadata to clear preload file")
+		return
+	}
+
+	log.Info("Successfully proceeded preload file and cleared from room metadata")
+}
+
+// sendRoomCreatedWebhook to send webhook
+func (m *RoomModel) sendRoomCreatedWebhook(info *plugnmeet.ActiveRoomInfo, emptyTimeout, maxParticipants *uint32) {
+	if m.webhookNotifier != nil {
+		m.webhookNotifier.RegisterWebhook(info.RoomId, info.Sid)
+		msg := &plugnmeet.CommonNotifyEvent{
+			Event: new("room_created"),
+			Room: &plugnmeet.NotifyEventRoom{
+				RoomId:          &info.RoomId,
+				Sid:             &info.Sid,
+				CreationTime:    new(uint64(info.CreationTime)),
+				Metadata:        &info.Metadata,
+				EmptyTimeout:    emptyTimeout,
+				MaxParticipants: maxParticipants,
+			},
+		}
+
+		if err := m.webhookNotifier.SendWebhookEvent(msg); err != nil {
+			m.logger.WithError(err).Error("Error sending room created webhook")
+		}
+	}
+}

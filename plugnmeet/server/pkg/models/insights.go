@@ -1,0 +1,411 @@
+package models
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/mynaparrot/plugnmeet-protocol/hooks"
+	"github.com/mynaparrot/plugnmeet-protocol/plugnmeet"
+	"github.com/mynaparrot/plugnmeet-server/pkg/config"
+	"github.com/mynaparrot/plugnmeet-server/pkg/insights"
+	insightsservice "github.com/mynaparrot/plugnmeet-server/pkg/services/insights"
+	natsservice "github.com/mynaparrot/plugnmeet-server/pkg/services/nats"
+	redisservice "github.com/mynaparrot/plugnmeet-server/pkg/services/redis"
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
+	"github.com/redis/go-redis/v9"
+	"github.com/sirupsen/logrus"
+	"go.uber.org/fx"
+)
+
+const (
+	TaskConfigureAgent            = "configureAgent"
+	TaskUserStart                 = "userStart"
+	TaskUserEnd                   = "userEnd"
+	TaskGetUserStatus             = "getUserStatus"
+	TaskEndRoomAgentByServiceName = "endRoomAgentByServiceName"
+	TaskEndRoomAllAgents          = "endRoomAllAgents"
+)
+
+type AgentTaskResponse struct {
+	Status bool   `json:"status"`
+	Msg    string `json:"msg"`
+}
+
+type InsightsModel struct {
+	ctx           context.Context
+	appConfig     *config.AppConfig
+	rds           *redis.Client
+	natsConn      *nats.Conn
+	js            jetstream.JetStream
+	logger        *logrus.Entry
+	lock          sync.RWMutex
+	roomAgents    map[string]*insightsservice.RoomAgent // Maps a unique key (roomName@serviceName) to a dedicated agent
+	redisService  *redisservice.RedisService
+	natsService   *natsservice.NatsService
+	artifactModel *ArtifactModel
+}
+
+type InsightsModelArgs struct {
+	fx.In
+	Ctx           context.Context
+	AppConfig     *config.AppConfig
+	RDS           *redis.Client
+	NatsConn      *nats.Conn
+	JS            jetstream.JetStream
+	RedisService  *redisservice.RedisService
+	NatsService   *natsservice.NatsService
+	ArtifactModel *ArtifactModel
+	Logger        *logrus.Logger
+}
+
+func NewInsightsModel(args InsightsModelArgs) *InsightsModel {
+	return &InsightsModel{
+		ctx:           args.Ctx,
+		appConfig:     args.AppConfig,
+		rds:           args.RDS,
+		natsConn:      args.NatsConn,
+		js:            args.JS,
+		redisService:  args.RedisService,
+		natsService:   args.NatsService,
+		roomAgents:    make(map[string]*insightsservice.RoomAgent),
+		artifactModel: args.ArtifactModel,
+		logger:        args.Logger.WithField("model", "insights"),
+	}
+}
+
+// ConfigureAgent sends a configuration task and waits for confirmation.
+func (s *InsightsModel) ConfigureAgent(payload *insights.InsightsTaskPayload, timeout time.Duration) error {
+	s.logger.Infof("Sending request to configure agent for service '%s' in room '%s'", payload.ServiceType, payload.RoomId)
+
+	p, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	// Use nats request/reply
+	msg, err := s.natsConn.Request(insights.InsightsNatsChannel, p, timeout)
+	if err != nil {
+		return fmt.Errorf("NATS request failed: %w", err)
+	}
+
+	var res AgentTaskResponse
+	if err := json.Unmarshal(msg.Data, &res); err != nil {
+		return fmt.Errorf("failed to parse response from agent: %w", err)
+	}
+
+	if !res.Status {
+		return fmt.Errorf("agent failed to process task: %s", res.Msg)
+	}
+
+	return nil // Success!
+}
+
+// ActivateAgentTaskForUser publishes a 'start' message to activate a room agent for a long-running task for a specific user.
+func (s *InsightsModel) ActivateAgentTaskForUser(payload *insights.InsightsTaskPayload, timeout time.Duration) error {
+	s.logger.Infof("Publishing start agent task request for service '%s' in room '%s' for user '%s'", payload.ServiceType, payload.RoomId, payload.UserId)
+
+	p, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	msg, err := s.natsConn.Request(insights.InsightsNatsChannel, p, timeout)
+	if err != nil {
+		return fmt.Errorf("NATS request failed: %w", err)
+	}
+
+	var res AgentTaskResponse
+	if err := json.Unmarshal(msg.Data, &res); err != nil {
+		return fmt.Errorf("failed to parse response from agent: %w", err)
+	}
+
+	if !res.Status {
+		return fmt.Errorf("agent failed to process task: %s", res.Msg)
+	}
+
+	return nil
+}
+
+// EndAgentTaskForUser now only publishes an 'end' message.
+func (s *InsightsModel) EndAgentTaskForUser(payload *insights.InsightsTaskPayload, timeout time.Duration) error {
+	s.logger.Infof("Publishing end task request for service '%s' in room '%s' for user '%s'", payload.ServiceType, payload.RoomId, payload.UserId)
+
+	p, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	msg, err := s.natsConn.Request(insights.InsightsNatsChannel, p, timeout)
+	if err != nil {
+		return fmt.Errorf("NATS request failed: %w", err)
+	}
+
+	var res AgentTaskResponse
+	if err := json.Unmarshal(msg.Data, &res); err != nil {
+		return fmt.Errorf("failed to parse response from agent: %w", err)
+	}
+
+	if !res.Status {
+		return fmt.Errorf("agent failed to process task: %s", res.Msg)
+	}
+
+	return nil // Success!
+}
+
+func (s *InsightsModel) EndRoomAgentTaskByServiceName(serviceType insights.ServiceType, roomName string, timeout time.Duration) error {
+	s.logger.Infof("Publishing end task request for service '%s' in room '%s'", serviceType, roomName)
+
+	payload := &insights.InsightsTaskPayload{
+		Task:        TaskEndRoomAgentByServiceName,
+		ServiceType: serviceType,
+		RoomId:      roomName,
+	}
+	p, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	msg, err := s.natsConn.Request(insights.InsightsNatsChannel, p, timeout)
+	if err != nil {
+		return fmt.Errorf("NATS request failed: %w", err)
+	}
+
+	var res AgentTaskResponse
+	if err := json.Unmarshal(msg.Data, &res); err != nil {
+		return fmt.Errorf("failed to parse response from agent: %w", err)
+	}
+
+	if !res.Status {
+		return fmt.Errorf("agent failed to process task: %s", res.Msg)
+	}
+
+	return nil // Success!
+}
+
+// EndRoomAllAgentTasks will close everything for this room
+func (s *InsightsModel) EndRoomAllAgentTasks(roomName string) error {
+	s.logger.Infof("Publishing end all room tasks request for room '%s'", roomName)
+	payload := &insights.InsightsTaskPayload{
+		Task: TaskEndRoomAllAgents,
+	}
+	p, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	return s.natsConn.Publish(insights.InsightsNatsChannel, p)
+}
+
+// ActivateTextTask performs a direct, stateless text-based task using the configured provider.
+func (s *InsightsModel) ActivateTextTask(ctx context.Context, serviceType insights.ServiceType, options []byte) (interface{}, error) {
+	// 1. Get the configuration for the requested service.
+	targetAccount, serviceConfig, err := s.appConfig.Insights.GetProviderAccountForService(serviceType)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get provider account for service '%s': %w", serviceType, err)
+	}
+
+	// 2. Create the appropriate task using the factory.
+	args := &insightsservice.TaskArgs{
+		Ctx:             ctx,
+		ServiceType:     serviceType,
+		AppConf:         s.appConfig,
+		NatsConn:        s.natsConn,
+		JS:              s.js,
+		ServiceConfig:   serviceConfig,
+		ProviderAccount: targetAccount,
+		NatsService:     s.natsService,
+		RedisService:    s.redisService,
+		Logger:          s.logger,
+	}
+	task, err := insightsservice.NewTask(args)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create task for service '%s': %w", serviceType, err)
+	}
+
+	// 3. Run the stateless task and return the results channel.
+	return task.RunStateless(ctx, options)
+}
+
+// GetSupportedLanguagesForService returns the list of supported languages for a single, specific service.
+func (s *InsightsModel) GetSupportedLanguagesForService(ctx context.Context, serviceType insights.ServiceType) ([]*plugnmeet.InsightsSupportedLangInfo, error) {
+	// 1. Get the configuration for the requested service.
+	targetAccount, serviceConfig, err := s.appConfig.Insights.GetProviderAccountForService(serviceType)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get provider account for service '%s': %w", serviceType, err)
+	}
+
+	// 2. Create a new provider instance on-the-fly.
+	args := &insightsservice.ProviderArgs{
+		Ctx:             ctx,
+		ProviderType:    serviceConfig.Provider,
+		ProviderAccount: targetAccount,
+		ServiceConfig:   serviceConfig,
+		RDS:             s.rds,
+		Logger:          s.logger,
+	}
+	provider, err := insightsservice.NewProvider(args)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create provider for service '%s': %w", serviceType, err)
+	}
+
+	// 3. Call the provider's GetSupportedLanguages method and return the results.
+	// Here, we assume the 'serviceName' from the config (e.g., "transcription", "translation")
+	// is the canonical name the provider understands.
+	return provider.GetSupportedLanguages(serviceType), nil
+}
+
+func (s *InsightsModel) Shutdown() {
+	s.lock.RLock()
+	// Find all agents that belong to this room without holding a write lock for the whole loop.
+	toShutdown := make([]string, 0)
+	for key := range s.roomAgents {
+		toShutdown = append(toShutdown, key)
+	}
+	s.lock.RUnlock()
+
+	// Now, call the safe shutdown method for each.
+	for _, key := range toShutdown {
+		s.shutdownAndRemoveAgent(key)
+	}
+
+	s.logger.Infoln("Insights Service shutdown complete.")
+}
+
+// StartProcessingSummarizeJob will be called by the NATS subscription in the controller.
+func (s *InsightsModel) StartProcessingSummarizeJob(payload *insights.SummarizeJobPayload, metadata *jetstream.MsgMetadata) (err error) {
+	log := s.logger.WithFields(logrus.Fields{
+		"roomTableId":  payload.RoomTableId,
+		"roomId":       payload.RoomId,
+		"filePath":     payload.FilePath,
+		"service":      "meeting_summarizing",
+		"numDelivered": metadata.NumDelivered,
+	})
+	log.Infoln("received new meeting summarization job")
+
+	originalPath := payload.FilePath // copy the original path for defer usage
+	defer func() {
+		if err != nil {
+			if insights.SummarizeJobMaxDeliverNum == metadata.NumDelivered {
+				log.Warnf("Maximum number of retrying passed, limit: %d, delivered: %d", insights.SummarizeJobMaxDeliverNum, metadata.NumDelivered)
+				// so, maximum delivery done, and we can delete the original file to ensure it's remain as orphan
+				if s.appConfig.Hooks != nil {
+					req := &hooks.DeleteHookData{
+						InputPath:    originalPath,
+						HookFileType: hooks.HookFileTypeArtifact,
+					}
+					if _, err := s.appConfig.Hooks.RunDeleteHook(req, log); err != nil {
+						log.WithError(err).Error("delete hook pipeline failed")
+					}
+				} else {
+					if _, err := s.artifactModel.MoveToTrash(originalPath); err != nil {
+						log.WithError(err).Error("failed to delete file")
+					}
+				}
+			}
+		}
+	}()
+
+	// 1. Get the configuration for the service.
+	targetAccount, serviceConfig, err := s.appConfig.Insights.GetProviderAccountForService(insights.ServiceTypeMeetingSummarizing)
+	if err != nil {
+		log.WithError(err).Error("failed to get provider account")
+		return err
+	}
+
+	// 2. Create a new provider instance.
+	args := &insightsservice.ProviderArgs{
+		Ctx:             s.ctx,
+		ProviderType:    serviceConfig.Provider,
+		ProviderAccount: targetAccount,
+		ServiceConfig:   serviceConfig,
+		RDS:             s.rds,
+		Logger:          log,
+	}
+	provider, err := insightsservice.NewProvider(args)
+	if err != nil {
+		log.WithError(err).Error("failed to create provider")
+		return err
+	}
+
+	summarizeModel, ok := serviceConfig.Options["summarize_model"].(string)
+	if !ok {
+		err = fmt.Errorf("summarize_model not configured for meeting_summarizing service")
+		log.Error(err.Error())
+		return err
+	}
+	userPrompt := string(payload.Options)
+
+	// download the file to local
+	if s.appConfig.Hooks != nil {
+		req := &hooks.DownloadHookData{
+			InputPath:    payload.FilePath,
+			HookFileType: hooks.HookFileTypeArtifact,
+		}
+		outputDir := filepath.Join(*s.appConfig.ArtifactsSettings.StoragePath, strings.ToLower(plugnmeet.RoomArtifactType_MEETING_SUMMARY.String()), payload.RoomId)
+		res, err := s.appConfig.Hooks.RunDownloadHook(s.ctx, req, &outputDir, time.Minute*3, log)
+		if err != nil {
+			log.WithError(err).Error("download hook pipeline failed")
+			return err
+		}
+		if res != nil && res.OutputPath != "" {
+			defer os.RemoveAll(outputDir) // delete the dir when we're done
+			payload.FilePath = res.OutputPath
+		}
+	}
+
+	// 3. Start the batch job.
+	jobId, fileName, err := provider.StartBatchSummarizeAudioFile(s.ctx, payload.FilePath, summarizeModel, userPrompt)
+	if err != nil {
+		log.WithError(err).Error("failed to start batch summarization job")
+		return err
+	}
+	log.Infof("Successfully added batch job with ID: %s for fileName: %s", jobId, fileName)
+
+	pendingJob := &insights.SummarizePendingJobPayload{
+		RoomTableId:      payload.RoomTableId,
+		JobId:            jobId,
+		FileName:         fileName,
+		OriginalFilePath: payload.FilePath,
+		CreatedAt:        time.Now().Format(time.RFC3339),
+	}
+
+	marshal, err := json.Marshal(&pendingJob)
+	if err != nil {
+		log.WithError(err).Error("failed to marshal pending job")
+		return err
+	}
+
+	data := map[string]string{
+		jobId: string(marshal),
+	}
+
+	// 4. Store the job ID in Redis for the janitor to track.
+	if err = s.rds.HSet(s.ctx, insights.PendingSummarizeJobRedisKey, data).Err(); err != nil {
+		log.WithError(err).Error("failed to store pending summarization job in Redis")
+		return err
+	}
+
+	log.Infof("Successfully registered new batch job with ID: %s for fileName: %s", jobId, fileName)
+	return nil
+}
+
+func (s *InsightsModel) OnAfterRoomEnded(dbTableId uint64, roomId, roomSid string) {
+	log := s.logger.WithFields(logrus.Fields{
+		"room_id":       roomId,
+		"room_sid":      roomSid,
+		"room_table_id": dbTableId,
+		"method":        "OnAfterRoomEnded",
+	})
+
+	if err := s.EndRoomAllAgentTasks(roomId); err != nil {
+		log.WithError(err).Error("Error in agent task cleanup")
+	}
+
+	s.artifactModel.CreateAllRoomUsageArtifacts(roomId, roomSid, dbTableId, log)
+}

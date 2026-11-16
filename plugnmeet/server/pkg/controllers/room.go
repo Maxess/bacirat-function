@@ -1,0 +1,371 @@
+package controllers
+
+import (
+	"errors"
+
+	"github.com/gofiber/fiber/v3"
+	"github.com/mynaparrot/plugnmeet-protocol/plugnmeet"
+	"github.com/mynaparrot/plugnmeet-protocol/utils"
+	"github.com/mynaparrot/plugnmeet-server/pkg/config"
+	"github.com/mynaparrot/plugnmeet-server/pkg/models"
+	"go.uber.org/fx"
+	"google.golang.org/protobuf/proto"
+)
+
+// RoomController holds dependencies for room-related handlers.
+type RoomController struct {
+	RoomModel *models.RoomModel
+}
+
+type RoomControllerArgs struct {
+	fx.In
+	RoomModel *models.RoomModel
+}
+
+// NewRoomController creates a new RoomController.
+func NewRoomController(args RoomControllerArgs) *RoomController {
+	return &RoomController{
+		RoomModel: args.RoomModel,
+	}
+}
+
+// HandleRoomCreate handles creating a new room.
+func (rc *RoomController) HandleRoomCreate(c fiber.Ctx) error {
+	req := new(plugnmeet.CreateRoomReq)
+	if err := parseAndValidateRequest(c.Body(), req); err != nil {
+		return utils.SendCommonProtoJsonResponse(c, false, err.Error(), plugnmeet.StatusCode_INVALID_PARAMETERS)
+	}
+
+	room, err := rc.RoomModel.CreateRoom(c.RequestCtx(), req)
+	if err != nil {
+		return utils.SendCommonProtoJsonResponse(c, false, err.Error(), plugnmeet.StatusCode_INTERNAL_SERVER_ERROR)
+	}
+
+	r := &plugnmeet.CreateRoomRes{
+		Status:     true,
+		Msg:        "success",
+		StatusCode: plugnmeet.StatusCode_SUCCESS,
+		RoomInfo:   room,
+	}
+
+	return utils.SendProtoJsonResponse(c, r)
+}
+
+// HandleIsRoomActive checks if a room is active.
+func (rc *RoomController) HandleIsRoomActive(c fiber.Ctx) error {
+	req := new(plugnmeet.IsRoomActiveReq)
+	if err := parseAndValidateRequest(c.Body(), req); err != nil {
+		return utils.SendCommonProtoJsonResponse(c, false, err.Error(), plugnmeet.StatusCode_INVALID_PARAMETERS)
+	}
+
+	res, _, _ := rc.RoomModel.IsRoomActive(req)
+	return utils.SendProtoJsonResponse(c, res)
+}
+
+// HandleGetActiveRoomInfo gets information about an active room.
+func (rc *RoomController) HandleGetActiveRoomInfo(c fiber.Ctx) error {
+	req := new(plugnmeet.GetActiveRoomInfoReq)
+	if err := parseAndValidateRequest(c.Body(), req); err != nil {
+		return utils.SendCommonProtoJsonResponse(c, false, err.Error(), plugnmeet.StatusCode_INVALID_PARAMETERS)
+	}
+
+	status, msg, statusCode, res := rc.RoomModel.GetActiveRoomInfo(c.RequestCtx(), req)
+	r := &plugnmeet.GetActiveRoomInfoRes{
+		Status:     status,
+		Msg:        msg,
+		StatusCode: statusCode,
+		Room:       res,
+	}
+
+	return utils.SendProtoJsonResponse(c, r)
+}
+
+// HandleGetActiveRoomsInfo gets information about all active rooms.
+func (rc *RoomController) HandleGetActiveRoomsInfo(c fiber.Ctx) error {
+	status, msg, statusCode, res := rc.RoomModel.GetActiveRoomsInfo(c.RequestCtx())
+
+	r := &plugnmeet.GetActiveRoomsInfoRes{
+		Status:     status,
+		Msg:        msg,
+		StatusCode: statusCode,
+		Rooms:      res,
+	}
+
+	return utils.SendProtoJsonResponse(c, r)
+}
+
+// HandleEndRoom handles ending a room.
+func (rc *RoomController) HandleEndRoom(c fiber.Ctx) error {
+	req := new(plugnmeet.RoomEndReq)
+	if err := parseAndValidateRequest(c.Body(), req); err != nil {
+		return utils.SendCommonProtoJsonResponse(c, false, err.Error(), plugnmeet.StatusCode_INVALID_PARAMETERS)
+	}
+
+	status, msg, statusCode := rc.RoomModel.EndRoom(c.RequestCtx(), req)
+	return utils.SendCommonProtoJsonResponse(c, status, msg, statusCode)
+}
+
+// HandleFetchPastRooms handles fetching past rooms.
+func (rc *RoomController) HandleFetchPastRooms(c fiber.Ctx) error {
+	req := new(plugnmeet.FetchPastRoomsReq)
+	if err := parseAndValidateRequest(c.Body(), req); err != nil {
+		return utils.SendCommonProtoJsonResponse(c, false, err.Error(), plugnmeet.StatusCode_INVALID_PARAMETERS)
+	}
+
+	result, err := rc.RoomModel.FetchPastRooms(c.RequestCtx(), req)
+	if err != nil {
+		if errors.Is(err, config.NotFoundErr) {
+			return utils.SendCommonProtoJsonResponse(c, false, "no room found", plugnmeet.StatusCode_NOT_FOUND)
+		}
+		return utils.SendCommonProtoJsonResponse(c, false, err.Error(), plugnmeet.StatusCode_INTERNAL_SERVER_ERROR)
+	}
+	if result.GetTotalRooms() == 0 {
+		return utils.SendCommonProtoJsonResponse(c, false, "no info found", plugnmeet.StatusCode_NOT_FOUND)
+	}
+
+	r := &plugnmeet.FetchPastRoomsRes{
+		Status:     true,
+		Msg:        "success",
+		StatusCode: plugnmeet.StatusCode_SUCCESS,
+		Result:     result,
+	}
+	return utils.SendProtoJsonResponse(c, r)
+}
+
+// HandleBroadcastToRoom handles broadcasting message/notificaiton to a room.
+func (rc *RoomController) HandleBroadcastToRoom(c fiber.Ctx) error {
+	req := new(plugnmeet.BroadcastToRoomReq)
+	if err := parseAndValidateRequest(c.Body(), req); err != nil {
+		return utils.SendCommonProtoJsonResponse(c, false, err.Error(), plugnmeet.StatusCode_INVALID_PARAMETERS)
+	}
+
+	res, _, _ := rc.RoomModel.IsRoomActive(&plugnmeet.IsRoomActiveReq{RoomId: req.RoomId})
+	if !res.GetIsActive() {
+		return utils.SendCommonProtoJsonResponse(c, false, res.GetMsg(), res.GetStatusCode())
+	}
+
+	statusCode, err := rc.RoomModel.BroadcastToRoom(req)
+	if err != nil {
+		return utils.SendCommonProtoJsonResponse(c, false, err.Error(), statusCode)
+	}
+
+	return utils.SendCommonProtoJsonResponse(c, true, "success", plugnmeet.StatusCode_SUCCESS)
+}
+
+// HandleEndRoomForAPI handles ending a room via API call.
+func (rc *RoomController) HandleEndRoomForAPI(c fiber.Ctx) error {
+	isAdmin := fiber.Locals[bool](c, "isAdmin")
+	roomId := fiber.Locals[string](c, "roomId")
+
+	if !isAdmin {
+		return utils.SendCommonProtobufResponse(c, false, "only admin can perform this task")
+	}
+
+	req := new(plugnmeet.RoomEndReq)
+	err := proto.Unmarshal(c.Body(), req)
+	if err != nil {
+		return utils.SendCommonProtobufResponse(c, false, err.Error())
+	}
+
+	if roomId != req.RoomId {
+		return utils.SendCommonProtobufResponse(c, false, "requested roomId & token roomId mismatched")
+	}
+
+	status, msg, _ := rc.RoomModel.EndRoom(c.RequestCtx(), req)
+	return utils.SendCommonProtobufResponse(c, status, msg)
+}
+
+// HandleChangeVisibilityForAPI handles changing room visibility via API call.
+func (rc *RoomController) HandleChangeVisibilityForAPI(c fiber.Ctx) error {
+	isAdmin := fiber.Locals[bool](c, "isAdmin")
+	roomId := fiber.Locals[string](c, "roomId")
+
+	if !isAdmin {
+		return utils.SendCommonProtobufResponse(c, false, "only admin can perform this task")
+	}
+
+	req := new(plugnmeet.ChangeVisibilityRes)
+	err := proto.Unmarshal(c.Body(), req)
+	if err != nil {
+		return utils.SendCommonProtobufResponse(c, false, err.Error())
+	}
+
+	if roomId != req.RoomId {
+		return utils.SendCommonProtobufResponse(c, false, "requested roomId & token roomId mismatched")
+	}
+
+	status, msg := rc.RoomModel.ChangeVisibility(req)
+	return utils.SendCommonProtobufResponse(c, status, msg)
+}
+
+func (rc *RoomController) HandleEnableRoomSipDialIn(c fiber.Ctx) error {
+	isAdmin := fiber.Locals[bool](c, "isAdmin")
+	roomId := fiber.Locals[string](c, "roomId")
+
+	if !isAdmin {
+		return utils.SendCommonProtobufResponse(c, false, "only admin can perform this task")
+	}
+
+	req := new(plugnmeet.EnableSipDialInReq)
+	err := proto.Unmarshal(c.Body(), req)
+	if err != nil {
+		return utils.SendCommonProtobufResponse(c, false, err.Error())
+	}
+	req.RoomId = roomId
+
+	err = rc.RoomModel.EnableRoomSipDialIn(req)
+	if err != nil {
+		return utils.SendCommonProtobufResponse(c, false, err.Error())
+	}
+	return utils.SendCommonProtobufResponse(c, true, "success")
+}
+
+func (rc *RoomController) HandleCreateIngress(c fiber.Ctx) error {
+	roomId := fiber.Locals[string](c, "roomId")
+	isAdmin := fiber.Locals[bool](c, "isAdmin")
+
+	if !isAdmin {
+		return utils.SendCommonProtobufResponse(c, false, "only admin can perform this task")
+	}
+
+	req := new(plugnmeet.CreateIngressReq)
+	err := proto.Unmarshal(c.Body(), req)
+	if err != nil {
+		return utils.SendCommonProtobufResponse(c, false, err.Error())
+	}
+
+	req.RoomId = roomId
+	f, err := rc.RoomModel.CreateIngress(req)
+	if err != nil {
+		return utils.SendCommonProtobufResponse(c, false, err.Error())
+	}
+
+	res := &plugnmeet.CreateIngressRes{
+		Status:    true,
+		Msg:       "success",
+		Url:       f.Url,
+		StreamKey: f.StreamKey,
+	}
+
+	return utils.SendProtobufResponse(c, res)
+}
+
+// HandleExternalDisplayLink handles sharing an external display link.
+func (rc *RoomController) HandleExternalDisplayLink(c fiber.Ctx) error {
+	isAdmin := fiber.Locals[bool](c, "isAdmin")
+	roomId := fiber.Locals[string](c, "roomId")
+	requestedUserId := fiber.Locals[string](c, "requestedUserId")
+
+	if !isAdmin {
+		return utils.SendCommonProtobufResponse(c, false, "only admin can perform this task")
+	}
+
+	if roomId == "" {
+		return utils.SendCommonProtobufResponse(c, false, "roomId required")
+	}
+
+	req := new(plugnmeet.ExternalDisplayLinkReq)
+	if err := proto.Unmarshal(c.Body(), req); err != nil {
+		return utils.SendCommonProtobufResponse(c, false, err.Error())
+	}
+
+	req.RoomId = roomId
+	req.UserId = requestedUserId
+	if err := rc.RoomModel.HandleExternalDisplayTask(req); err != nil {
+		return utils.SendCommonProtobufResponse(c, false, err.Error())
+	}
+
+	return utils.SendCommonProtobufResponse(c, true, "success")
+}
+
+// HandleExternalMediaPlayer handles external media player actions.
+func (rc *RoomController) HandleExternalMediaPlayer(c fiber.Ctx) error {
+	isAdmin := fiber.Locals[bool](c, "isAdmin")
+	roomId := fiber.Locals[string](c, "roomId")
+	requestedUserId := fiber.Locals[string](c, "requestedUserId")
+
+	if !isAdmin {
+		return utils.SendCommonProtobufResponse(c, false, "only admin can perform this task")
+	}
+
+	if roomId == "" {
+		return utils.SendCommonProtobufResponse(c, false, "roomId required")
+	}
+
+	req := new(plugnmeet.ExternalMediaPlayerReq)
+	if err := proto.Unmarshal(c.Body(), req); err != nil {
+		return utils.SendCommonProtobufResponse(c, false, err.Error())
+	}
+
+	req.RoomId = roomId
+	req.UserId = requestedUserId
+	if err := rc.RoomModel.HandleExternalMediaTask(req); err != nil {
+		return utils.SendCommonProtobufResponse(c, false, err.Error())
+	}
+
+	return utils.SendCommonProtobufResponse(c, true, "success")
+}
+
+// HandleApproveUsers handles approving users from the waiting room.
+func (rc *RoomController) HandleApproveUsers(c fiber.Ctx) error {
+	roomId := fiber.Locals[string](c, "roomId")
+	isAdmin := fiber.Locals[bool](c, "isAdmin")
+
+	if !isAdmin {
+		return utils.SendCommonProtobufResponse(c, false, "only admin can perform this task")
+	}
+
+	req := new(plugnmeet.ApproveWaitingUsersReq)
+	if err := proto.Unmarshal(c.Body(), req); err != nil {
+		return utils.SendCommonProtobufResponse(c, false, err.Error())
+	}
+
+	req.RoomId = roomId
+	if err := rc.RoomModel.ApproveWaitingUsers(req); err != nil {
+		return utils.SendCommonProtobufResponse(c, false, err.Error())
+	}
+
+	return utils.SendCommonProtobufResponse(c, true, "success")
+}
+
+// HandleUpdateWaitingRoomMessage handles updating the waiting room message.
+func (rc *RoomController) HandleUpdateWaitingRoomMessage(c fiber.Ctx) error {
+	roomId := fiber.Locals[string](c, "roomId")
+	isAdmin := fiber.Locals[bool](c, "isAdmin")
+
+	if !isAdmin {
+		return utils.SendCommonProtobufResponse(c, false, "only admin can perform this task")
+	}
+
+	req := new(plugnmeet.UpdateWaitingRoomMessageReq)
+	if err := proto.Unmarshal(c.Body(), req); err != nil {
+		return utils.SendCommonProtobufResponse(c, false, err.Error())
+	}
+
+	req.RoomId = roomId
+	if err := rc.RoomModel.UpdateWaitingRoomMessage(req); err != nil {
+		return utils.SendCommonProtobufResponse(c, false, err.Error())
+	}
+
+	return utils.SendCommonProtobufResponse(c, true, "success")
+}
+
+// HandleChangeSharedNotepadStatus handles enabling/disabling the shared notepad.
+func (rc *RoomController) HandleChangeSharedNotepadStatus(c fiber.Ctx) error {
+	isAdmin := fiber.Locals[bool](c, "isAdmin")
+	if !isAdmin {
+		return utils.SendCommonProtobufResponse(c, false, "only admin can perform this task")
+	}
+
+	req := new(plugnmeet.ChangeSharedNotepadStatusReq)
+	if err := proto.Unmarshal(c.Body(), req); err != nil {
+		return utils.SendCommonProtobufResponse(c, false, err.Error())
+	}
+
+	req.RoomId = fiber.Locals[string](c, "roomId")
+	if err := rc.RoomModel.ChangeSharedNotepadStatus(req); err != nil {
+		return utils.SendCommonProtobufResponse(c, false, err.Error())
+	}
+
+	return utils.SendCommonProtobufResponse(c, true, "success")
+}

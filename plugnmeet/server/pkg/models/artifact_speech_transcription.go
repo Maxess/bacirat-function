@@ -1,0 +1,182 @@
+package models
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/mynaparrot/plugnmeet-protocol/plugnmeet"
+	"github.com/mynaparrot/plugnmeet-server/pkg/insights"
+	redisservice "github.com/mynaparrot/plugnmeet-server/pkg/services/redis"
+	"github.com/sirupsen/logrus"
+)
+
+// createSpeechTranscriptionUsageArtifact creates an artifact record for a speech transcription session.
+// sourceRoomId is the room where the usage occurred (usage hash is harvested
+// from its Redis keys), while ownerRoomId/ownerRoomSid/ownerTableId identify
+// the room that owns the resulting artifact (parent room for breakout activity).
+func (m *ArtifactModel) createSpeechTranscriptionUsageArtifact(sourceRoomId, ownerRoomId, ownerRoomSid string, sourceTableId, ownerTableId uint64, isBreakout bool, fileArtifactId *string, log *logrus.Entry) error {
+	// 1. Atomically get usage data from Redis and clean up the key.
+	usageMap, err := m.rs.GetTranscriptionRoomUsage(m.ctx, sourceRoomId, true)
+	if err != nil {
+		return err
+	}
+
+	if len(usageMap) == 0 {
+		// No usage was recorded, so there's nothing to do.
+		return nil
+	}
+
+	// 2. Prepare the metadata message.
+	total, _ := usageMap[redisservice.TotalUsageField]
+
+	// 3. Get pricing & calculate cost
+	var cost float64
+	pricing, err := m.app.Insights.GetServiceModelPricing(insights.ServiceTypeTranscription, "default")
+	if err == nil {
+		// Convert the hourly price to a per-second price first for a clean calculation.
+		pricePerSecond := pricing.PricePerHour / 3600
+		cost = float64(total) * pricePerSecond
+	} else {
+		log.WithError(err).Warn("could not calculate cost for transcription")
+	}
+
+	metadata := &plugnmeet.RoomArtifactMetadata{
+		UsageDetails: &plugnmeet.RoomArtifactMetadata_DurationUsage{
+			DurationUsage: &plugnmeet.RoomArtifactDurationUsage{
+				DurationSec:              uint32(total),
+				Breakdown:                usageMap,
+				DurationSecEstimatedCost: roundAndPointer(cost, 6),
+			},
+		},
+		// Link this usage artifact back to the file artifact.
+		ReferenceArtifactId: fileArtifactId,
+	}
+	m.setUsageArtifactProvenance(metadata, sourceTableId, isBreakout)
+
+	// Create and save the artifact for chat interactions.
+	_, err = m.createAndSaveArtifact(ownerRoomId, ownerRoomSid, ownerTableId, plugnmeet.RoomArtifactType_SPEECH_TRANSCRIPTION_USAGE, metadata, false, log)
+	if err != nil {
+		log.WithError(err).Error("failed to create speech transcription usage artifact")
+	}
+
+	// 6. Add to analytics
+	m.HandleAnalyticsEvent(ownerRoomId, plugnmeet.AnalyticsEvents_ANALYTICS_EVENT_ROOM_INSIGHTS_TRANSCRIPTION_TOTAL_USAGE, nil, &total)
+
+	log.Infof("successfully created speech transcription usage artifact for room %s", sourceRoomId)
+
+	return nil
+}
+
+// formatVTTTimestamp converts a duration into the required HH:MM:SS.mmm format.
+func formatVTTTimestamp(d time.Duration) string {
+	totalSeconds := int(d.Seconds())
+	hours := totalSeconds / 3600
+	minutes := (totalSeconds % 3600) / 60
+	seconds := totalSeconds % 60
+	milliseconds := int(d.Milliseconds() % 1000)
+	return fmt.Sprintf("%02d:%02d:%02d.%03d", hours, minutes, seconds, milliseconds)
+}
+
+// createSpeechTranscriptionFileArtifact creates a downloadable VTT artifact file
+func (m *ArtifactModel) createSpeechTranscriptionFileArtifact(roomId, roomSid string, roomTableId uint64, log *logrus.Entry) (artifactId *string, err error) {
+	// 1. Get all transcription chunks.
+	chunks, err := m.rs.GetTranscriptionHistory(roomId)
+	if err != nil {
+		return nil, err
+	}
+	if len(chunks) == 0 {
+		return nil, nil // No chunks stored.
+	}
+
+	// 2. Clean up the history.
+	m.rs.DeleteTranscriptionHistory(roomId)
+
+	// 3. Sort keys chronologically.
+	keys := make([]string, 0, len(chunks))
+	for k := range chunks {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		// Convert string keys to int64 for proper numerical comparison.
+		ts1, err1 := strconv.ParseInt(keys[i], 10, 64)
+		ts2, err2 := strconv.ParseInt(keys[j], 10, 64)
+		// If there's a parsing error, treat the key as "less" to avoid panics,
+		// though in practice, these keys should always be valid timestamps.
+		if err1 != nil || err2 != nil {
+			return keys[i] < keys[j]
+		}
+		return ts1 < ts2
+	})
+
+	// 4. Format the chunks into a VTT file.
+	var fileContent strings.Builder
+	fileContent.WriteString("WEBVTT\n\n")
+	fileContent.WriteString(fmt.Sprintf("NOTE Transcription for meeting: %s\n\n", roomId))
+
+	var firstTimestamp int64 = -1
+	var previousEndTime time.Duration
+
+	for i, key := range keys {
+		var chunk redisservice.TranscriptionChunk
+		if err := json.Unmarshal([]byte(chunks[key]), &chunk); err != nil {
+			continue // Skip corrupted data
+		}
+
+		ts, _ := strconv.ParseInt(key, 10, 64)
+		if firstTimestamp == -1 {
+			firstTimestamp = ts
+		}
+
+		elapsedTime := time.Duration(ts - firstTimestamp)
+		var startTime time.Duration
+		if i > 0 {
+			startTime = previousEndTime
+		}
+
+		vttStartTime := formatVTTTimestamp(startTime)
+		vttEndTime := formatVTTTimestamp(elapsedTime)
+
+		fileContent.WriteString(fmt.Sprintf("%d\n", i+1))
+		fileContent.WriteString(fmt.Sprintf("%s --> %s\n", vttStartTime, vttEndTime))
+		fileContent.WriteString(fmt.Sprintf("<v %s>%s\n\n", chunk.Name, chunk.Text))
+
+		previousEndTime = elapsedTime
+	}
+
+	if fileContent.Len() <= 40 {
+		return nil, nil
+	}
+
+	// 5. Build the file path and write the file.
+	fileName := fmt.Sprintf("transcription_%s-%d.vtt", roomSid, time.Now().UnixMilli())
+	relativePath, absolutePath, err := m.buildPath(fileName, roomId, plugnmeet.RoomArtifactType_SPEECH_TRANSCRIPTION)
+	if err != nil {
+		return nil, err
+	}
+	err = os.WriteFile(absolutePath, []byte(fileContent.String()), 0644)
+	if err != nil {
+		return nil, fmt.Errorf("failed to write transcription file: %w", err)
+	}
+
+	// 6. Prepare the metadata for the file artifact.
+	metadata := &plugnmeet.RoomArtifactMetadata{
+		FileInfo: &plugnmeet.RoomArtifactFileInfo{
+			FilePath: relativePath,
+			FileSize: int64(fileContent.Len()),
+			MimeType: "text/vtt",
+		},
+	}
+
+	// 7. Create the file artifact and get its ID.
+	fileArtifact, err := m.createAndSaveArtifact(roomId, roomSid, roomTableId, plugnmeet.RoomArtifactType_SPEECH_TRANSCRIPTION, metadata, false, log)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create speech transcription file artifact: %w", err)
+	}
+
+	return &fileArtifact.ArtifactId, nil
+}
