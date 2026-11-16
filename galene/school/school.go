@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -459,42 +460,52 @@ func syncGroup(name string, c ClassExport, newNames map[string]string, res *Resu
 			continue
 		}
 
-		uetag, err := group.GetUserTag(name, username, false)
-		if errors.Is(err, os.ErrNotExist) {
-			uetag = ""
-			err = nil
-		}
-		if err != nil {
-			res.Errors = append(res.Errors,
-				fmt.Sprintf("%v: %v", username, err))
-			continue
+		// Rewriting the group file is the expensive part of a sync,
+		// so skip it when the role has not changed.
+		unchanged := false
+		if exists && desc != nil {
+			if old, ok := desc.Users[username]; ok {
+				unchanged = slices.Equal(
+					old.Permissions.Permissions(desc),
+					perms.Permissions(desc),
+				)
+			}
 		}
 
-		if err := group.UpdateUser(name, username, false, uetag,
-			&group.UserDescription{Permissions: perms}); err != nil {
-			res.Errors = append(res.Errors,
-				fmt.Sprintf("%v: %v", username, err))
-			continue
+		if !unchanged {
+			uetag, err := group.GetUserTag(name, username, false)
+			if errors.Is(err, os.ErrNotExist) {
+				uetag = ""
+				err = nil
+			}
+			if err != nil {
+				res.Errors = append(res.Errors,
+					fmt.Sprintf("%v: %v", username, err))
+				continue
+			}
+
+			if err := group.UpdateUser(name, username, false, uetag,
+				&group.UserDescription{
+					Permissions: perms,
+				}); err != nil {
+				res.Errors = append(res.Errors,
+					fmt.Sprintf("%v: %v", username, err))
+				continue
+			}
 		}
 
 		// Rehash only when the stored password no longer matches the
-		// one the management system expects.  Hashing is the
-		// expensive part of a sync, and it would otherwise run for
-		// every member on every run.
-		if exists && passwordMatches(desc, username, m.password) {
-			res.Users++
-			if m.name != "" {
-				newNames[name+"\x00"+username] = m.name
+		// one the management system expects.  Hashing is by far the
+		// most expensive thing a sync can do.
+		if !(exists && passwordMatches(desc, username, m.password)) {
+			if err := setPassword(name, username, m.password, cost); err != nil {
+				res.Errors = append(res.Errors,
+					fmt.Sprintf("%v: %v", username, err))
+				continue
 			}
-			continue
 		}
-		if err := setPassword(name, username, m.password, cost); err != nil {
-			res.Errors = append(res.Errors,
-				fmt.Sprintf("%v: %v", username, err))
-			continue
-		}
-		res.Users++
 
+		res.Users++
 		if m.name != "" {
 			newNames[name+"\x00"+username] = m.name
 		}
