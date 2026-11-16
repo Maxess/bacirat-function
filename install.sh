@@ -28,11 +28,44 @@ done
 
 REPO=$(cd "$(dirname "$0")" && pwd)
 
-command -v go >/dev/null 2>&1 || {
+# 'sudo' ignores /etc/profile.d, so a Go installed under /usr/local/go
+# is not on sudo's PATH.  Look for it there before giving up.
+if ! command -v go >/dev/null 2>&1; then
+    for d in /usr/local/go/bin /usr/lib/go/bin /usr/lib/go-*/bin \
+             "$HOME/go/bin" /usr/local/bin; do
+        if [ -x "$d/go" ]; then
+            PATH="$PATH:$d"
+            export PATH
+            break
+        fi
+    done
+fi
+
+if ! command -v go >/dev/null 2>&1; then
     echo "error: the Go toolchain is not installed." >&2
     echo "Install Go 1.24 or later, then run this script again." >&2
+    echo "See PREPARE.md, section 5." >&2
     exit 1
-}
+fi
+
+# go.mod requires go >= 1.24.  Compare major and minor separately:
+# Go 1.9 is older than 1.24 even though 1.9 is the larger number.
+GOV=$(go env GOVERSION 2>/dev/null | sed 's/^go//')
+[ -n "$GOV" ] || GOV=$(go version | sed 's/.*go\([0-9]*\.[0-9]*\).*/\1/')
+GOMAJ=$(printf '%s\n' "$GOV" | cut -d. -f1)
+GOMIN=$(printf '%s\n' "$GOV" | cut -d. -f2)
+case "$GOMAJ$GOMIN" in
+    *[!0-9]*)
+        echo "    warning: cannot parse the Go version '$GOV', continuing" ;;
+    *)
+        if ! { [ "$GOMAJ" -gt 1 ] || { [ "$GOMAJ" -eq 1 ] &&
+                                      [ "$GOMIN" -ge 24 ]; }; }; then
+            echo "error: Go $GOV is too old, 1.24 or later is required." >&2
+            echo "Install a newer Go (PREPARE.md, section 5), then run again." >&2
+            exit 1
+        fi ;;
+esac
+echo "    using go $GOV"
 
 echo "==> Building the server"
 cd "$REPO/galene"

@@ -155,6 +155,15 @@ sudo firewall-cmd --list-ports
 سرور **در زمان اجرا به Go نیاز ندارد**؛ فقط برای بیلد لازم است. می‌توانید
 پس از نصب آن را حذف کنید.
 
+> **هشدار دربارهٔ نصب خودکار (شایع‌ترین خطا).**
+> اگر `go version` پیام `Command 'go' not found` می‌دهد و اوبونتو پیشنهاد
+> می‌دهد `apt install golang-go` یا `snap install go`، بدانید که این بسته‌ها
+> در بسیاری از نسخه‌ها **Go ۱.۱۸** هستند. پروژه به **۱.۲۴ یا بالاتر** نیاز
+> دارد (`galene/go.mod`)، پس آن‌ها را نصب نکنید و از بستهٔ رسمی در پایین
+> استفاده کنید.
+> اگر قبلاً نصب کرده‌اید، حذفش کنید:
+> `sudo apt remove -y golang-go` یا `sudo snap remove go`
+
 ### روش پیشنهادی — بستهٔ رسمی
 
 ```sh
@@ -174,15 +183,36 @@ go version
 متناظر (مثلاً `linux-arm64.tar.gz`) را از
 [go.dev/dl](https://go.dev/dl/) بگیرید.
 
-### روش جایگزین — بستهٔ توزیع
+### نکتهٔ مهم: `sudo` و `PATH`
 
-بستهٔ توزیع ممکن است قدیمی‌تر از ۱.۲۴ باشد. اگر چنین بود، از روش بالا
-استفاده کنید.
+دستور `sudo` فایل‌های `/etc/profile.d` را نمی‌خواند، بنابراین هنگام اجرای
+`sudo ./install.sh` ممکن است باز هم `go` پیدا نشود. یک لینک بسازید تا در
+همهٔ حالت‌ها پیدا شود:
 
 ```sh
-sudo apt install -y golang-go     # Debian / Ubuntu
-go version                        # باید >= ۱.۲۴ باشد
+sudo ln -sf /usr/local/go/bin/go    /usr/local/bin/go
+sudo ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt
+sudo go version        # باید go1.24.x را چاپ کند
 ```
+
+(اسکریپت `install.sh` خودش هم `/usr/local/go/bin` را جست‌وجو می‌کند، اما
+ساختن این لینک مطمئن‌تر است.)
+
+### اگر `go.dev` در دسترس نیست
+
+روی برخی سرورها دسترسی به `go.dev` مسدود یا بسیار کند است. راه‌ها:
+
+```sh
+# ۱. آینهٔ رسمی گوگل (همان فایل‌ها)
+sudo curl -fsSLo /tmp/go.tgz https://golang.google.cn/dl/go1.24.5.linux-amd64.tar.gz
+
+# ۲. یا روی رایانهٔ خودتان دانلود و منتقل کنید:
+#    scp go1.24.5.linux-amd64.tar.gz root@SERVER:/tmp/go.tgz
+```
+
+سپس همان مراحل استخراج بالا را با `/tmp/go.tgz` انجام دهید. در صورت تمایل،
+سلامت فایل را با `sha256sum` و مقدار درج‌شده در
+`https://go.dev/dl/?mode=json&include=all` مقایسه کنید.
 
 ---
 
@@ -395,6 +425,12 @@ if command -v go >/dev/null 2>&1; then
   min=$(echo "$v" | cut -d. -f2)
   chk "version $v >= 1.24" \
       "[ $maj -gt 1 ] || { [ $maj -eq 1 ] && [ $min -ge 24 ]; }"
+fi
+if ! command -v go >/dev/null 2>&1 ||
+   ! { [ "${maj:-0}" -gt 1 ] 2>/dev/null ||
+       { [ "${maj:-0}" -eq 1 ] && [ "${min:-0}" -ge 24 ]; }; }; then
+  echo "         -> بخش ۵ از PREPARE.md را اجرا کنید"
+  echo "            (بستهٔ apt/snap معمولاً Go ۱.۱۸ است و کافی نیست)"
 fi
 
 echo "Network:"
