@@ -3,6 +3,11 @@ window.plugNmeetConfig = {
   // The URL of your plugNmeet server.
   serverUrl: 'http://localhost:8080',
 
+  // Default UI language, used until the user picks one. A language picked in the room settings,
+  // or ?lng=xx-XX in the URL, always wins. The browser language is NOT used.
+  // Any folder name under src/assets/locales works, e.g. 'fa-IR', 'en', 'ar-SA'. Default: 'fa-IR'.
+  // defaultLanguage: 'fa-IR',
+
   // Forces the web client into hybrid mode (native publisher + web subscriber).
   // In hybrid mode the web client hides local media controls and drives media
   // publishing through the native bridge.  Useful for testing, or when the
