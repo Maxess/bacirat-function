@@ -168,8 +168,9 @@ sudo firewall-cmd --list-ports
 
 ```sh
 cd /tmp
-VER=1.24.5
+VER=1.24.13
 curl -fsSLO https://go.dev/dl/go${VER}.linux-amd64.tar.gz
+ls -l go${VER}.linux-amd64.tar.gz    # باید حدود ۷۰ مگابایت باشد
 sudo rm -rf /usr/local/go
 sudo tar -C /usr/local -xzf go${VER}.linux-amd64.tar.gz
 echo 'export PATH=$PATH:/usr/local/go/bin' | sudo tee /etc/profile.d/go.sh
@@ -177,7 +178,11 @@ export PATH=$PATH:/usr/local/go/bin
 go version
 ```
 
-خروجی باید چیزی شبیه `go version go1.24.5 linux/amd64` باشد.
+خروجی باید چیزی شبیه `go version go1.24.13 linux/amd64` باشد. (هر نسخهٔ
+۱.۲۴.x یا بالاتر پذیرفته است؛ ۱.۲۴.۱۳ آخرین وصلهٔ شاخهٔ ۱.۲۴ است.)
+
+> اگر `curl` با خطای `403` یا timeout شکست خورد، ادامهٔ همین بخش
+> («اگر `go.dev` در دسترس نیست») را بخوانید.
 
 اگر معماری سرور amd64 نیست، آن را با `uname -m` بررسی کنید و بستهٔ
 متناظر (مثلاً `linux-arm64.tar.gz`) را از
@@ -200,19 +205,43 @@ sudo go version        # باید go1.24.x را چاپ کند
 
 ### اگر `go.dev` در دسترس نیست
 
-روی برخی سرورها دسترسی به `go.dev` مسدود یا بسیار کند است. راه‌ها:
+روی برخی سرورها `go.dev` (و `dl.google.com`) مسدود است و خطای
+`403` یا timeout می‌دهد. بهترین جایگزین، **آینهٔ رسمی روی GitHub** است —
+همان باینری‌ها، فقط با نام فایل متفاوت:
 
 ```sh
-# ۱. آینهٔ رسمی گوگل (همان فایل‌ها)
-sudo curl -fsSLo /tmp/go.tgz https://golang.google.cn/dl/go1.24.5.linux-amd64.tar.gz
-
-# ۲. یا روی رایانهٔ خودتان دانلود و منتقل کنید:
-#    scp go1.24.5.linux-amd64.tar.gz root@SERVER:/tmp/go.tgz
+sudo curl -fsSLo /tmp/go.tgz \
+  https://github.com/actions/go-versions/releases/download/1.24.13-21696107652/go-1.24.13-linux-x64.tar.gz
+ls -l /tmp/go.tgz                  # باید حدود ۷۰ مگابایت باشد
+tar tzf /tmp/go.tgz | head -3      # فایل سالم است؟
 ```
 
-سپس همان مراحل استخراج بالا را با `/tmp/go.tgz` انجام دهید. در صورت تمایل،
-سلامت فایل را با `sha256sum` و مقدار درج‌شده در
-`https://go.dev/dl/?mode=json&include=all` مقایسه کنید.
+نام پوشهٔ درون این فایل (`go/`، `go-1.24.13/` یا چیز دیگر) ممکن است با
+بستهٔ رسمی فرق کند، بنابراین از این روش استفاده کنید که هر سه حالت را
+درست مدیریت می‌کند:
+
+```sh
+TMP=$(mktemp -d)
+sudo tar -C "$TMP" -xzf /tmp/go.tgz
+GOBIN=$(find "$TMP" -type f -path '*/bin/go' | head -1)
+GOROOT=$(dirname "$(dirname "$GOBIN")")
+sudo rm -rf /usr/local/go
+sudo mv "$GOROOT" /usr/local/go
+sudo rm -rf "$TMP"
+sudo /usr/local/go/bin/go version        # باید go1.24.13 را چاپ کند
+```
+
+سپس دستورهای `ln -sf` و `export PATH` از بالا را اجرا کنید.
+
+راه دیگر (اگر GitHub هم در دسترس نیست): فایل را روی رایانهٔ خودتان از
+[go.dev/dl](https://go.dev/dl/) دانلود و منتقل کنید:
+
+```sh
+scp go1.24.13.linux-amd64.tar.gz root@SERVER:/tmp/
+```
+
+و سپس `cp /tmp/go1.24.13.linux-amd64.tar.gz /tmp/go.tgz` را اجرا و همان
+مراحل استخراج بالا را تکرار کنید.
 
 ---
 
@@ -322,11 +351,17 @@ php -v
 php -m | grep -i pdo_mysql
 ```
 
-اگر `pdo_mysql` در فهرست نبود:
+اگر `php` نصب نبود (`Command 'php' not found`)، همان دستور بالا آن را
+نصب می‌کند. اگر پس از نصب باز هم `pdo_mysql` در فهرست نبود (گاهی بستهٔ
+`php-mysql` با نسخهٔ پیش‌فرض PHP تطبیق نمی‌کند)، ماژولِ همان نسخه را نصب
+کنید:
 
 ```sh
-sudo apt install -y php8.2-mysql    # نسخه را با php -v تطبیق دهید
+sudo apt install -y "php$(php -r 'echo PHP_MAJOR_VERSION . "." . PHP_MINOR_VERSION;')-mysql"
+php -m | grep -i pdo_mysql
 ```
+
+نسخهٔ PHP اهمیت زیادی ندارد؛ ۸.۱ (پیش‌فرض اوبونتو ۲۲٫۰۴) به بالا کافی است.
 
 > بدون این بخش هم سرور کامل کار می‌کند؛ فقط همگام‌سازی خودکار کلاس‌ها را
 > نخواهید داشت و کلاس‌ها را دستی می‌سازید.
