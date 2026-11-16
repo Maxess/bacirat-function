@@ -106,6 +106,16 @@ func (c *webClient) Data() map[string]interface{} {
 	return maps.Clone(c.data)
 }
 
+// SetData attaches a value to the client's data.  It is used at join
+// time for information the client did not supply itself, such as the
+// student's real name coming from the school database.
+func (c *webClient) SetData(key string, value interface{}) {
+	if c.data == nil {
+		c.data = make(map[string]interface{})
+	}
+	c.data[key] = value
+}
+
 func (c *webClient) PushClient(group, kind, id string, username string, perms []string, data map[string]interface{}) error {
 	c.action(pushClientAction{
 		group, kind, id, username, perms, data,

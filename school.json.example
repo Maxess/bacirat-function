@@ -1,0 +1,9 @@
+{
+    "_comment": "Copy to data/school.json and adjust.  All fields are optional.",
+
+    "exportFile": "school-export.json",
+    "exportCommand": "php /opt/bacirat/export-school.php > /opt/bacirat/data/school-export.json",
+    "commandWritesStdout": false,
+    "syncInterval": "1h",
+    "bcryptCost": 8
+}

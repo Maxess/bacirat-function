@@ -22,6 +22,7 @@
         <button data-tab="attendance">Attendance</button>
         <button data-tab="whiteboard">Whiteboards</button>
         <button data-tab="branding">Branding</button>
+        <button data-tab="school">School sync</button>
         <button data-tab="api">Website API</button>
       </nav>
 
@@ -123,6 +124,34 @@
           </label>
           <button type="submit">Save branding</button>
         </form>
+      </section>
+
+      <!-- School synchronisation -->
+      <section id="tab-school" class="admin-tab invisible">
+        <h2>School synchronisation</h2>
+        <p>
+          Classes and their members are imported from the school
+          management system.  The management system is never modified:
+          it only has to produce a JSON export.
+        </p>
+        <div class="admin-form">
+          <button id="school-sync">Sync now</button>
+        </div>
+        <table class="admin-table">
+          <tbody>
+            <tr><th>Last run</th><td id="school-last">never</td></tr>
+            <tr><th>Last error</th><td id="school-error">—</td></tr>
+          </tbody>
+        </table>
+        <p id="school-result"></p>
+
+        <h3>Expected export format</h3>
+        <p>
+          Write the export to <code>data/school-export.json</code>, or
+          configure <code>exportCommand</code> in
+          <code>data/school.json</code> to generate it automatically.
+        </p>
+        <pre id="school-example"></pre>
       </section>
 
       <!-- Website API -->

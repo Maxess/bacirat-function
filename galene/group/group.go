@@ -600,6 +600,35 @@ func deleteUnlocked(g *Group) bool {
 	return true
 }
 
+// DisplayNameFunc, if set, returns the name that should be displayed
+// for a given username in a given group.  It is registered by the
+// school integration, which knows the real names behind the national
+// ids used as usernames.  It is a hook rather than a direct call so
+// that this package stays independent of the school database.
+var DisplayNameFunc func(group, username string) (string, bool)
+
+// dataSetter is implemented by clients that can carry extra data.
+type dataSetter interface {
+	SetData(key string, value interface{})
+}
+
+// setDisplayName attaches the user's real name to the client, so that
+// the class list shows names instead of national ids.
+func setDisplayName(g *Group, c Client, username string) {
+	if DisplayNameFunc == nil {
+		return
+	}
+	name, ok := DisplayNameFunc(g.Name(), username)
+	if !ok || name == "" {
+		return
+	}
+	ds, ok := c.(dataSetter)
+	if !ok {
+		return
+	}
+	ds.SetData("name", name)
+}
+
 func AddClient(group string, c Client, creds ClientCredentials) (*Group, error) {
 	g, err := Add(group, nil)
 	if err != nil {
@@ -620,6 +649,11 @@ func AddClient(group string, c Client, creds ClientCredentials) (*Group, error) 
 		}
 
 		c.Init(username, perms)
+
+		// Real names live in the school database, keyed by national
+		// id; attach the display name so that the class list shows
+		// people rather than numbers.
+		setDisplayName(g, c, username)
 
 		if !slices.Contains(perms, "op") {
 			if g.locked != nil {

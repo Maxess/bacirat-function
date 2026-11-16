@@ -377,6 +377,71 @@ async function refreshClassSelectors() {
     }
 }
 
+// ------------------------------------------------------- school sync
+
+async function refreshSchoolStatus() {
+    try {
+        let s = await adminFetchJSON('/galene-api/v0/.school/status');
+        adminEl('school-last').textContent = s.lastRun || 'never';
+        adminEl('school-error').textContent = s.lastError || '—';
+    } catch(e) {
+        showError('Could not load school status: ' + e.message);
+    }
+}
+
+async function runSchoolSync() {
+    let button = adminEl('school-sync');
+    button.disabled = true;
+    adminEl('school-result').textContent = 'Synchronising…';
+    try {
+        let res = await adminFetchJSON('/galene-api/v0/.school/sync', {
+            method: 'POST',
+        });
+        adminEl('school-result').textContent =
+            `Done: ${res.classes} classes, ${res.users} users, ` +
+            `${res.removed} removed (${res.duration}).`;
+        showError(null);
+        if(res.errors && res.errors.length)
+            showError('Some entries failed:\n' + res.errors.join('\n'));
+        await refreshSchoolStatus();
+        await refreshClasses();
+        await refreshClassSelectors();
+    } catch(e) {
+        adminEl('school-result').textContent = '';
+        showError('Synchronisation failed: ' + e.message);
+    } finally {
+        button.disabled = false;
+    }
+}
+
+function showSchoolExample() {
+    let example = `{
+  "academicYear": "1404/1405",
+  "classes": [
+    {
+      "id": 12,
+      "name": "101 ریاضی",
+      "grade": "دهم ریاضی",
+      "students": [
+        {"nationalId": "0012345678", "firstName": "علی",
+         "lastName": "رضایی", "serial": "356750"}
+      ],
+      "teachers": [
+        {"nationalId": "5560755680", "firstName": "اسدالهی",
+         "lastName": "ارسلان", "personnelCode": "55607556"}
+      ]
+    }
+  ]
+}
+
+// Each class becomes the group class-12.
+// Students sign in with their national id and the six-digit
+// birth certificate serial; teachers with their national id and
+// personnel code.
+`;
+    adminEl('school-example').textContent = example;
+}
+
 // ----------------------------------------------------------------- api
 
 function showAPIExample() {
@@ -479,6 +544,10 @@ async function init() {
         await refreshWhiteboard();
     });
     adminEl('whiteboard-clear-btn').addEventListener('click', clearWhiteboard);
+
+    adminEl('school-sync').addEventListener('click', runSchoolSync);
+    await refreshSchoolStatus();
+    showSchoolExample();
 
     adminEl('branding-form').addEventListener('submit', async (e) => {
         e.preventDefault();

@@ -49,6 +49,18 @@ mkdir -p "$DIR/groups" "$DIR/data" "$DIR/recordings" "$DIR/static"
 cp "$REPO/galene/galene" "$DIR/galene"
 cp -r "$REPO/galene/static/." "$DIR/static/"
 
+# The school exporter reads the management database read-only; it is
+# only installed, never enabled, so that an installation without a
+# school database keeps working.
+if [ -f "$REPO/export-school.php" ]; then
+    cp "$REPO/export-school.php" "$DIR/export-school.php"
+    chmod 700 "$DIR/export-school.php"
+    echo "    school exporter installed at $DIR/export-school.php (not enabled)"
+fi
+if [ -f "$REPO/school.json.example" ]; then
+    cp "$REPO/school.json.example" "$DIR/data/school.json.example"
+fi
+
 # galenectl is only needed to hash the administrator password, so it
 # is built into a temporary location and not installed.
 echo "==> Creating the administrator account"

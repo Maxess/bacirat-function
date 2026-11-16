@@ -217,6 +217,8 @@ func apiHandler(w http.ResponseWriter, r *http.Request) {
 		whiteboardAdminHandler(w, r, rest)
 	case ".branding":
 		brandingAdminHandler(w, r)
+	case ".school":
+		schoolHandler(w, r, rest)
 	default:
 		http.NotFound(w, r)
 	}

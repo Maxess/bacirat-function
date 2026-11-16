@@ -2238,8 +2238,24 @@ function changeUser(id, userinfo) {
  * @param {HTMLElement} elt
  * @param {user} userinfo
  */
+/**
+ * displayNameOf returns the name to show for a user: the real name
+ * from the school database when there is one, otherwise the username.
+ *
+ * @param {user} userinfo
+ * @returns {string|undefined}
+ */
+function displayNameOf(userinfo) {
+    if(userinfo && userinfo.data && userinfo.data.name)
+        return userinfo.data.name;
+    return undefined;
+}
+
 function setUserStatus(id, elt, userinfo) {
-    elt.textContent = userinfo.username ? userinfo.username : '(anon)';
+    // The server may attach a real name (from the school database) to
+    // a user whose username is a national id.
+    elt.textContent = displayNameOf(userinfo) ||
+        userinfo.username || '(anon)';
     if(userinfo.data.raisehand)
         elt.classList.add('user-status-raisehand');
     else
@@ -2984,15 +3000,19 @@ function addToChatbox(id, peerId, dest, nick, time, privileged, history, kind, m
         if(doHeader) {
             let header = document.createElement('p');
             let u = dest && serverConnection.users[dest];
-            let name = (u && u.username);
+            let name = (u && displayNameOf(u)) || (u && u.username);
+            // The sender's real name comes from the user list, which
+            // the server fills in from the school database.
+            let su = peerId && serverConnection.users[peerId];
+            let sender = (su && displayNameOf(su)) || nick;
             // messages with null id are sent by the server
             if(id || nick) {
                 let user = document.createElement('span');
                 if(dest)
                     user.textContent =
-                        `${nick || '(anon)'} \u2192 ${name || '(anon)'}`;
+                        `${sender || '(anon)'} \u2192 ${name || '(anon)'}`;
                 else
-                    user.textContent = (nick || '(anon)');
+                    user.textContent = (sender || '(anon)');
                 user.classList.add('message-user');
                 header.appendChild(user);
             }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -18,6 +19,7 @@ import (
 	"github.com/jech/galene/group"
 	"github.com/jech/galene/ice"
 	"github.com/jech/galene/limit"
+	"github.com/jech/galene/school"
 	"github.com/jech/galene/token"
 	"github.com/jech/galene/turnserver"
 	"github.com/jech/galene/webserver"
@@ -52,6 +54,15 @@ func main() {
 	flag.StringVar(&turnserver.Address, "turn", "auto",
 		"built-in TURN server `address` (\"\" to disable)")
 	flag.Parse()
+
+	// The school integration is optional: without a configuration it
+	// never touches anything.
+	if c, err := school.LoadConfig(); err == nil {
+		school.SetConfig(c)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		log.Printf("School configuration: %v", err)
+	}
+	group.DisplayNameFunc = school.DisplayName
 
 	if udpRange != "" {
 		if strings.ContainsRune(udpRange, '-') {
@@ -132,6 +143,9 @@ func main() {
 
 	// make sure the list of public groups is updated early
 	go group.Update()
+
+	// start the school synchronisation, if one is configured
+	school.Start()
 
 	// causes the built-in server to start if required
 	ice.Update()
