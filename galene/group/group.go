@@ -111,6 +111,7 @@ type Group struct {
 	history     []ChatHistoryEntry
 	timestamp   time.Time
 	data        map[string]interface{}
+	whiteboard  []WhiteboardStroke
 }
 
 func (g *Group) Name() string {
@@ -683,6 +684,9 @@ func AddClient(group string, c Client, creds ClientCredentials) (*Group, error) 
 	c.Joined(g.Name(), "join")
 
 	u := c.Username()
+	if !slices.Contains(c.Permissions(), "system") {
+		RecordAttendance(g.Name(), u, "join")
+	}
 	p := c.Permissions()
 	s := c.Data()
 	c.PushClient(g.Name(), "add", c.Id(), u, p, s)
@@ -749,6 +753,9 @@ func DelClient(c Client) {
 	g.mu.Unlock()
 
 	c.Joined(g.Name(), "leave")
+	if !slices.Contains(c.Permissions(), "system") {
+		RecordAttendance(g.Name(), c.Username(), "leave")
+	}
 	for _, cc := range clients {
 		cc.PushClient(
 			g.Name(), "delete", c.Id(), c.Username(), nil, nil,

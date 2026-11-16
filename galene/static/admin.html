@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Administration</title>
+    <link rel="stylesheet" type="text/css" href="/common.css"/>
+    <link rel="stylesheet" type="text/css" href="/admin.css"/>
+    <link rel="stylesheet" type="text/css" href="/brand.css"/>
+  </head>
+  <body>
+    <header class="admin-header">
+      <h1 id="admin-title">Administration</h1>
+      <span id="admin-user" class="admin-user"></span>
+    </header>
+
+    <div id="admin-error" class="admin-error invisible"></div>
+
+    <div class="admin-body">
+      <nav class="admin-nav">
+        <button data-tab="classes" class="active">Classes</button>
+        <button data-tab="attendance">Attendance</button>
+        <button data-tab="whiteboard">Whiteboards</button>
+        <button data-tab="branding">Branding</button>
+        <button data-tab="api">Website API</button>
+      </nav>
+
+      <!-- Classes -->
+      <section id="tab-classes" class="admin-tab">
+        <h2>Classes</h2>
+        <form id="create-class-form" class="admin-form">
+          <input id="new-class-name" type="text" placeholder="Class name (e.g. math-101)" required/>
+          <input id="new-class-title" type="text" placeholder="Display name"/>
+          <button type="submit">Create class</button>
+        </form>
+        <table class="admin-table">
+          <thead><tr><th>Class</th><th>Display name</th><th>Users</th><th>Actions</th></tr></thead>
+          <tbody id="classes-list"></tbody>
+        </table>
+
+        <div id="class-details" class="invisible">
+          <h3 id="class-details-title"></h3>
+          <form id="class-details-form" class="admin-form">
+            <label>Display name
+              <input id="class-displayName" type="text"/>
+            </label>
+            <label>Description
+              <input id="class-description" type="text"/>
+            </label>
+            <label>Max clients
+              <input id="class-max-clients" type="number" min="0"/>
+            </label>
+            <label><input id="class-public" type="checkbox"/> Public</label>
+            <label><input id="class-recording" type="checkbox"/> Allow recording</label>
+            <button type="submit">Save</button>
+          </form>
+
+          <h4>Users</h4>
+          <form id="create-user-form" class="admin-form">
+            <input id="new-username" type="text" placeholder="Username" required/>
+            <select id="new-user-role">
+              <option value="teacher">Teacher</option>
+              <option value="student" selected>Student</option>
+              <option value="op">Operator</option>
+              <option value="present">Presenter</option>
+              <option value="observe">Observer</option>
+            </select>
+            <input id="new-user-password" type="password" placeholder="Password"/>
+            <button type="submit">Add user</button>
+          </form>
+          <table class="admin-table">
+            <thead><tr><th>Username</th><th>Role</th><th>Actions</th></tr></thead>
+            <tbody id="users-list"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Attendance -->
+      <section id="tab-attendance" class="admin-tab invisible">
+        <h2>Attendance</h2>
+        <form id="attendance-form" class="admin-form">
+          <select id="attendance-class"></select>
+          <input id="attendance-date" type="date"/>
+          <button type="submit">Show</button>
+        </form>
+        <table class="admin-table">
+          <thead><tr><th>Student</th><th>Joins</th><th>Leaves</th><th>Total</th></tr></thead>
+          <tbody id="attendance-list"></tbody>
+        </table>
+        <p id="attendance-empty" class="invisible">No attendance recorded.</p>
+        <p><a id="attendance-csv" href="#" download="attendance.csv" class="invisible">Download CSV</a></p>
+      </section>
+
+      <!-- Whiteboards -->
+      <section id="tab-whiteboard" class="admin-tab invisible">
+        <h2>Whiteboards</h2>
+        <form id="whiteboard-form" class="admin-form">
+          <select id="whiteboard-class"></select>
+          <button type="submit">Refresh</button>
+        </form>
+        <p id="whiteboard-info"></p>
+        <button id="whiteboard-clear-btn">Clear whiteboard</button>
+      </section>
+
+      <!-- Branding -->
+      <section id="tab-branding" class="admin-tab invisible">
+        <h2>Branding</h2>
+        <form id="branding-form" class="admin-form vertical">
+          <label>Site name
+            <input id="branding-siteName" type="text"/>
+          </label>
+          <label>Tagline
+            <input id="branding-tagline" type="text"/>
+          </label>
+          <label>Logo URL
+            <input id="branding-logoURL" type="text"/>
+          </label>
+          <label>Favicon URL
+            <input id="branding-faviconURL" type="text"/>
+          </label>
+          <label>Primary colour
+            <input id="branding-primaryColor" type="color"/>
+          </label>
+          <button type="submit">Save branding</button>
+        </form>
+      </section>
+
+      <!-- Website API -->
+      <section id="tab-api" class="admin-tab invisible">
+        <h2>Website integration</h2>
+        <p>
+          Your website can create classes and enrol students by calling
+          the API below with the administrator credentials.
+        </p>
+        <pre id="api-example"></pre>
+      </section>
+    </div>
+
+    <script src="/brand.js" defer></script>
+    <script src="/management.js" defer></script>
+    <script src="/admin.js" defer></script>
+  </body>
+</html>

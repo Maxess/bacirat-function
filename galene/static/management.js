@@ -70,7 +70,7 @@ async function createObject(url, values) {
         body: JSON.stringify(values),
         headers: {
             'If-None-Match': '*',
-            'Content-Type:': 'application/json',
+            'Content-Type': 'application/json',
         }
     });
     if(!r.ok)
@@ -147,7 +147,8 @@ async function updateObject(url, values, etag) {
         headers: {
             'Content-Type': 'application/json',
             'If-Match': old.etag,
-        }
+        },
+        body: JSON.stringify(data),
     })
     if(!r.ok)
         throw httpError(r);

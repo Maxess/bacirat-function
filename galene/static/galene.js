@@ -2095,6 +2095,18 @@ document.getElementById('invite-dialog').onclose = function(e) {
 };
 
 /**
+ * canModerate is true for users allowed to moderate a classroom:
+ * operators, and teachers (who hold the 'moderate' permission).
+ *
+ * @returns {boolean}
+ */
+function canModerate() {
+    return serverConnection && serverConnection.permissions &&
+        (serverConnection.permissions.indexOf('op') >= 0 ||
+         serverConnection.permissions.indexOf('moderate') >= 0);
+}
+
+/**
  * @param {HTMLElement} elt
  */
 function userMenu(elt) {
@@ -2132,7 +2144,9 @@ function userMenu(elt) {
         items.push({label: 'Send file', onClick: () => {
             sendFile(id);
         }});
-        if(serverConnection.permissions.indexOf('op') >= 0) {
+        let isOp =
+            serverConnection.permissions.indexOf('op') >= 0;
+        if(canModerate()) {
             items.push({type: 'seperator'}); // sic
             if(user.permissions.indexOf('present') >= 0)
                 items.push({label: 'Forbid presenting', onClick: () => {
@@ -2148,6 +2162,8 @@ function userMenu(elt) {
             items.push({label: 'Kick out', onClick: () => {
                 serverConnection.userAction('kick', id);
             }});
+        }
+        if(isOp) {
             items.push({label: 'Identify', onClick: () => {
                 serverConnection.userAction('identify', id);
             }});
@@ -2404,6 +2420,9 @@ async function gotJoined(kind, group, perms, status, data, error, message) {
         setTitle((status && status.displayName) || capitalise(group));
         displayUsername();
         setButtonsVisibility();
+        if(window.Whiteboard)
+            Whiteboard.setCanDraw(
+                serverConnection.permissions.indexOf('whiteboard') >= 0);
         setChangePassword(pwAuth && !!groupStatus.canChangePassword &&
                           serverConnection.username
         );
@@ -2778,6 +2797,18 @@ function gotUserMessage(id, dest, username, time, privileged, kind, error, messa
         localMessage(div);
         break;
     }
+    case 'whiteboard': {
+        if(window.Whiteboard) Whiteboard.onStroke(message);
+        break;
+    }
+    case 'whiteboard-state': {
+        if(window.Whiteboard) Whiteboard.onState(message);
+        break;
+    }
+    case 'whiteboard-clear': {
+        if(window.Whiteboard) Whiteboard.onClear();
+        break;
+    }
     default:
         console.warn(`Got unknown user message ${kind}`);
         break;
@@ -3013,7 +3044,8 @@ function addToChatbox(id, peerId, dest, nick, time, privileged, history, kind, m
  */
 function chatMessageMenu(elt) {
     if(!(serverConnection && serverConnection.permissions &&
-         serverConnection.permissions.indexOf('op') >= 0))
+         (serverConnection.permissions.indexOf('op') >= 0 ||
+          serverConnection.permissions.indexOf('moderate') >= 0)))
         return;
 
     let messageId = elt.dataset.id;
@@ -3037,9 +3069,10 @@ function chatMessageMenu(elt) {
                         userId: peerId,
                     });
                 }});
-    items.push({label: `Identify ${u}`, onClick: () => {
-        serverConnection.userAction('identify', peerId);
-    }});
+    if(serverConnection.permissions.indexOf('op') >= 0)
+        items.push({label: `Identify ${u}`, onClick: () => {
+            serverConnection.userAction('identify', peerId);
+        }});
     items.push({label: `Kick out ${u}`, onClick: () => {
         serverConnection.userAction('kick', peerId);
     }});
@@ -3144,6 +3177,18 @@ function operatorPredicate() {
        serverConnection.permissions.indexOf('op') >= 0)
         return null;
     return 'You are not an operator';
+}
+
+// A teacher is allowed to manage the classroom: give or revoke the
+// right to speak, silence a student's microphone, and remove a
+// disruptive student.  Promoting to operator remains reserved to
+// operators.
+function moderatorPredicate() {
+    if(serverConnection && serverConnection.permissions &&
+       (serverConnection.permissions.indexOf('op') >= 0 ||
+        serverConnection.permissions.indexOf('moderate') >= 0))
+        return null;
+    return 'You are not allowed to moderate this class';
 }
 
 function recordingPredicate() {
@@ -3562,7 +3607,7 @@ function userMessage(c, r) {
 commands.kick = {
     parameters: 'user [message]',
     description: 'kick out a user',
-    predicate: operatorPredicate,
+    predicate: moderatorPredicate,
     f: userCommand,
 };
 
@@ -3590,35 +3635,35 @@ commands.unop = {
 commands.present = {
     parameters: 'user',
     description: 'give user the right to present',
-    predicate: operatorPredicate,
+    predicate: moderatorPredicate,
     f: userCommand,
 };
 
 commands.unpresent = {
     parameters: 'user',
     description: 'revoke the right to present',
-    predicate: operatorPredicate,
+    predicate: moderatorPredicate,
     f: userCommand,
 };
 
 commands.shutup = {
     parameters: 'user',
     description: 'revoke the right to send chat messages',
-    predicate: operatorPredicate,
+    predicate: moderatorPredicate,
     f: userCommand,
 };
 
 commands.unshutup = {
     parameters: 'user',
     description: 'give the right to send chat messages',
-    predicate: operatorPredicate,
+    predicate: moderatorPredicate,
     f: userCommand,
 };
 
 commands.mute = {
     parameters: 'user',
     description: 'mute a remote user',
-    predicate: operatorPredicate,
+    predicate: moderatorPredicate,
     f: userMessage,
 };
 
@@ -4196,9 +4241,14 @@ async function start() {
         window.history.replaceState(null, '', window.location.pathname);
     setTitle(groupStatus.displayName || capitalise(group));
 
+    await applyBranding();
+
     addFilters();
     await setMediaChoices(false);
     reflectSettings();
+
+    if(window.Whiteboard)
+        Whiteboard.init();
 
     if(parms.has('token'))
         token = parms.get('token');

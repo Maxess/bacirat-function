@@ -51,6 +51,8 @@ func Serve(address string, dataDir string) error {
 	http.HandleFunc("/ws", wsHandler)
 	http.HandleFunc("/public-groups.json", publicHandler)
 	http.HandleFunc("/galene-api/", apiHandler)
+	http.HandleFunc("/branding.json", brandingHandler)
+	http.HandleFunc("/api/v1/", websiteAPIHandler)
 
 	s := &http.Server{
 		Addr:              address,

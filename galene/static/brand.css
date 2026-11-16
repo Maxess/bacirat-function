@@ -1,0 +1,29 @@
+/* Branding hooks.
+ *
+ * These rules only exist so that the administrator can change the
+ * appearance from the admin panel without rebuilding anything.  The
+ * variables below default to Galene's own colours, so the page looks
+ * unchanged until branding is configured.
+ *
+ * This file must be loaded after galene.css. */
+
+:root {
+    --brand-primary: #28a745;
+    --brand-primary-dark: #218838;
+}
+
+.btn-success {
+    background-color: var(--brand-primary);
+    border-color: var(--brand-primary);
+}
+
+.btn-success:hover {
+    background-color: var(--brand-primary-dark);
+    border-color: var(--brand-primary-dark);
+}
+
+#brand-logo {
+    max-height: 34px;
+    max-width: 140px;
+    vertical-align: middle;
+}

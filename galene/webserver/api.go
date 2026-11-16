@@ -211,6 +211,12 @@ func apiHandler(w http.ResponseWriter, r *http.Request) {
 		sendJSON(w, r, stats.GetGroups())
 	case ".groups":
 		apiGroupHandler(w, r, rest)
+	case ".attendance":
+		attendanceHandler(w, r, rest)
+	case ".whiteboard":
+		whiteboardAdminHandler(w, r, rest)
+	case ".branding":
+		brandingAdminHandler(w, r)
 	default:
 		http.NotFound(w, r)
 	}

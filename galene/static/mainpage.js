@@ -131,4 +131,5 @@ async function listPublicGroups() {
 }
 
 
+applyBranding();
 listPublicGroups();

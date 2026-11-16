@@ -7,6 +7,8 @@
     <meta http-equiv="ScreenOrientation" content="autoRotate:disabled">
     <link rel="stylesheet" type="text/css" href="/common.css"/>
     <link rel="stylesheet" type="text/css" href="/galene.css"/>
+    <link rel="stylesheet" type="text/css" href="/whiteboard.css"/>
+    <link rel="stylesheet" type="text/css" href="/brand.css"/>
     <link rel="author" href="https://www.irif.fr/~jch/"/>
     <link rel="stylesheet" type="text/css" href="/third-party/fontawesome/css/fontawesome.min.css"/>
     <link rel="stylesheet" type="text/css" href="/third-party/fontawesome/css/solid.min.css"/>
@@ -59,6 +61,12 @@
                   </div>
                 </li>
                 <li>
+                  <div id="whiteboard-button" class="nav-link nav-button">
+                    <span><i class="fas fa-chalkboard" aria-hidden="true"></i></span>
+                    <label>Whiteboard</label>
+                  </div>
+                </li>
+                <li>
                   <div class="nav-button nav-link nav-more" id="openside">
                     <span><i class="fas fa-ellipsis-v" aria-hidden="true"></i></span>
                   </div>
@@ -98,6 +106,14 @@
                 <div id="expand-video" class="expand-video">
                   <div id="peers"></div>
                 </div>
+              </div>
+              <div id="whiteboard-overlay" class="invisible">
+                <div id="whiteboard-toolbar" class="invisible">
+                  <span class="wb-title">Whiteboard</span>
+                  <button id="whiteboard-clear" type="button">Clear</button>
+                  <button id="whiteboard-close" type="button">Close</button>
+                </div>
+                <canvas id="whiteboard-canvas"></canvas>
               </div>
               <div id="captions-container" class="invisible">
                 <div id="captions"></div>
@@ -323,6 +339,8 @@
     <script src="/settings.js" defer></script>
     <script src="/filter.js" defer></script>
     <script src="/camera-test.js" defer></script>
+    <script src="/whiteboard.js" defer></script>
+    <script src="/brand.js" defer></script>
     <script src="/galene.js" defer></script>
   </body>
 </html>

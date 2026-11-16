@@ -1216,6 +1216,16 @@ func handleAction(c *webClient, a any) error {
 					return err
 				}
 			}
+			if wb := g.GetWhiteboard(); len(wb) > 0 {
+				err := c.write(clientMessage{
+					Type:  "usermessage",
+					Kind:  "whiteboard-state",
+					Value: wb,
+				})
+				if err != nil {
+					return err
+				}
+			}
 		}
 	case changePermissionsAction:
 		switch a.kind {
@@ -1572,8 +1582,22 @@ func handleClientMessage(c *webClient, m clientMessage) error {
 		if m.Type == "chat" && m.Kind == "caption" {
 			required = "caption"
 		}
+		if m.Type == "usermessage" &&
+			(m.Kind == "whiteboard" || m.Kind == "whiteboard-clear") {
+			required = "whiteboard"
+		}
 		if !slices.Contains(c.permissions, required) {
 			return c.error(group.UserError("not authorised"))
+		}
+		// Asking others to mute themselves is a moderation action:
+		// without this check any participant could broadcast it.
+		if m.Type == "usermessage" && m.Kind == "mute" {
+			if !slices.Contains(c.permissions, "op") &&
+				!slices.Contains(c.permissions, "moderate") {
+				return c.error(
+					group.UserError("not authorised"),
+				)
+			}
 		}
 
 		id := m.Id
@@ -1592,13 +1616,22 @@ func handleClientMessage(c *webClient, m clientMessage) error {
 				)
 			}
 		}
+		if m.Type == "usermessage" && m.Kind == "whiteboard" {
+			if stroke, ok := parseWhiteboardStroke(m.Value); ok {
+				g.AddWhiteboardStroke(stroke)
+			}
+		}
+		if m.Type == "usermessage" && m.Kind == "whiteboard-clear" {
+			g.ClearWhiteboard()
+		}
 		mm := clientMessage{
 			Type:       m.Type,
 			Id:         id,
 			Source:     m.Source,
 			Dest:       m.Dest,
 			Username:   m.Username,
-			Privileged: slices.Contains(c.permissions, "op"),
+			Privileged: slices.Contains(c.permissions, "op") ||
+				slices.Contains(c.permissions, "moderate"),
 			Time:       now.Format(time.RFC3339),
 			Kind:       m.Kind,
 			NoEcho:     m.NoEcho,
@@ -1633,7 +1666,8 @@ func handleClientMessage(c *webClient, m clientMessage) error {
 		}
 		switch m.Kind {
 		case "clearchat":
-			if !slices.Contains(c.permissions, "op") {
+			if !slices.Contains(c.permissions, "op") &&
+				!slices.Contains(c.permissions, "moderate") {
 				return c.error(group.UserError("not authorised"))
 			}
 			var id, userId string
@@ -1886,8 +1920,26 @@ func handleClientMessage(c *webClient, m clientMessage) error {
 			return c.error(group.UserError("join a group first"))
 		}
 		switch m.Kind {
-		case "op", "unop", "present", "unpresent", "shutup", "unshutup":
+		case "op", "unop":
 			if !slices.Contains(c.permissions, "op") {
+				return c.error(group.UserError("not authorised"))
+			}
+			t := g.GetClient(m.Dest)
+			if t == nil {
+				return c.error(group.UserError("no suck user"))
+			}
+			target, ok := t.(*webClient)
+			if !ok {
+				return c.error(group.UserError(
+					"this is not a real user",
+				))
+			}
+			target.action(changePermissionsAction{m.Kind})
+		// A teacher ('moderate') may manage the floor: allow or forbid
+		// a student to speak, mute them, or remove them from the class.
+		case "present", "unpresent", "shutup", "unshutup":
+			if !slices.Contains(c.permissions, "op") &&
+				!slices.Contains(c.permissions, "moderate") {
 				return c.error(group.UserError("not authorised"))
 			}
 			t := g.GetClient(m.Dest)
@@ -1935,7 +1987,8 @@ func handleClientMessage(c *webClient, m clientMessage) error {
 				Value:      value,
 			})
 		case "kick":
-			if !slices.Contains(c.permissions, "op") {
+			if !slices.Contains(c.permissions, "op") &&
+				!slices.Contains(c.permissions, "moderate") {
 				return c.error(group.UserError("not authorised"))
 			}
 			message := ""
@@ -1993,6 +2046,44 @@ func handleClientMessage(c *webClient, m clientMessage) error {
 		return group.ProtocolError("unexpected message")
 	}
 	return nil
+}
+
+// parseWhiteboardStroke converts a JSON-decoded value into a
+// WhiteboardStroke.  It returns false if the value is malformed.
+func parseWhiteboardStroke(value interface{}) (group.WhiteboardStroke, bool) {
+	m, ok := value.(map[string]interface{})
+	if !ok {
+		return group.WhiteboardStroke{}, false
+	}
+	id, _ := m["id"].(string)
+	if id == "" {
+		return group.WhiteboardStroke{}, false
+	}
+	color, _ := m["color"].(string)
+	width, _ := m["width"].(float64)
+	pointsRaw, _ := m["points"].([]interface{})
+	points := make([][]float64, 0, len(pointsRaw))
+	for _, p := range pointsRaw {
+		pair, ok := p.([]interface{})
+		if !ok || len(pair) != 2 {
+			continue
+		}
+		x, ok1 := pair[0].(float64)
+		y, ok2 := pair[1].(float64)
+		if !ok1 || !ok2 {
+			continue
+		}
+		points = append(points, []float64{x, y})
+	}
+	if len(points) == 0 {
+		return group.WhiteboardStroke{}, false
+	}
+	return group.WhiteboardStroke{
+		Id:     id,
+		Color:  color,
+		Width:  width,
+		Points: points,
+	}, true
 }
 
 func parseStatefulToken(value interface{}) (*token.Stateful, error) {

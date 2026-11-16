@@ -28,6 +28,8 @@ type Permissions struct {
 
 var permissionsMap = map[string][]string{
 	"op":      {"op", "present", "message", "caption", "token"},
+	"teacher": {"present", "message", "caption", "whiteboard", "token", "moderate"},
+	"student": {"message"},
 	"present": {"present", "message"},
 	"message": {"message"},
 	"observe": {},
