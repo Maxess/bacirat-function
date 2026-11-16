@@ -1,0 +1,3 @@
+# The official setup writes recordings next to the three components
+# (server/docker-compose_sample.yaml mounts ../recording_files). They can be huge — never commit them.
+/recording_files/
