@@ -1,0 +1,65 @@
+import React from 'react';
+import clsx from 'clsx';
+import { Field, Label } from '@headlessui/react';
+
+interface IFormattedInputFieldProps {
+  label?: string;
+  id: string;
+  value?: string | number;
+  readOnly?: boolean;
+  placeholder?: string;
+  onChange?: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  type?: string;
+  helpText?: string;
+  maxWidthClass?: string;
+}
+
+const FormattedInputField = ({
+  label,
+  id,
+  value,
+  readOnly = false,
+  placeholder,
+  onChange,
+  type = 'text',
+  helpText,
+  maxWidthClass = 'sm:max-w-[250px]',
+}: IFormattedInputFieldProps) => {
+  const inputClasses = clsx(
+    'default-input rounded-[8px] h-10 w-full',
+    {
+      'dark:border-dark-text bg-transparent dark:text-dark-text cursor-default': readOnly,
+    },
+    label ? `max-w-full ${maxWidthClass}` : '',
+  );
+
+  return (
+    <div className="mb-2">
+      <Field as="div" className="flex flex-wrap items-center justify-between">
+        {label ? (
+          <Label
+            htmlFor={id}
+            className="pb-2 sm:pb-0 sm:pe-4 flex-1 text-sm text-Gray-950 text-start dark:text-dark-text"
+          >
+            {label}
+          </Label>
+        ) : null}
+        <input
+          type={type}
+          name={id}
+          id={id}
+          value={value ?? ''}
+          readOnly={readOnly}
+          onChange={onChange}
+          className={inputClasses}
+          placeholder={placeholder}
+        />
+      </Field>
+      {helpText ? (
+        <p className="mt-2 text-xs text-gray-600 dark:text-gray-300">{helpText}</p>
+      ) : null}
+    </div>
+  );
+};
+
+export default FormattedInputField;

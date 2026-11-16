@@ -1,0 +1,601 @@
+import { create, fromBinary, fromJson, fromJsonString } from '@bufbuild/protobuf';
+import {
+  ChatMessage,
+  ChatMessageSchema,
+  DataChannelMessageSchema,
+  MediaServerConnInfoSchema,
+  NatsInitialData,
+  NatsInitialDataSchema,
+  NatsKvUserInfoSchema,
+  NatsMsgClientToServerEvents,
+  NatsMsgClientToServerSchema,
+  NatsMsgServerToClient,
+  NatsMsgServerToClientEvents,
+  NatsMsgServerToClientSchema,
+  PrivateDataDeliverySchema,
+  SessionDataHeaderSchema,
+  SessionDataType,
+} from 'plugnmeet-protocol-js';
+
+import ConnectNats, { PrivateDataDeliveryType } from './ConnectNats';
+import HandleRoomData from './HandleRoomData';
+import HandleParticipants from './HandleParticipants';
+import HandleDataMessage from './HandleDataMessage';
+import HandleWhiteboard from './HandleWhiteboard';
+import HandleChat from './HandleChat';
+import HandleSystemData from './HandleSystemData';
+
+import { store } from '../../store';
+import { decompress } from '../libs/sessionDataSync';
+import { setAllUserNotifications } from '../../store/slices/roomSettingsSlice';
+import { DB_STORE_NAMES, idbGet, idbGetAll, initIDB } from '../libs/idb';
+import { UserNotification } from '../../store/slices/interfaces/roomSettings';
+import {
+  SELECTED_SUBTITLE_LANG_KEY,
+  TextWithInfo,
+} from '../../store/slices/interfaces/speechServices';
+import { addAllChatMessages } from '../../store/slices/chatMessagesSlice';
+import { setSpeechToTextLastFinalTexts } from '../../store/slices/speechServicesSlice';
+import { formatNatsError } from '../utils';
+import i18n from '../i18n';
+import { addToken } from '../../store/slices/sessionSlice';
+import { getNotepadController } from '../../components/shared-notepad/NotepadController';
+import { getWhiteboardController } from '../../components/whiteboard/collab';
+
+export default class SubscriptionHandler {
+  private readonly connectNats: ConnectNats;
+
+  private readonly _handleRoomData: HandleRoomData;
+  private readonly _handleSystemData: HandleSystemData;
+  private readonly _handleParticipants: HandleParticipants;
+  private readonly _handleChat: HandleChat;
+  private readonly _handleDataMsg: HandleDataMessage;
+  private readonly _handleWhiteboard: HandleWhiteboard;
+
+  private _afterUserReadyCalled = false;
+
+  constructor(connectNats: ConnectNats) {
+    this.connectNats = connectNats;
+
+    this._handleRoomData = new HandleRoomData(this.connectNats.roomId, this.connectNats.userId);
+    this._handleChat = new HandleChat(this.connectNats);
+    this._handleSystemData = new HandleSystemData(this._handleChat);
+    this._handleParticipants = new HandleParticipants(this.connectNats);
+    this._handleDataMsg = new HandleDataMessage(this.connectNats);
+    this._handleWhiteboard = new HandleWhiteboard();
+  }
+
+  get handleParticipants(): HandleParticipants {
+    return this._handleParticipants;
+  }
+  get handleChat(): HandleChat {
+    return this._handleChat;
+  }
+
+  public initializeSubscriptions = () => {
+    // now we'll subscribe to the room events stream
+    this.subscribeToRoomEvents().catch((e) => {
+      console.error('subscribeToRoomEvents failed:', e);
+      this.connectNats.setErrorStatus(i18n.t('notifications.nats-error-title'), formatNatsError(e));
+    });
+    // we'll still need this for any pub/sub based messages
+    void this.subscribeToSystemPublicPubSub();
+  };
+
+  /**
+   * Subscribes to the single user consumer on the main room stream.
+   * This one subscription will handle all JetStream-based messages for the user,
+   * @private
+   */
+  private async subscribeToRoomEvents() {
+    if (typeof this.connectNats.js === 'undefined') {
+      return;
+    }
+    const consumerName = `${this.connectNats.roomId}_${this.connectNats.userId}`;
+    const consumer = await this.connectNats.js.consumers.get(
+      this.connectNats.roomStreamName,
+      consumerName,
+    );
+    const sub = await consumer.consume();
+
+    for await (const m of sub) {
+      try {
+        const payload = fromBinary(NatsMsgServerToClientSchema, m.data);
+        if (payload.event === NatsMsgServerToClientEvents.SESSION_ENDED) {
+          m.ack(); // Ack early before the session ends
+        }
+        await this.handleSystemEvents(payload);
+        m.ack();
+      } catch (e) {
+        const err = e as Error;
+        console.error(err.message);
+        m.nak();
+      }
+    }
+  }
+
+  /**
+   * All the system public events send by core pub/sub
+   * this channel is different from the JS stream
+   */
+  private async subscribeToSystemPublicPubSub() {
+    if (!this.connectNats.nc) {
+      return;
+    }
+
+    const subject = `${this.connectNats.subjects.systemPublic}.${this.connectNats.roomId}`;
+    const sub = this.connectNats.nc.subscribe(subject);
+
+    for await (const m of sub) {
+      try {
+        const payload = fromBinary(NatsMsgServerToClientSchema, m.data);
+        await this.handleSystemEvents(payload);
+      } catch (e) {
+        console.error('systemPublic event error:', e);
+      }
+    }
+  }
+
+  private async handlePrivateDataDelivery(p: NatsMsgServerToClient) {
+    const header = fromJsonString(PrivateDataDeliverySchema, p.msg);
+    const type = header.type as PrivateDataDeliveryType;
+    switch (type) {
+      case 'CHAT':
+        await this.processToHandleChatMsg(p.binMsg);
+        break;
+      case 'DATA_MSG':
+      case 'WHITEBOARD_MSG':
+        await this.processToHandleDataMsg(type, p.binMsg);
+        break;
+    }
+  }
+
+  private async processToHandleChatMsg(data: Uint8Array<ArrayBufferLike>) {
+    let dataToParse = data;
+    if (this.connectNats.enableE2EEChat) {
+      const data = await this.connectNats.decryptData(dataToParse);
+      if (typeof data === 'undefined') {
+        return;
+      }
+      dataToParse = data;
+    }
+    const payload = fromBinary(ChatMessageSchema, dataToParse);
+    await this._handleChat.handleMsg(payload);
+  }
+
+  /**
+   * All the events related with chat will be handled here,
+   * including public and private
+   */
+  private async subscribeToChat() {
+    if (!this.connectNats.nc) {
+      return;
+    }
+    const subject = `${this.connectNats.subjects.chat}.${this.connectNats.roomId}`;
+    const sub = this.connectNats.nc.subscribe(subject);
+
+    void this.connectNats.requestPublicChatSync();
+
+    for await (const m of sub) {
+      try {
+        await this.processToHandleChatMsg(m.data);
+      } catch (e) {
+        console.error('chat event error:', e);
+      }
+    }
+  }
+
+  /**
+   * Subscribes to the room's whiteboard channel using NATS Core Pub/Sub for low latency.
+   */
+  private async subscribeToWhiteboard() {
+    if (!this.connectNats.nc) {
+      return;
+    }
+    const subject = `${this.connectNats.subjects.whiteboard}.${this.connectNats.roomId}`;
+    const sub = this.connectNats.nc.subscribe(subject);
+
+    for await (const m of sub) {
+      try {
+        let dataToParse = m.data;
+        if (this.connectNats.enableE2EEWhiteboard) {
+          const data = await this.connectNats.decryptData(dataToParse);
+          if (typeof data === 'undefined') {
+            continue; // Skip if decryption fails
+          }
+          dataToParse = data;
+        }
+        const payload = fromBinary(DataChannelMessageSchema, dataToParse);
+        // Still need to check if the message is from the local user to avoid echo.
+        if (payload.fromUserId === this.connectNats.userId) {
+          continue;
+        }
+        const isYjsMessage = !!payload.binMessage && payload.binMessage.length > 0;
+        if (isYjsMessage && payload.toUserId && payload.toUserId !== this.connectNats.userId) {
+          continue;
+        }
+        await this._handleWhiteboard.handleWhiteboardMsg(payload);
+      } catch (e) {
+        console.error('whiteboard event error:', e);
+      }
+    }
+  }
+
+  private async processToHandleDataMsg(
+    deliveryType: PrivateDataDeliveryType,
+    data: Uint8Array<ArrayBufferLike>,
+  ) {
+    let dataToParse = data;
+    const enabledE2EE =
+      deliveryType === 'WHITEBOARD_MSG'
+        ? this.connectNats.enableE2EE && this.connectNats.enableE2EEWhiteboard
+        : this.connectNats.enableE2EE;
+
+    if (enabledE2EE) {
+      const data = await this.connectNats.decryptData(dataToParse);
+      if (typeof data === 'undefined') {
+        return;
+      }
+      dataToParse = data;
+    }
+    const payload = fromBinary(DataChannelMessageSchema, dataToParse);
+    // Don't process our own messages or private messages for others.
+    if (
+      payload.fromUserId === this.connectNats.userId ||
+      (payload.toUserId && payload.toUserId !== this.connectNats.userId)
+    ) {
+      return;
+    }
+
+    // special case when message was send privately which server will route as data message
+    if (deliveryType === 'WHITEBOARD_MSG') {
+      await this._handleWhiteboard.handleWhiteboardMsg(payload);
+      return;
+    }
+    await this._handleDataMsg.handleMessage(payload);
+  }
+
+  /**
+   * Subscribes to the room's data channel using NATS Core Pub/Sub for low latency.
+   * Mostly with client to client
+   */
+  private async subscribeToDataChannel() {
+    if (!this.connectNats.nc) {
+      return;
+    }
+
+    const subject = `${this.connectNats.subjects.dataChannel}.${this.connectNats.roomId}`;
+    const sub = this.connectNats.nc.subscribe(subject);
+
+    for await (const m of sub) {
+      try {
+        await this.processToHandleDataMsg('DATA_MSG', m.data);
+      } catch (e) {
+        console.error('failed to process data channel message', e);
+      }
+    }
+  }
+
+  /**
+   * systemEventHandlers maps will contain all the events both public and private
+   */
+  private readonly systemEventHandlers: {
+    [key in NatsMsgServerToClientEvents]?: (payload: NatsMsgServerToClient) => void | Promise<void>;
+  } = {
+    [NatsMsgServerToClientEvents.RES_INITIAL_DATA]: async (p) => {
+      await this.handleInitialData(p.msg);
+    },
+    [NatsMsgServerToClientEvents.RES_MEDIA_SERVER_DATA]: async (p) => {
+      await this.handleMediaServerData(p.msg);
+    },
+    [NatsMsgServerToClientEvents.RES_JOINED_USERS_LIST]: (p) => this.handleJoinedUsersList(p.msg),
+    [NatsMsgServerToClientEvents.RESP_ONLINE_USERS_LIST]: (p) =>
+      this._handleParticipants.reconcileParticipants(p.msg),
+    [NatsMsgServerToClientEvents.ROOM_METADATA_UPDATE]: (p) =>
+      this._handleRoomData.updateRoomMetadata(p.msg),
+    [NatsMsgServerToClientEvents.RESP_RENEW_PNM_TOKEN]: (p) => {
+      this.connectNats.token = p.msg.toString();
+      store.dispatch(addToken(this.connectNats.token));
+    },
+    [NatsMsgServerToClientEvents.SYSTEM_NOTIFICATION]: (p) => {
+      !this.connectNats.isRecorder && this._handleSystemData.handleNotification(p.msg);
+    },
+    [NatsMsgServerToClientEvents.USER_JOINED]: (p) =>
+      this._handleParticipants.addRemoteParticipant(p.msg),
+    [NatsMsgServerToClientEvents.USER_DISCONNECTED]: (p) =>
+      this._handleParticipants.handleParticipantDisconnected(p.msg),
+    [NatsMsgServerToClientEvents.USER_OFFLINE]: (p) =>
+      this._handleParticipants.handleParticipantOffline(p.msg),
+    [NatsMsgServerToClientEvents.USER_METADATA_UPDATE]: (p) =>
+      this._handleParticipants.handleParticipantMetadataUpdate(p.msg),
+    [NatsMsgServerToClientEvents.SESSION_ENDED]: (p) => this.connectNats.endSession(p.msg),
+
+    // all poll related events
+    [NatsMsgServerToClientEvents.POLL_CREATED]: (p) => this._handleSystemData.handlePoll(p),
+    [NatsMsgServerToClientEvents.POLL_CLOSED]: (p) => this._handleSystemData.handlePoll(p),
+    [NatsMsgServerToClientEvents.POLL_REOPENED]: (p) => this._handleSystemData.handlePoll(p),
+
+    // add breakout rooms related events
+    [NatsMsgServerToClientEvents.JOIN_BREAKOUT_ROOM]: (p) =>
+      this._handleSystemData.handleBreakoutRoom(p),
+    [NatsMsgServerToClientEvents.BREAKOUT_ROOM_ENDED]: (p) =>
+      this._handleSystemData.handleBreakoutRoom(p),
+    [NatsMsgServerToClientEvents.BREAKOUT_ROOM_USER_MOVED]: (p) =>
+      this._handleSystemData.handleBreakoutRoom(p),
+
+    [NatsMsgServerToClientEvents.SYSTEM_CHAT_MSG]: (p) =>
+      this._handleSystemData.handleSysChatMsg(p.msg),
+    [NatsMsgServerToClientEvents.TRANSCRIPTION_OUTPUT_TEXT]: (p) =>
+      this._handleDataMsg.handleSpeechSubtitleText(p.msg),
+    [NatsMsgServerToClientEvents.RESP_INSIGHTS_AI_TEXT_CHAT]: (p) =>
+      this._handleSystemData.handleInsightsAITextData(p.msg),
+    [NatsMsgServerToClientEvents.DELIVERY_PRIVATE_DATA]: (p) => this.handlePrivateDataDelivery(p),
+    [NatsMsgServerToClientEvents.PONG]: () => this.connectNats.handlePong(),
+    [NatsMsgServerToClientEvents.SESSION_DATA_FETCH_RESPONSE]: async (p) => {
+      await this.handleSessionDataFetchResponse(p);
+    },
+    [NatsMsgServerToClientEvents.SESSION_DATA_SAVE_RESPONSE]: (p) => {
+      this.handleSessionDataSaveResponse(p);
+    },
+  };
+
+  /**
+   * Handle system events
+   * @param payload
+   * @private
+   */
+  private async handleSystemEvents(payload: NatsMsgServerToClient) {
+    const handler = this.systemEventHandlers[payload.event];
+    if (handler) {
+      await handler(payload);
+    }
+  }
+
+  private async handleSessionDataFetchResponse(p: NatsMsgServerToClient) {
+    const header = fromJsonString(SessionDataHeaderSchema, p.msg);
+    let value = p.binMsg;
+    if (this.connectNats.enableE2EE && value && value.length > 0) {
+      const dec = await this.connectNats.decryptData(value);
+      if (typeof dec === 'undefined') return;
+      value = dec;
+    }
+    // Decompress the gzip'd session-data payload (after decrypt) so both
+    // controllers receive raw Yjs update bytes.
+    try {
+      value = decompress(value);
+    } catch (e) {
+      console.warn('session-data payload is not valid gzip; dropping', {
+        dataType: header.dataType,
+        key: header.key,
+        error: e,
+      });
+      return;
+    }
+    if (header.dataType === SessionDataType.WHITEBOARD) {
+      getWhiteboardController().handleSessionDataResponse(header, value);
+    } else if (header.dataType === SessionDataType.NOTEPAD) {
+      getNotepadController().handleSessionDataResponse(header, value);
+    }
+  }
+
+  /** SESSION_DATA_SAVE_RESPONSE carries the header only (no payload). */
+  private handleSessionDataSaveResponse(p: NatsMsgServerToClient) {
+    const header = fromJsonString(SessionDataHeaderSchema, p.msg);
+    if (header.dataType === SessionDataType.WHITEBOARD) {
+      getWhiteboardController().handleSessionDataSaveResponse(header);
+    }
+  }
+
+  private async handleInitialData(msg: string) {
+    // 1. We'll try to decode the message.
+    let data: NatsInitialData;
+    try {
+      data = fromJsonString(NatsInitialDataSchema, msg, {
+        ignoreUnknownFields: true,
+      });
+    } catch (e: any) {
+      console.error(e);
+      this.connectNats.setErrorStatus(
+        i18n.t('notifications.decode-error-title'),
+        i18n.t('notifications.decode-error-body'),
+      );
+      return;
+    }
+
+    // 2. We'll check if the data is valid.
+    if (!data.room || !data.localUser) {
+      this.connectNats.setErrorStatus(
+        i18n.t('notifications.decode-error-title'),
+        i18n.t('notifications.invalid-missing-data'),
+      );
+      return;
+    }
+
+    // 3. We'll add the room info.
+    this.connectNats.currentRoomInfo = await this._handleRoomData.setRoomInfo(data.room);
+
+    // 4. We'll initialize the indexedDB for this session.
+    initIDB(this.connectNats.currentRoomInfo.sid, this.connectNats.userId);
+
+    // 5. We'll add the local user.
+    this.connectNats.isAdmin = data.localUser.isAdmin;
+    const localUser = await this._handleParticipants.addLocalParticipantInfo(data.localUser);
+    this.connectNats.userName = localUser.name;
+
+    // 6. We'll initialize the media server class.
+    const mediaInitialized = await this.connectNats.initializeMediaServer(
+      this.connectNats.currentRoomInfo.metadata?.roomFeatures?.endToEndEncryptionFeatures,
+      data.room.roomSid,
+    );
+    if (!mediaInitialized) {
+      return;
+    }
+    this.connectNats.setRoomConnectionStatusState('ready');
+  }
+
+  private async handleJoinedUsersList(msg: string) {
+    // drop stale redelivered chunks from before the media connection
+    // was established — the fresh list is requested after the unlock
+    if (!this._handleParticipants.participantsUnlocked) {
+      return;
+    }
+    try {
+      const envelope = JSON.parse(msg) as {
+        chunk: number;
+        total: number;
+        users: string[];
+      };
+
+      for (let i = 0; i < envelope.users.length; i++) {
+        const user = fromJson(NatsKvUserInfoSchema, envelope.users[i], {
+          ignoreUnknownFields: true,
+        });
+        await this._handleParticipants.addRemoteParticipant(user);
+      }
+
+      // messages arrive in order, so the last chunk means the list is complete;
+      // onAfterUserReady has its own once-guard for later repair bursts
+      if (envelope.chunk === envelope.total - 1) {
+        await this.onAfterUserReady();
+      }
+    } catch (e) {
+      console.error(e);
+      this.connectNats.setErrorStatus(
+        i18n.t('notifications.decode-error-title'),
+        i18n.t('notifications.decode-error-body'),
+      );
+    }
+  }
+
+  /**
+   * This method is called after the current user has received the initial data
+   * and the list of online users. It performs final setup tasks to make the
+   * user fully operational in the room.
+   */
+  private async onAfterUserReady() {
+    if (this._afterUserReadyCalled) return;
+    this._afterUserReadyCalled = true;
+
+    // Instantiate the shared-notepad controller so it stays in the app
+    // lifecycle even if the notepad is never opened.
+    getNotepadController();
+
+    // First-time registration of all existing media tracks: the users list is
+    // now complete and the media room is connected, so registration guards pass.
+    this.connectNats.mediaServerConn?.registerAllExistingTracks();
+
+    // Restore user data from IndexedDB to maintain state across sessions.
+    try {
+      const results = await Promise.allSettled([
+        idbGetAll<ChatMessage>(DB_STORE_NAMES.CHAT_MESSAGES),
+        idbGetAll<UserNotification>(DB_STORE_NAMES.USER_NOTIFICATIONS),
+        idbGet<string>(DB_STORE_NAMES.USER_SETTINGS, SELECTED_SUBTITLE_LANG_KEY),
+        idbGetAll<TextWithInfo>(DB_STORE_NAMES.SPEECH_TO_TEXT_FINAL_TEXTS),
+      ]);
+
+      const chatMsgs = results[0].status === 'fulfilled' ? results[0].value : [];
+      const notifications = results[1].status === 'fulfilled' ? results[1].value : [];
+      const lastSubtitleLang = results[2].status === 'fulfilled' ? results[2].value : undefined;
+      const speechToTextFinalTexts = results[3].status === 'fulfilled' ? results[3].value : [];
+
+      if (results[0].status === 'rejected') {
+        console.error('Failed to load chat messages from IndexedDB:', results[0].reason);
+      }
+      if (results[1].status === 'rejected') {
+        console.error('Failed to load notifications from IndexedDB:', results[1].reason);
+      }
+
+      if (chatMsgs && chatMsgs.length) {
+        store.dispatch(
+          addAllChatMessages({
+            messages: chatMsgs,
+            currentUserId: this.connectNats.userId,
+          }),
+        );
+      }
+      if (notifications && notifications.length) {
+        // Mark restored notifications so they show up in the bell history
+        // without re-triggering toasts/unread badges on fresh join.
+        // These are freshly deserialized IDB records, safe to mutate in place.
+        for (const notification of notifications) {
+          notification.disableToastNotification = true;
+        }
+        store.dispatch(setAllUserNotifications(notifications));
+      }
+      // Restore speech-to-text data if the feature is enabled.
+      const transcriptionFeatures =
+        this.connectNats.currentRoomInfo?.metadata?.roomFeatures?.insightsFeatures
+          ?.transcriptionFeatures;
+      if (results[3].status === 'rejected') {
+        console.error('Failed to load speech-to-text data from IndexedDB:', results[3].reason);
+      } else if (
+        transcriptionFeatures?.isEnabled &&
+        speechToTextFinalTexts &&
+        speechToTextFinalTexts.length
+      ) {
+        let subtitleLang = lastSubtitleLang;
+        if (!lastSubtitleLang) {
+          subtitleLang = transcriptionFeatures.defaultSubtitleLang;
+        }
+        store.dispatch(
+          setSpeechToTextLastFinalTexts({
+            selectedSubtitleLang: subtitleLang as string,
+            lastFinalTexts: speechToTextFinalTexts,
+          }),
+        );
+      }
+    } catch (e) {
+      console.error('Failed to load data from IndexedDB on startup:', e);
+    }
+
+    // Subscribe to real-time data channels.
+    // These subscriptions are set up after initial data is loaded to ensure
+    // that all necessary user and room information is available.
+    Promise.all([
+      this.subscribeToChat(),
+      this.subscribeToWhiteboard(),
+      this.subscribeToDataChannel(),
+    ]).catch((err) => {
+      console.error('Failed to initialize subscription channels:', err);
+    });
+
+    if (this.connectNats.isRecorder) {
+      this._handleParticipants.recorderJoined();
+    }
+
+    this.connectNats.startUsersSync();
+
+    // Everything is prepared — the landing can now enter the room.
+    this.connectNats.setRoomConnectionStatusState('room-ready');
+  }
+
+  /**
+   * handleMediaServerData will decode data and connect with media server
+   * @param msg
+   */
+  private async handleMediaServerData(msg: string) {
+    try {
+      const serverInfo = fromJsonString(MediaServerConnInfoSchema, msg);
+      if (this.connectNats.mediaServerConn) {
+        const connected = await this.connectNats.mediaServerConn.initializeConnection(serverInfo);
+        if (connected) {
+          // unlock before requesting the users' list
+          this._handleParticipants.unlockParticipants();
+
+          this.connectNats.sendMessageToSystemWorker(
+            create(NatsMsgClientToServerSchema, {
+              event: NatsMsgClientToServerEvents.REQ_JOINED_USERS_LIST,
+            }),
+          );
+        }
+      }
+    } catch (e: any) {
+      console.error(e);
+      this.connectNats.setErrorStatus(
+        i18n.t('notifications.decode-error-title'),
+        i18n.t('notifications.decode-error-body'),
+      );
+      return;
+    }
+  }
+}

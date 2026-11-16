@@ -1,0 +1,119 @@
+import React, { useEffect, useMemo, useReducer } from 'react';
+import {
+  LocalParticipant,
+  ParticipantEvent,
+  RemoteParticipant,
+  RemoteTrackPublication,
+  Track,
+} from 'livekit-client';
+
+import VideoComponent from './video';
+import { useAppDispatch, useAppSelector } from '../../../store';
+import { updateIsEnabledFloatSelfView } from '../../../store/slices/bottomIconsActivitySlice';
+import { selectIsSpeakingByUserId } from '../../../store/slices/activeSpeakersSlice';
+import { VideoParticipantType } from './';
+import { RepeatIconSVG } from '../../../assets/Icons/RepeatIconSVG';
+
+export interface VideoParticipantProps {
+  participantType: VideoParticipantType;
+  userId: string;
+  participant: RemoteParticipant | LocalParticipant;
+  displayPinIcon: boolean;
+  displaySwitchCamIcon: boolean;
+}
+const VideoParticipant = ({
+  participantType,
+  userId,
+  participant,
+  displayPinIcon,
+  displaySwitchCamIcon,
+}: VideoParticipantProps) => {
+  const dispatch = useAppDispatch();
+  const isSpeaking = useAppSelector(selectIsSpeakingByUserId(userId));
+  const activateWebcamsView = useAppSelector((state) => state.roomSettings.activateWebcamsView);
+  const incomingWebcamPaused = useAppSelector(
+    (state) => state.roomSettings.mediaDegradation.incomingWebcamPaused,
+  );
+  const floatView = useAppSelector((state) => state.bottomIconsActivity.isEnabledFloatSelfView);
+
+  const [version, forceUpdate] = useReducer((x: number) => x + 1, 0);
+
+  useEffect(() => {
+    participant.on(ParticipantEvent.TrackMuted, forceUpdate);
+    participant.on(ParticipantEvent.TrackUnmuted, forceUpdate);
+    return () => {
+      participant.off(ParticipantEvent.TrackMuted, forceUpdate);
+      participant.off(ParticipantEvent.TrackUnmuted, forceUpdate);
+    };
+  }, [participant]);
+
+  useEffect(() => {
+    for (const track of participant.videoTrackPublications.values()) {
+      if (track.source === Track.Source.Camera && track instanceof RemoteTrackPublication) {
+        track.setEnabled(activateWebcamsView);
+      }
+    }
+  }, [participant, activateWebcamsView]);
+
+  const renderVideoElms = useMemo(() => {
+    const elements: Array<React.ReactNode> = [];
+    for (const track of participant.videoTrackPublications.values()) {
+      if (track.source !== Track.Source.Camera) {
+        continue;
+      }
+      const isRemote = track instanceof RemoteTrackPublication;
+      const showVideo = !!(
+        !track.isMuted &&
+        track.videoTrack &&
+        (!isRemote || (activateWebcamsView && !incomingWebcamPaused))
+      );
+      elements.push(
+        <VideoComponent
+          userId={userId}
+          name={participant.name ?? ''}
+          isLocal={participantType.isLocal}
+          track={track}
+          displayPinIcon={displayPinIcon}
+          showVideo={showVideo}
+          showPausedNotice={incomingWebcamPaused && isRemote}
+          key={userId}
+        />,
+      );
+    }
+    return elements;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    participant,
+    displayPinIcon,
+    participantType,
+    version,
+    activateWebcamsView,
+    incomingWebcamPaused,
+  ]);
+
+  return (
+    <div
+      className={`video-camera-item relative group rounded-2xl overflow-hidden ${
+        isSpeaking ? 'speaking' : ''
+      } ${
+        participantType.isAdmin ? 'admin' : 'participants'
+      } ${participantType.isLocal && floatView ? 'its-me' : ''}`}
+    >
+      {participantType.isLocal && displaySwitchCamIcon && (
+        <>
+          <button
+            type="button"
+            className="switch-camera absolute top-3 start-4 z-50 text-white cursor-pointer h-7 w-7 rounded-full hidden items-center justify-center bg-black bg-opacity-50 focus-ring"
+            onClick={() => dispatch(updateIsEnabledFloatSelfView(!floatView))}
+          >
+            <RepeatIconSVG />
+          </button>
+        </>
+      )}
+      {renderVideoElms}
+      <div className="bg-shadow pointer-events-none bg-linear-to-b from-95% from-black/0 to-black/50 w-full h-full absolute bottom-0 start-0 opacity-0 transition-all duration-300 group-hover:opacity-100"></div>
+    </div>
+  );
+};
+
+export default VideoParticipant;

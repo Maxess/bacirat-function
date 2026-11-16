@@ -1,0 +1,201 @@
+import { toast } from 'react-toastify';
+import type { ExcalidrawImperativeAPI } from '@excalidraw/excalidraw/types';
+import { AnalyticsEvents, AnalyticsEventType, RoomUploadedFileType } from 'plugnmeet-protocol-js';
+
+import { uploadResumableFile } from '../../../helpers/fileUpload';
+import { store } from '../../../store';
+import {
+  IWhiteboardOfficeFile,
+  WhiteboardFileConversionReq,
+  WhiteboardFileConversionRes,
+} from '../../../store/slices/interfaces/whiteboard';
+import sendAPIRequest from '../../../helpers/api/plugNmeetAPI';
+import i18n from '../../../helpers/i18n';
+import { createAndRegisterOfficeFile } from '../helpers/handleFiles';
+import { getNatsConn } from '../../../helpers/nats';
+import { sleep } from '../../../helpers/utils';
+
+export type OfficeFileStatus = 'idle' | 'uploading' | 'converting' | 'success' | 'error';
+
+export interface IOfficeFileProcessing {
+  onProgress(progress: number): void;
+  onSuccess(msg: string, officeFile?: IWhiteboardOfficeFile): void;
+  onError(msg: string): void;
+  onStart(): void;
+}
+
+class OfficeFileProcessor {
+  private _isBusy = false;
+  private fileStatus: OfficeFileStatus = 'idle';
+  private fileName = '';
+  private fileSize = 0;
+  private progress = 0;
+  private activeCallbacks: IOfficeFileProcessing | null = null;
+
+  public start = (
+    file: File,
+    excalidrawAPI: ExcalidrawImperativeAPI,
+    allowedFileTypes: string[],
+    maxAllowedFileSize: string,
+    callbacks: IOfficeFileProcessing,
+  ) => {
+    if (this._isBusy) {
+      return;
+    }
+
+    this._isBusy = true;
+    this.fileName = file.name;
+    this.fileSize = file.size;
+    this.fileStatus = 'uploading';
+    this.progress = 0;
+    this.activeCallbacks = callbacks;
+    callbacks.onStart();
+
+    this.upload(file, excalidrawAPI, allowedFileTypes, maxAllowedFileSize);
+  };
+
+  // Allows UI component to subscribe to an already active background upload/conversion
+  public registerCallbacks = (callbacks: IOfficeFileProcessing) => {
+    this.activeCallbacks = callbacks;
+    // Instantly notify listener of the current active progress state upon subscription
+    if (this.fileStatus === 'converting') {
+      callbacks.onProgress(100);
+    } else if (this.fileStatus === 'success') {
+      callbacks.onSuccess(i18n.t('whiteboard.file-ready'));
+    } else if (this.fileStatus === 'error') {
+      callbacks.onError(i18n.t('whiteboard.error-occurred'));
+    }
+  };
+
+  public unregisterCallbacks = () => {
+    this.activeCallbacks = null;
+  };
+
+  private cleanup() {
+    this._isBusy = false;
+    this.fileName = '';
+    this.fileSize = 0;
+    this.fileStatus = 'idle';
+    this.progress = 0;
+    this.activeCallbacks = null;
+  }
+
+  private upload(
+    file: File,
+    excalidrawAPI: ExcalidrawImperativeAPI,
+    allowedFileTypes: string[],
+    maxAllowedFileSize: string,
+  ) {
+    const files: File[] = [file];
+
+    uploadResumableFile(
+      allowedFileTypes,
+      maxAllowedFileSize,
+      RoomUploadedFileType.WHITEBOARD_CONVERTED_FILE,
+      files,
+      (result) => this.convertFile(result.filePath, excalidrawAPI),
+      () => {},
+      (uploadProgress) => {
+        this.progress = Math.round(uploadProgress * 100);
+        if (this.activeCallbacks) {
+          this.activeCallbacks.onProgress(this.progress);
+        }
+      },
+      (errMsg) => {
+        this.fileStatus = 'error';
+        if (this.activeCallbacks) {
+          this.activeCallbacks.onError(errMsg);
+        }
+        this.cleanup();
+      },
+    );
+  }
+
+  private async convertFile(filePath: string, excalidrawAPI: ExcalidrawImperativeAPI) {
+    const id = toast.loading(i18n.t('whiteboard.converting'), {
+      type: 'info',
+    });
+    this.fileStatus = 'converting';
+    this.progress = 100;
+    if (this.activeCallbacks) {
+      this.activeCallbacks.onProgress(100);
+    }
+
+    const { currentRoom, currentUser } = store.getState().session;
+    const body: WhiteboardFileConversionReq = {
+      roomSid: currentRoom.sid,
+      roomId: currentRoom.roomId,
+      userId: currentUser?.userId ?? '',
+      filePath: filePath,
+    };
+
+    const res: WhiteboardFileConversionRes = await sendAPIRequest('whiteboard/convert', body);
+    if (!res.status || res.fileId === '' || res.totalPages == 0) {
+      let msg = i18n.t(res.msg);
+      if (res.fileId === '' || res.totalPages == 0) {
+        msg = i18n.t('whiteboard.file-conversion-failed');
+      }
+
+      this.fileStatus = 'error';
+      if (this.activeCallbacks) {
+        this.activeCallbacks.onError(msg);
+      }
+      toast.update(id, {
+        render: i18n.t(msg),
+        type: 'error',
+        isLoading: false,
+        closeButton: true,
+      });
+      this.cleanup();
+      return;
+    }
+
+    const newFile = createAndRegisterOfficeFile(
+      res,
+      excalidrawAPI.getAppState().height,
+      excalidrawAPI.getAppState().width,
+    );
+
+    const conn = getNatsConn();
+    // send analytics
+    conn.sendAnalyticsData(
+      AnalyticsEvents.ANALYTICS_EVENT_USER_WHITEBOARD_FILES,
+      AnalyticsEventType.USER,
+      newFile.fileName,
+    );
+    conn.sendAnalyticsData(
+      AnalyticsEvents.ANALYTICS_EVENT_ROOM_WHITEBOARD_FILES,
+      AnalyticsEventType.ROOM,
+      newFile.fileName,
+    );
+
+    toast.update(id, {
+      render: i18n.t('whiteboard.file-ready'),
+      type: 'success',
+      isLoading: false,
+      autoClose: 1000,
+    });
+    this.fileStatus = 'success';
+    if (this.activeCallbacks) {
+      this.activeCallbacks.onSuccess(i18n.t('whiteboard.file-ready'), newFile);
+    }
+    await sleep(1000);
+    this.cleanup();
+  }
+
+  public get isBusy() {
+    return this._isBusy;
+  }
+
+  public get status() {
+    return {
+      status: this.fileStatus,
+      fileName: this.fileName,
+      fileSize: this.fileSize,
+      progress: this.progress,
+    };
+  }
+}
+
+const officeFileProcessor = new OfficeFileProcessor();
+export default officeFileProcessor;

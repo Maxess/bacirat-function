@@ -1,0 +1,115 @@
+import { ChatMessage } from 'plugnmeet-protocol-js';
+
+import ConnectNats from './ConnectNats';
+import { store } from '../../store';
+import { addChatMessage, updateChatMessage } from '../../store/slices/chatMessagesSlice';
+import {
+  setActiveSidePanel,
+  updateTotalUnreadChatMsgs,
+} from '../../store/slices/bottomIconsActivitySlice';
+import { updateUnreadMsgFrom } from '../../store/slices/roomSettingsSlice';
+import { DB_STORE_NAMES, idbStore } from '../libs/idb';
+import { cleanHtmlForChat } from '../utils';
+
+export default class HandleChat {
+  private connectNats: ConnectNats;
+  private allowViewOtherUsersList: boolean | undefined = undefined;
+
+  constructor(connectNats: ConnectNats) {
+    this.connectNats = connectNats;
+  }
+
+  public handleMsg = async (payload: ChatMessage) => {
+    // If this is a private message, we should only process it if we are the sender or the receiver.
+    if (
+      payload.isPrivate &&
+      payload.fromUserId !== this.connectNats.userId &&
+      payload.toUserId !== this.connectNats.userId
+    ) {
+      // This is a private message between two other users, so we can ignore it.
+      return;
+    }
+
+    if (typeof this.allowViewOtherUsersList === 'undefined') {
+      this.allowViewOtherUsersList =
+        store.getState().session.currentRoom.metadata?.roomFeatures?.allowViewOtherUsersList;
+    }
+
+    if (
+      !this.allowViewOtherUsersList &&
+      !payload.fromAdmin &&
+      !this.connectNats.isAdmin &&
+      payload.fromUserId !== this.connectNats.userId
+    ) {
+      // as it'd not allow viewing other users in the list
+      // so, any chat message will not be added except from admin
+      return;
+    }
+
+    const isDeleted = !!payload.meta?.isDeleted;
+
+    if (!isDeleted) {
+      // check translation
+      const selectedChatTransLang = store.getState().roomSettings.selectedChatTransLang;
+      if (selectedChatTransLang !== '') {
+        if (payload.sourceLang && payload.sourceLang !== selectedChatTransLang) {
+          // so, we'll need to pickup from translation
+          if (typeof payload.translations[selectedChatTransLang] !== 'undefined') {
+            payload.message = payload.translations[selectedChatTransLang];
+          }
+        }
+      }
+
+      // Sanitize after any translation swap and before store/dispatch
+      payload.message = cleanHtmlForChat(payload.message);
+    } else {
+      payload.message = '';
+    }
+
+    const isUpdate = !!store.getState().chatMessages.messageIds[payload.id];
+    store.dispatch(
+      (isUpdate ? updateChatMessage : addChatMessage)({
+        message: payload,
+        currentUserId: this.connectNats.userId,
+      }),
+    );
+    await idbStore(DB_STORE_NAMES.CHAT_MESSAGES, payload.id, payload);
+    if (isUpdate) {
+      return;
+    }
+
+    const isActiveChatPanel = store.getState().bottomIconsActivity.activeSidePanel === 'CHAT';
+    const selectedChatOption = store.getState().roomSettings.selectedChatOption;
+    const currentUser = store.getState().session.currentUser;
+    const isRecorder =
+      (currentUser?.userId === 'RECORDER_BOT' || currentUser?.userId === 'RTMP_BOT') ?? false;
+
+    if (!isActiveChatPanel) {
+      if (!isRecorder) {
+        store.dispatch(updateTotalUnreadChatMsgs());
+      } else {
+        store.dispatch(setActiveSidePanel('CHAT'));
+      }
+    }
+
+    if (!payload.isPrivate && selectedChatOption !== 'public') {
+      store.dispatch(
+        updateUnreadMsgFrom({
+          task: 'ADD',
+          id: 'public',
+        }),
+      );
+    } else if (
+      payload.isPrivate &&
+      selectedChatOption !== payload.fromUserId &&
+      payload.fromUserId !== currentUser?.userId
+    ) {
+      store.dispatch(
+        updateUnreadMsgFrom({
+          task: 'ADD',
+          id: payload.fromUserId,
+        }),
+      );
+    }
+  };
+}

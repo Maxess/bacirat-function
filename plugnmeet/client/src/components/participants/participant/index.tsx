@@ -1,0 +1,87 @@
+import React, { memo } from 'react';
+import clsx from 'clsx';
+
+import Avatar from './avatar';
+import ParticipantName from './name';
+import RaiseHandIcon from './icons/raiseHand';
+import MicIcon from './icons/mic';
+import WebcamIcon from './icons/webcam';
+import ScreenShareIcon from './icons/screenShare';
+import MenuIcon from './icons/menu';
+import VisibilityIcon from './icons/visibility';
+import PresenterIcon from './icons/presenterIcon';
+import WaitingApproval from './waitingApproval';
+import ConnectionQualityIcon from './icons/connectionQuality';
+
+import { ICurrentUser } from '../../../store/slices/interfaces/session';
+import { IVisibleParticipantInfo } from '../../../store/slices/interfaces/participant';
+import { store } from '../../../store';
+
+interface IParticipantComponentProps {
+  participant: IVisibleParticipantInfo;
+  currentUser: ICurrentUser | undefined;
+  isRemoteParticipant: boolean;
+  isHighlighted?: boolean;
+  openRemoveParticipantAlert(name: string, userId: string, type: string): void;
+}
+
+const ParticipantComponent = ({
+  participant,
+  currentUser,
+  isRemoteParticipant,
+  isHighlighted,
+  openRemoveParticipantAlert,
+}: IParticipantComponentProps) => {
+  const onOpenRemoveParticipantAlert = (user_id: string, type: string) => {
+    if (user_id === participant.userId) {
+      openRemoveParticipantAlert(participant.name, user_id, type);
+    }
+  };
+  const currentUserIsAdmin = !!store.getState().session.currentUser?.metadata?.isAdmin;
+
+  return (
+    <div
+      className={clsx(
+        'flex items-center justify-between relative w-full gap-2 rounded-lg px-1 -mx-1 transition-colors duration-200',
+        isHighlighted && 'bg-Green-100 dark:bg-Green-900',
+      )}
+    >
+      <div className="left flex items-center gap-1.5 3xl:gap-[10px]">
+        <Avatar participant={participant} />
+        <ParticipantName
+          name={participant.name}
+          isCurrentUser={currentUser?.userId === participant.userId}
+        />
+      </div>
+      <div className="right flex-auto flex items-center justify-end ms-2">
+        <div className="icon-group flex items-center justify-center gap-1">
+          <ConnectionQualityIcon userId={participant.userId} />
+          <RaiseHandIcon userId={participant.userId} />
+          <VisibilityIcon userId={participant.userId} />
+          <PresenterIcon userId={participant.userId} />
+          <WebcamIcon userId={participant.userId} />
+          <ScreenShareIcon userId={participant.userId} />
+          <MicIcon userId={participant.userId} isRemoteParticipant={isRemoteParticipant} />
+          {currentUser?.userId !== participant.userId && (
+            <MenuIcon
+              userId={participant.userId}
+              name={participant.name}
+              isAdmin={participant.isAdmin}
+              currentUserIsAdmin={currentUserIsAdmin}
+              openRemoveParticipantAlert={onOpenRemoveParticipantAlert}
+            />
+          )}
+        </div>
+      </div>
+      {currentUser?.metadata?.isAdmin && (
+        <WaitingApproval
+          userId={participant.userId}
+          name={participant.name}
+          openRemoveParticipantAlert={onOpenRemoveParticipantAlert}
+        />
+      )}
+    </div>
+  );
+};
+
+export default memo(ParticipantComponent);

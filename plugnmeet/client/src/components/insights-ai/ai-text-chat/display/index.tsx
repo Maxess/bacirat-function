@@ -1,0 +1,194 @@
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import Draggable from 'react-draggable';
+
+import { updateIsActiveInsightsAiTextChat } from '../../../../store/slices/bottomIconsActivitySlice';
+import { useAppDispatch, useAppSelector } from '../../../../store';
+import { AIMessage } from '../../../chat/messages/message/messageTypes';
+import { AiUserMessage } from '../aiUserMessage';
+import { renderMarkdown } from '../helpers/renderMarkdown';
+import TextBoxArea from './textBoxArea';
+import { useAiTextChat } from '../useAiTextChat';
+import { PopupCloseSVGIcon } from '../../../../assets/Icons/PopupCloseSVGIcon';
+import { ScrollToBottomIconSVG } from '../../../../assets/Icons/ScrollToBottom';
+
+const InsightsAiTextChat = () => {
+  const { t } = useTranslation();
+  const dispatch = useAppDispatch();
+  const nodeRef = useRef(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [showScrollDownBtn, setShowScrollDownBtn] = useState(false);
+
+  const isActive = useAppSelector((state) => state.bottomIconsActivity.isActiveInsightsAiTextChat);
+  const isEnabled = useAppSelector(
+    (state) =>
+      state.session.currentRoom?.metadata?.roomFeatures?.insightsFeatures?.aiFeatures
+        ?.aiTextChatFeatures?.isEnabled,
+  );
+  const { finalMessages, interimMessage, isAwaitingResponse, send } = useAiTextChat();
+
+  const parsedFinalMessages = useMemo(() => {
+    return finalMessages.map((msg) => {
+      const parsedMessage = renderMarkdown(msg.parts.join(''));
+      return {
+        ...msg,
+        parsedMessage,
+      };
+    });
+  }, [finalMessages]);
+
+  const allMessages = useMemo(() => {
+    const messages = [...parsedFinalMessages];
+    if (interimMessage) {
+      const parsedMessage = renderMarkdown(interimMessage.parts.join(''));
+      messages.push({
+        ...interimMessage,
+        parsedMessage,
+      });
+    }
+    return messages;
+  }, [parsedFinalMessages, interimMessage]);
+
+  useEffect(() => {
+    if (scrollRef.current) {
+      const timer = setTimeout(() => {
+        if (scrollRef.current) {
+          scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+        }
+      }, 100);
+      return () => clearTimeout(timer);
+    }
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies
+  }, [allMessages, scrollRef]);
+
+  const close = useCallback(() => {
+    dispatch(updateIsActiveInsightsAiTextChat(false));
+  }, [dispatch]);
+
+  const closeBtnRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (isActive && closeBtnRef.current) {
+      const timer = setTimeout(() => {
+        closeBtnRef.current?.focus();
+      }, 350);
+      return () => clearTimeout(timer);
+    }
+  }, [isActive]);
+
+  const handleScroll = useCallback(() => {
+    const container = scrollRef.current;
+    if (container) {
+      // We'll consider the user has scrolled up if they are more than 200px
+      // from the bottom. This threshold prevents the button from flickering.
+      const isScrolledUp =
+        container.scrollHeight - container.clientHeight > container.scrollTop + 200;
+      // Avoid unnecessary re-renders if the state is already correct.
+      if (isScrolledUp !== showScrollDownBtn) {
+        setShowScrollDownBtn(isScrolledUp);
+      }
+    }
+  }, [showScrollDownBtn]);
+
+  const forceScrollToBottom = useCallback(() => {
+    const container = scrollRef.current;
+    if (container) {
+      // A small timeout ensures the scroll happens after the panel is fully rendered.
+      setTimeout(() => {
+        container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
+      }, 100);
+    }
+  }, []);
+
+  if (!isEnabled) {
+    return null;
+  }
+
+  return (
+    <div
+      className={
+        isActive ? 'w-full absolute h-full z-10 top-0 left-0 pointer-events-none' : 'hidden'
+      }
+    >
+      <div className="ai-chat-widget h-[calc(100%-50px)] mt-9 flex items-end justify-center">
+        <Draggable
+          handle="#draggable-aichat"
+          nodeRef={nodeRef}
+          bounds="#main-area"
+          cancel=".ai-chat-close-btn, .ai-chat-scroll-btn"
+        >
+          <div
+            className="h-[400px] md:h-[500px] w-[400px] min-w-[300px] min-h-[300px] relative pointer-events-auto rounded-xl bg-Gray-25 dark:bg-dark-primary border border-Gray-200 dark:border-Gray-800 resize overflow-auto"
+            ref={nodeRef}
+          >
+            <div className="inner-wrapper relative z-20 w-full h-full flex flex-col">
+              <div
+                id="draggable-aichat"
+                className="absolute top-0 w-full flex items-center justify-between text-base font-medium leading-7 text-Gray-950 dark:text-white px-4 py-2 border-b border-Gray-100 dark:border-Gray-700 bg-white dark:bg-dark-secondary rounded-t-xl cursor-move"
+              >
+                <span>{t('insights.ai-text-chat.panel-title')}</span>
+                <div className="flex items-center space-x-2">
+                  {showScrollDownBtn && (
+                    <button
+                      className="cursor-pointer focus-ring relative z-30 transition-opacity ai-chat-scroll-btn"
+                      onClick={forceScrollToBottom}
+                      aria-label="Scroll to bottom"
+                    >
+                      <ScrollToBottomIconSVG />
+                    </button>
+                  )}
+                  <button
+                    ref={closeBtnRef}
+                    className="cursor-pointer focus-ring relative z-30 ai-chat-close-btn"
+                    onClick={close}
+                    aria-label="Close"
+                  >
+                    <PopupCloseSVGIcon classes="text-Gray-600" />
+                  </button>
+                </div>
+              </div>
+
+              <div className="h-full pt-[45px] flex flex-col">
+                <div
+                  ref={scrollRef}
+                  className="message-list-wrapper relative overflow-auto scrollBar px-3 3xl:px-5 pt-2 xl:pt-3 flex-grow mb-1"
+                  onScroll={handleScroll}
+                >
+                  <div>
+                    {allMessages.map((msg) => {
+                      if (!msg) return null;
+
+                      const isStreaming = interimMessage !== null && interimMessage.id === msg.id;
+
+                      return (
+                        <div key={msg.id} className="wrapper flex gap-2 3xl:gap-3 my-2.5">
+                          {msg.role === 'model' ? (
+                            <AIMessage
+                              name={t('insights.ai-text-chat.name')}
+                              message={msg.parsedMessage}
+                              isStreaming={isStreaming}
+                              sentAt={msg.createdAt}
+                              markdown
+                            />
+                          ) : (
+                            <AiUserMessage message={msg.parsedMessage} sentAt={msg.createdAt} />
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="message-form z-30 border-t border-Gray-200 dark:border-Gray-800 bg-white dark:bg-dark-primary w-full px-3 3xl:px-5 py-2 3xl:py-4 flex items-center shrink-0">
+                  <TextBoxArea onSend={send} isAwaitingResponse={isAwaitingResponse} />
+                </div>
+              </div>
+            </div>
+          </div>
+        </Draggable>
+      </div>
+    </div>
+  );
+};
+
+export default InsightsAiTextChat;

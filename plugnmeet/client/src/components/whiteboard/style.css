@@ -1,0 +1,251 @@
+@reference '../../styles/index.css';
+
+#plugNmeet-app {
+  .excalidraw-wrapper {
+    .excalidraw {
+      --default-button-size: 2rem;
+      --default-icon-size: 0.7rem;
+      --lg-button-size: 2rem;
+      --lg-icon-size: 1rem;
+      --editor-container-padding: 0.5rem;
+      --island-bg-color: rgba(255, 255, 255, 0.96);
+      --default-border-color: #3d3d3d;
+      --border-radius-lg: 0.5rem;
+      --button-hover-bg: #3d3d3d;
+      @media screen and (max-width: 640px) {
+        --default-button-size: 1.8rem;
+        --lg-button-size: 1.8rem;
+      }
+
+      &.theme--dark {
+        --island-bg-color: #262627;
+        --default-border-color: #3d3d3d;
+      }
+
+      .library-button {
+        height: 32px;
+        width: 32px;
+        &:hover {
+          svg {
+            color: #fff;
+          }
+        }
+        .library-button__label {
+          display: none !important;
+        }
+      }
+      label[title] {
+        .sidebar-trigger {
+          &:hover {
+            @apply text-[#b8b8b8];
+          }
+        }
+      }
+      .excalidraw-button.sidebar__close {
+        @apply text-[#b8b8b8];
+      }
+      .help-icon {
+        display: none;
+      }
+      .dropdown-menu-button {
+        padding: 0px !important;
+        &:hover {
+          svg {
+            color: #fff;
+          }
+        }
+      }
+      .App-menu_bottom {
+        bottom: 0.5rem;
+        padding: 0 0.5rem;
+        align-items: center;
+      }
+      button.wb-manage-upload-file {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        padding: 0.625rem;
+        width: var(--button-width, var(--default-button-size));
+        height: var(--button-height, var(--default-button-size));
+        box-sizing: border-box;
+        border-width: 1px;
+        border-style: solid;
+        border-color: var(--button-border, var(--default-border-color));
+        border-radius: var(--border-radius-lg);
+        cursor: pointer;
+        background-color: var(--button-bg, var(--island-bg-color));
+        color: var(--button-color, var(--color-on-surface));
+        font-family: var(--ui-font);
+        border: none;
+        box-shadow: 0 0 0 1px var(--color-surface-lowest);
+        background-color: var(--color-surface-low);
+        width: auto;
+        height: var(--lg-button-size);
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        line-height: 0;
+        font-size: 0.75rem;
+        letter-spacing: 0.4px;
+        &:hover {
+          background-color: var(--button-hover-bg, var(--island-bg-color));
+          border-color: var(
+            --button-hover-border,
+            var(--button-border, var(--default-border-color))
+          );
+          color: #b8b8b8;
+        }
+      }
+      .wb-page-navigation {
+        background-color: var(--color-surface-low);
+        border-radius: var(--border-radius-lg);
+        box-shadow: 0 0 0 1px var(--color-surface-lowest);
+        overflow: hidden;
+        width: max-content;
+        button {
+          /* border: 1px solid var(--default-border-color) !important; */
+          width: var(--lg-button-size);
+          height: var(--lg-button-size);
+          /* background-color: var(--island-bg-color);
+          border-radius: var(--border-radius-lg);
+          margin: 0 0.4rem; */
+
+          &:disabled {
+            cursor: not-allowed;
+            opacity: 0.4;
+          }
+          &:not(:disabled):hover {
+            background: var(--button-hover-bg);
+            i {
+              color: #fff;
+            }
+          }
+        }
+      }
+      .renderForParticipant {
+        button,
+        .page-number {
+          height: var(--lg-button-size);
+          background-color: var(--color-surface-low);
+          border-radius: var(--border-radius-lg);
+          box-shadow: 0 0 0 1px var(--color-surface-lowest);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+        button {
+          &:not(:disabled):hover {
+            background: var(--button-hover-bg);
+            color: #b8b8b8;
+            i {
+              color: #fff;
+            }
+          }
+        }
+        button.presenter {
+          width: var(--lg-button-size);
+        }
+      }
+      button.main-menu-trigger {
+        &:not(:disabled):hover {
+          background: var(--button-hover-bg);
+          color: #b8b8b8;
+        }
+      }
+      .ToolIcon__icon {
+        &:hover {
+          svg {
+            color: #fff;
+          }
+        }
+      }
+      button.Sidebar__close-btn {
+        &:hover {
+          svg {
+            color: #fff;
+          }
+        }
+      }
+      .dropdown-menu {
+        .dropdown-menu-item {
+          &:hover {
+            color: #fff;
+          }
+        }
+      }
+      .library-menu-browse-button {
+        padding: 0.5rem 1rem;
+        color: #fff !important;
+        @apply text-primary-color;
+        &:hover {
+          @apply text-primary-color;
+        }
+      }
+      .library-menu-items-container__header {
+        @apply text-primary-color dark:text-secondary-color text-base font-medium;
+      }
+      .App-toolbar-content {
+        padding: 0;
+      }
+      .panelColumn {
+        button {
+          &:hover {
+            svg {
+              color: #fff;
+            }
+          }
+        }
+        .buttonList {
+          label {
+            &:not(.active) {
+              &:hover {
+                svg {
+                  color: #fff;
+                }
+              }
+            }
+          }
+        }
+      }
+      button.scroll-back-to-content {
+        padding: 5px 20px !important;
+        bottom: 10px !important;
+        font-size: 12px;
+        &:hover {
+          color: #fff !important;
+        }
+      }
+      .buttonList label:hover svg,
+      .buttonList button:hover svg,
+      .buttonList .zIndexButton:hover svg {
+        color: #fff !important;
+      }
+      .compact-shape-actions .ToolIcon .ToolIcon__icon:hover,
+      .App-toolbar__extra-tools-trigger:hover {
+        background: var(--button-hover-bg) !important;
+      }
+    }
+    &.toolbar-hidden {
+      .App-toolbar-container > .Island,
+      .App-bottom-bar > .Island,
+      .App-menu_top .selected-shape-actions-container {
+        display: none !important;
+      }
+    }
+  }
+}
+.excalidraw
+  .ToolIcon.fillable
+  .ToolIcon_type_radio:checked
+  + .ToolIcon__icon:hover
+  svg {
+  color: #5b57d1 !important;
+}
+
+.isRecorder .App-menu_top {
+  display: none !important;
+}
+
+.isRecorder .App-menu button {
+  display: none !important;
+}

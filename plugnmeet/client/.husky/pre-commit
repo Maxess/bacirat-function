@@ -1,0 +1,16 @@
+# Exit immediately if a command fails.
+set -e
+
+echo "--- Formatting staged files with oxfmt ---"
+# The -r flag tells xargs not to run if there's no input.
+git diff --cached --name-only --diff-filter=ACMR | grep -E '\.(js|jsx|ts|tsx)$' | grep -v '^src/assets/locales/' | xargs -r npx oxfmt --config=.oxfmtrc.json --write
+
+echo "--- Linting staged files with oxlint ---"
+# We also use -r here to prevent oxlint from running on the whole project.
+git diff --cached --name-only --diff-filter=ACMR | grep -E '\.(ts|tsx|jsx|js)$' | xargs -r npx oxlint --fix
+
+echo "--- Re-adding modified files to commit ---"
+# Re-add any files that were modified by the formatters/linters.
+git diff --cached --name-only --diff-filter=ACMR | xargs -r git add
+
+exit 0

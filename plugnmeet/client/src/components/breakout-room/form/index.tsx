@@ -1,0 +1,374 @@
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import {
+  BreakoutRoom,
+  BreakoutRoomSchema,
+  CreateBreakoutRoomsReq,
+  CreateBreakoutRoomsReqSchema,
+} from 'plugnmeet-protocol-js';
+import { create } from '@bufbuild/protobuf';
+
+import RoomNumberSelector from './roomNumberSelector';
+import DndRoomBox from './dndRoomBox';
+import { store, useAppDispatch, useAppSelector } from '../../../store';
+import { RoomType, UserType } from './types';
+import { BreakoutRoomMessage } from '..';
+import { selectBasicParticipants } from '../../../store/slices/participantSlice';
+import useStorePreviousInt from '../../../helpers/hooks/useStorePreviousInt';
+import { updateBreakoutRoomDroppedUser } from '../../../store/slices/breakoutRoomSlice';
+import { buildWhiteboardShare, useWhiteboardShareState } from './useWhiteboardShareState';
+import { mergeUsersWithPreassigned, usePreassignedRooms } from './usePreassignedRooms';
+import WhiteboardShareSection from './whiteboardShareSection';
+import NotepadShareSection from './notepadShareSection';
+import PollsShareSection from './pollsShareSection';
+
+interface IFromElemsProps {
+  createBreakoutRooms: (req: CreateBreakoutRoomsReq) => void;
+  isLoading: boolean;
+  setMessage: (message: BreakoutRoomMessage | null) => void;
+}
+
+const FromElems = ({ createBreakoutRooms, isLoading, setMessage }: IFromElemsProps) => {
+  const { t } = useTranslation();
+  const dispatch = useAppDispatch();
+  const participants = useAppSelector(selectBasicParticipants);
+  const droppedUser = useAppSelector((state) => state.breakoutRoom.droppedUser);
+
+  const isWhiteboardEnabled = useAppSelector(
+    (state) => !!state.session.currentRoom.metadata?.roomFeatures?.whiteboardFeatures?.isAllow,
+  );
+  const isNotepadEnabled = useAppSelector(
+    (state) => !!state.session.currentRoom.metadata?.roomFeatures?.sharedNotePadFeatures?.isAllow,
+  );
+  const isPollsEnabled = useAppSelector(
+    (state) => !!state.session.currentRoom.metadata?.roomFeatures?.pollsFeatures?.isAllow,
+  );
+
+  // Whiteboard share state (selectors + default-checked + resync + builder).
+  const {
+    currentWhiteboardOfficeFileId,
+    whiteboardTotalPages,
+    whiteboardCurrentPage,
+    hasWhiteboardFile,
+    allWhiteboardPages,
+    shareWhiteboard,
+    setShareWhiteboard,
+    selectedWhiteboardPages,
+    setSelectedWhiteboardPages,
+    toggleWhiteboardPage,
+    whiteboardPagesSelected,
+    contentShareDisabled,
+  } = useWhiteboardShareState();
+
+  const [shareNotepad, setShareNotepad] = useState<boolean>(false);
+  const [sharePolls, setSharePolls] = useState<boolean>(false);
+  const [sharePollIds, setSharePollIds] = useState<string[]>([]);
+
+  // Pre-assignments (sent by the createRoom API) are captured once when the
+  // form opens and turned into the initial values below.
+  const {
+    preassignedUsers,
+    initialTotalRooms,
+    initialCustomTitles,
+    initialUsers,
+    initialAllowReturnToMainRoom,
+    initialAllowSelfSelect,
+  } = usePreassignedRooms(participants);
+
+  const [totalRooms, setTotalRooms] = useState<number>(initialTotalRooms);
+  const preTotalRooms = useStorePreviousInt(totalRooms);
+  const [roomDuration, setRoomDuration] = useState<number>(15);
+  const [welcomeMsg, setWelcomeMsg] = useState<string>(
+    () => store.getState().session.currentRoom.metadata?.welcomeMessage ?? '',
+  );
+  const [allowReturnToMainRoom, setAllowReturnToMainRoom] = useState<boolean>(
+    initialAllowReturnToMainRoom,
+  );
+  const [allowSelfSelect, setAllowSelfSelect] = useState<boolean>(initialAllowSelfSelect);
+  const [customTitles, setCustomTitles] = useState<Record<number, string>>(initialCustomTitles);
+  const [users, setUsers] = useState<Array<UserType>>(initialUsers);
+
+  // we'll clean during unmount
+  useEffect(() => {
+    return () => {
+      dispatch(
+        updateBreakoutRoomDroppedUser({
+          id: '',
+          roomId: 0,
+        }),
+      );
+    };
+  }, [dispatch]);
+
+  useEffect(() => {
+    // Sync users state with participants from the store
+    setUsers(mergeUsersWithPreassigned(participants, users, preassignedUsers));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [participants]);
+
+  // if room number decreases then we'll reset otherwise user will be missing
+  useEffect(() => {
+    if (totalRooms >= preTotalRooms) {
+      return;
+    }
+    // Move users from deleted rooms back to the main room
+    setUsers((prevUsers) =>
+      prevUsers.map((user) => (user.roomId > totalRooms ? { ...user, roomId: 0 } : user)),
+    );
+  }, [totalRooms, preTotalRooms]);
+
+  const roomList = useMemo(() => {
+    const generatedRooms: Array<RoomType> = [
+      {
+        id: 0,
+        name: t('breakout-room.main-room'),
+      },
+    ];
+    for (let i = 0; i < totalRooms; i++) {
+      generatedRooms.push({
+        id: i + 1,
+        name: t('breakout-room.new-room', { num: i + 1 }),
+      });
+    }
+    return generatedRooms;
+  }, [totalRooms, t]);
+
+  useEffect(() => {
+    if (droppedUser.id === '') {
+      return;
+    }
+    const newUsers = users.map((user) => {
+      if (user.id === droppedUser.id) {
+        user.roomId = droppedUser.roomId;
+      }
+      return user;
+    });
+
+    setUsers(newUsers);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [droppedUser]); // users is intentionally omitted
+
+  const randomSelection = () => {
+    if (!users.length || !roomList.length) {
+      return;
+    }
+    const tmp = [...users];
+    const tmpRooms = [...roomList];
+    tmpRooms.shift();
+
+    for (let i = 0; i < tmp.length; i++) {
+      const r = Math.floor(Math.random() * tmpRooms.length);
+      tmp[i].roomId = tmpRooms[r].id;
+    }
+
+    setUsers(tmp);
+  };
+
+  const handleStartBreakoutRooms = useCallback(() => {
+    const tmp: Array<BreakoutRoom> = [];
+    roomList.forEach((r) => {
+      if (r.id !== 0) {
+        const u = users.filter((u) => u.roomId === r.id);
+        if (u.length || allowSelfSelect) {
+          const room = create(BreakoutRoomSchema, {
+            id: `${r.id}`,
+            title: customTitles[r.id]?.trim() || r.name,
+            users: u,
+            duration: String(roomDuration),
+            started: false,
+            created: String(Date.now()),
+          });
+          tmp.push(room);
+        }
+      }
+    });
+
+    if (!tmp.length) {
+      setMessage({ text: t('breakout-room.need-one-user'), type: 'error' });
+      return;
+    }
+
+    const whiteboardShare = buildWhiteboardShare({
+      enabled: whiteboardPagesSelected,
+      fileId: currentWhiteboardOfficeFileId,
+      pages: selectedWhiteboardPages,
+      currentPage: whiteboardCurrentPage,
+    });
+
+    const req = create(CreateBreakoutRoomsReqSchema, {
+      duration: String(roomDuration),
+      welcomeMsg: welcomeMsg,
+      rooms: tmp,
+      shareNotepad: shareNotepad && !contentShareDisabled,
+      allowReturnToMainRoom: allowReturnToMainRoom,
+      allowSelfSelect: allowSelfSelect,
+      ...(whiteboardShare ? { whiteboardShare } : {}),
+      ...(sharePolls && sharePollIds.length > 0 ? { pollShare: { pollIds: sharePollIds } } : {}),
+    });
+    createBreakoutRooms(req);
+  }, [
+    roomList,
+    users,
+    roomDuration,
+    welcomeMsg,
+    createBreakoutRooms,
+    setMessage,
+    t,
+    shareNotepad,
+    sharePolls,
+    sharePollIds,
+    allowReturnToMainRoom,
+    allowSelfSelect,
+    customTitles,
+    contentShareDisabled,
+    whiteboardPagesSelected,
+    selectedWhiteboardPages,
+    currentWhiteboardOfficeFileId,
+    whiteboardCurrentPage,
+  ]);
+
+  return (
+    <div className="break-out-room-main-area">
+      <div className="row flex flex-wrap justify-start items-end">
+        <RoomNumberSelector totalRooms={totalRooms} setTotalRooms={setTotalRooms} />
+        <div className="room-durations w-full sm:w-56 mb-4">
+          <label
+            className="block text-sm font-medium text-Gray-800 dark:text-white mb-2"
+            htmlFor="breakout-room-duration"
+          >
+            {t('breakout-room.duration')}
+          </label>
+          <input
+            className="h-10 rounded-[15px] text-Gray-800 dark:text-white border border-Gray-300 dark:border-Gray-800 bg-white dark:bg-transparent shadow-input w-full px-3 outline-hidden focus:border-[rgba(0,161,242,1)] focus:shadow-input-focus"
+            id="breakout-room-duration"
+            type="number"
+            value={roomDuration}
+            onChange={(e) => setRoomDuration(Number(e.currentTarget.value))}
+          />
+        </div>
+      </div>
+      <div className="row flex flex-wrap justify-between items-end">
+        <div className="room-welcome-messages w-full sm:max-w-122 mb-4 sm:me-10">
+          <label
+            className="block text-sm font-medium text-Gray-800 dark:text-white mb-1"
+            htmlFor="breakout-room-welcome"
+          >
+            {t('breakout-room.welcome-msg')}
+          </label>
+          <textarea
+            dir="auto"
+            className="h-20 rounded-[15px] text-Gray-800 dark:text-white border border-Gray-300 dark:border-Gray-800 bg-white dark:bg-transparent shadow-input w-full px-3 py-2 outline-hidden focus:border-[rgba(0,161,242,1)] focus:shadow-input-focus"
+            id="breakout-room-welcome"
+            onChange={(e) => setWelcomeMsg(e.currentTarget.value)}
+            value={welcomeMsg}
+          ></textarea>
+        </div>
+        <div className="random-room-select mb-4">
+          <button
+            className="primary-button h-9 w-auto ms-auto px-5 cursor-pointer text-sm font-medium bg-Blue hover:bg-white border border-[#0088CC] rounded-[15px] text-white hover:text-Gray-950 transition-all duration-300 shadow-button-shadow"
+            onClick={randomSelection}
+          >
+            {t('breakout-room.random-selection')}
+          </button>
+        </div>
+      </div>
+      <div className="item flex items-start mt-4 mb-4">
+        <div className="input">
+          <input
+            id="allow-return-to-main-room"
+            name="allow-return-to-main-room"
+            type="checkbox"
+            className="border cursor-pointer border-Gray-300 bg-white shadow-input w-5 h-5 outline-hidden focus:border-[rgba(0,161,242,1)] focus:shadow-input-focus focus-ring mt-1 dark:bg-dark-secondary dark:border-dark-text"
+            checked={allowReturnToMainRoom}
+            onChange={(e) => setAllowReturnToMainRoom(e.currentTarget.checked)}
+          />
+        </div>
+        <div className="text-base w-full ps-2 sm:ps-4">
+          <label
+            htmlFor="allow-return-to-main-room"
+            className="text-sm 3xl:text-base font-medium text-Gray-950 dark:text-dark-text cursor-pointer"
+          >
+            {t('breakout-room.allow-return-to-main-room')}
+            <p className="text-xs md:text-sm opacity-70 dark:opacity-80">
+              {t('breakout-room.allow-return-to-main-room-desc')}
+            </p>
+          </label>
+        </div>
+      </div>
+
+      <div className="item flex items-start mt-4 mb-4">
+        <div className="input">
+          <input
+            id="allow-self-select"
+            name="allow-self-select"
+            type="checkbox"
+            className="border cursor-pointer border-Gray-300 bg-white shadow-input w-5 h-5 outline-hidden focus:border-[rgba(0,161,242,1)] focus:shadow-input-focus focus-ring mt-1 dark:bg-dark-secondary dark:border-dark-text"
+            checked={allowSelfSelect}
+            onChange={(e) => setAllowSelfSelect(e.currentTarget.checked)}
+          />
+        </div>
+        <div className="text-base w-full ps-2 sm:ps-4">
+          <label
+            htmlFor="allow-self-select"
+            className="text-sm 3xl:text-base font-medium text-Gray-950 dark:text-dark-text cursor-pointer"
+          >
+            {t('breakout-room.allow-self-select')}
+            <p className="text-xs md:text-sm opacity-70 dark:opacity-80">
+              {t('breakout-room.allow-self-select-desc')}
+            </p>
+          </label>
+        </div>
+      </div>
+
+      <DndRoomBox
+        roomList={roomList}
+        users={users}
+        customTitles={customTitles}
+        setCustomTitles={setCustomTitles}
+      />
+
+      {isWhiteboardEnabled && (
+        <WhiteboardShareSection
+          hasWhiteboardFile={hasWhiteboardFile}
+          shareWhiteboard={shareWhiteboard}
+          setShareWhiteboard={setShareWhiteboard}
+          selectedWhiteboardPages={selectedWhiteboardPages}
+          setSelectedWhiteboardPages={setSelectedWhiteboardPages}
+          toggleWhiteboardPage={toggleWhiteboardPage}
+          allWhiteboardPages={allWhiteboardPages}
+          whiteboardTotalPages={whiteboardTotalPages}
+          disabled={contentShareDisabled}
+        />
+      )}
+
+      {isNotepadEnabled && (
+        <NotepadShareSection
+          shareNotepad={shareNotepad}
+          setShareNotepad={setShareNotepad}
+          disabled={contentShareDisabled}
+        />
+      )}
+
+      {isPollsEnabled && (
+        <PollsShareSection
+          sharePolls={sharePolls}
+          setSharePolls={setSharePolls}
+          sharePollIds={sharePollIds}
+          setSharePollIds={setSharePollIds}
+        />
+      )}
+
+      <div className="flex justify-end mt-4">
+        <button
+          className="primary-button h-9 w-auto px-5 cursor-pointer text-sm font-medium bg-Blue hover:bg-white border border-[#0088CC] rounded-[15px] text-white hover:text-Gray-950 transition-all duration-300 shadow-button-shadow"
+          onClick={handleStartBreakoutRooms}
+          disabled={isLoading || (whiteboardPagesSelected && selectedWhiteboardPages.length === 0)}
+        >
+          {t('breakout-room.start')}
+        </button>
+      </div>
+    </div>
+  );
+};
+
+export default FromElems;

@@ -1,0 +1,55 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["react", "unicorn", "typescript", "oxc", "jsx-a11y"],
+  "ignorePatterns": ["dist/", "**/node_modules/", ".git/", "**/assets/**/*.js", "custom_tfjs/*.js"],
+  "categories": {
+    "correctness": "error",
+    "suspicious": "warn",
+    "perf": "warn"
+  },
+  "env": {
+    "browser": true
+  },
+  "overrides": [
+    {
+      "files": ["src/**/*.{ts,jsx,tsx}", "src/assets/config_sample.js"],
+      "rules": {
+        "react-in-jsx-scope": "off",
+        "iframe-missing-sandbox": "off",
+        "consistent-function-scoping": "off",
+        "prefer-add-event-listener": "off",
+        "no-await-in-loop": "off",
+        "no-unused-expressions": "off",
+        "no-array-sort": "off",
+        "no-array-reverse": "off",
+        "no-array-index-key": "off",
+        "no-shadow": "off",
+        "no-underscore-dangle": "off",
+        "jsx-a11y/alt-text": "error",
+        "jsx-a11y/anchor-has-content": "error",
+        "jsx-a11y/aria-props": "error",
+        "jsx-a11y/aria-role": "error",
+        "jsx-a11y/aria-unsupported-elements": "error",
+        "jsx-a11y/click-events-have-key-events": "error",
+        "jsx-a11y/heading-has-content": "error",
+        "jsx-a11y/iframe-has-title": "error",
+        "jsx-a11y/label-has-associated-control": "error",
+        "jsx-a11y/no-noninteractive-element-interactions": "error",
+        "jsx-a11y/no-redundant-roles": "error",
+        "jsx-a11y/no-static-element-interactions": "error",
+        "jsx-a11y/role-has-required-aria-props": "error",
+        "jsx-a11y/tabindex-no-positive": "error",
+        "jsx-a11y/control-has-associated-label": "warn",
+        "jsx-a11y/media-has-caption": "off",
+        "jsx-a11y/no-noninteractive-tabindex": "off",
+        "jsx-a11y/prefer-tag-over-role": "off",
+        "react/set-state-in-effect": "off",
+        "react/set-state-in-render": "off",
+        "react/refs": "off",
+        "react/purity": "off",
+        "react/immutability": "off",
+        "react/no-deriving-state-in-effects": "off"
+      }
+    }
+  ]
+}

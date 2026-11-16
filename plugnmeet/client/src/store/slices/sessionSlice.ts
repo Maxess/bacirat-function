@@ -1,0 +1,200 @@
+import { createSlice, PayloadAction } from '@reduxjs/toolkit';
+import { ClientType, RoomMetadataSchema } from 'plugnmeet-protocol-js';
+import { create } from '@bufbuild/protobuf';
+
+import {
+  ICurrentRoom,
+  ICurrentUser,
+  ICurrentUserMetadata,
+  IRoomMetadata,
+  IScreenSharing,
+  ISession,
+  UserDeviceType,
+} from './interfaces/session';
+import { PnmConnectionQuality } from '../../helpers/livekit/ConnectionQualityMonitor';
+
+const initialState: ISession = {
+  token: '',
+  screenSharing: {
+    isActive: false,
+    sharedBy: '',
+  },
+  isActiveRtmpBroadcasting: false,
+  isActiveRecording: false,
+  isWebcamPaginating: false,
+  isStartup: true,
+  totalAudioSubscribers: 0,
+  totalVideoSubscribers: 0,
+  userDeviceType: UserDeviceType.DESKTOP,
+  isCloud: false,
+  clientType: ClientType.WEB,
+  currentRoom: {
+    sid: '',
+    roomId: '',
+    metadata: create(RoomMetadataSchema, {
+      roomTitle: 'plugNmeet',
+      welcomeMessage: 'Welcome to plugNmeet!',
+      isRecording: false,
+      isActiveRtmp: false,
+      parentRoomId: '',
+      isBreakoutRoom: false,
+      startedAt: Date.now().toString(),
+      roomFeatures: {
+        allowWebcams: true,
+        muteOnStart: false,
+        allowScreenShare: true,
+        allowRtmp: true,
+        allowViewOtherWebcams: true,
+        allowViewOtherUsersList: true,
+        adminOnlyWebcams: false,
+        roomDuration: '0',
+        allowVirtualBg: true,
+        allowRaiseHand: true,
+        recordingFeatures: {
+          isAllow: true,
+          isAllowCloud: true,
+          enableAutoCloudRecording: false,
+          isAllowLocal: true,
+          onlyRecordAdminWebcams: false,
+        },
+        chatFeatures: {
+          isAllow: true,
+          isAllowFileUpload: true,
+          allowedFileTypes: ['jpg', 'png', 'zip'],
+        },
+        sharedNotePadFeatures: {
+          isAllow: true,
+        },
+        whiteboardFeatures: {
+          isAllow: true,
+          visible: false,
+          whiteboardFileId: '',
+          fileName: '',
+          filePath: '',
+          totalPages: 0,
+        },
+        externalMediaPlayerFeatures: {
+          isAllow: true,
+          isActive: false,
+        },
+        waitingRoomFeatures: {
+          isActive: false,
+          waitingRoomMsg: '',
+        },
+        breakoutRoomFeatures: {
+          isAllow: true,
+        },
+        displayExternalLinkFeatures: {
+          isAllow: true,
+        },
+        ingressFeatures: {
+          isAllow: true,
+        },
+        insightsFeatures: {
+          isAllow: true,
+          transcriptionFeatures: {
+            isAllow: true,
+            isAllowTranslation: true,
+          },
+          aiFeatures: {
+            isAllow: true,
+            aiTextChatFeatures: {
+              isAllow: true,
+            },
+          },
+        },
+        endToEndEncryptionFeatures: {
+          isEnabled: false,
+          includedChatMessages: false,
+          includedWhiteboard: false,
+        },
+      },
+      copyrightConf: {
+        display: true,
+        text: 'Powered by <a href="https://www.plugnmeet.org" target="_blank">plugNmeet</a>',
+      },
+    }),
+  },
+};
+
+const sessionSlice = createSlice({
+  name: 'session',
+  initialState,
+  reducers: {
+    addToken: (state, action: PayloadAction<string>) => {
+      state.token = action.payload;
+    },
+    addServerVersion: (state, action: PayloadAction<string>) => {
+      state.serverVersion = action.payload;
+    },
+    toggleStartup: (state, action: PayloadAction<boolean>) => {
+      state.isStartup = action.payload;
+    },
+    addCurrentUser: (state, action: PayloadAction<ICurrentUser>) => {
+      state.currentUser = action.payload;
+    },
+    addCurrentRoom: (state, action: PayloadAction<ICurrentRoom>) => {
+      state.currentRoom.roomId = action.payload.roomId;
+      state.currentRoom.sid = action.payload.sid;
+      if (action.payload.metadata) {
+        state.currentRoom.metadata = action.payload.metadata;
+      }
+    },
+    updateScreenSharing: (state, action: PayloadAction<IScreenSharing>) => {
+      state.screenSharing = action.payload;
+    },
+    setWebcamPaginating: (state, action: PayloadAction<boolean>) => {
+      state.isWebcamPaginating = action.payload;
+    },
+    updateCurrentUserMetadata: (state, action: PayloadAction<ICurrentUserMetadata>) => {
+      if (state.currentUser) {
+        state.currentUser.metadata = action.payload;
+      }
+    },
+    updateCurrentRoomMetadata: (state, action: PayloadAction<IRoomMetadata>) => {
+      if (state.currentRoom) {
+        state.currentRoom.metadata = action.payload;
+        state.isActiveRtmpBroadcasting = action.payload.isActiveRtmp ?? false;
+        state.isActiveRecording = action.payload.isRecording ?? false;
+      }
+    },
+    updateTotalVideoSubscribers: (state, action: PayloadAction<number>) => {
+      state.totalVideoSubscribers = action.payload;
+    },
+    updateTotalAudioSubscribers: (state, action: PayloadAction<number>) => {
+      state.totalAudioSubscribers = action.payload;
+    },
+    updateUserDeviceType: (state, action: PayloadAction<UserDeviceType>) => {
+      state.userDeviceType = action.payload;
+    },
+    updateIsCloud: (state, action: PayloadAction<boolean>) => {
+      state.isCloud = action.payload;
+    },
+    updateClientType: (state, action: PayloadAction<ClientType>) => {
+      state.clientType = action.payload;
+    },
+    updateOverallConnectionQuality: (state, action: PayloadAction<PnmConnectionQuality>) => {
+      state.overallConnectionQuality = action.payload;
+    },
+  },
+});
+
+export const {
+  addToken,
+  addServerVersion,
+  toggleStartup,
+  addCurrentUser,
+  addCurrentRoom,
+  updateScreenSharing,
+  setWebcamPaginating,
+  updateCurrentUserMetadata,
+  updateCurrentRoomMetadata,
+  updateTotalVideoSubscribers,
+  updateTotalAudioSubscribers,
+  updateUserDeviceType,
+  updateIsCloud,
+  updateClientType,
+  updateOverallConnectionQuality,
+} = sessionSlice.actions;
+
+export default sessionSlice.reducer;

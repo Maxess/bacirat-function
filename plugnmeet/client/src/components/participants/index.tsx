@@ -1,0 +1,191 @@
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import useVirtual from 'react-cool-virtual';
+
+import ParticipantComponent from './participant';
+import RemoveParticipantAlertModal, {
+  IRemoveParticipantAlertModalData,
+} from './removeParticipantAlertModal';
+import RandomPickerModal from './randomPickerModal';
+import { SearchIconSVG } from '../../assets/Icons/SearchIconSVG';
+import { CloseIconSVG } from '../../assets/Icons/CloseIconSVG';
+import { ShuffleIconSVG } from '../../assets/Icons/ShuffleIconSVG';
+
+import { store, useAppDispatch, useAppSelector } from '../../store';
+import { selectVisibleParticipants } from '../../store/slices/participantSlice';
+import { setActiveSidePanel } from '../../store/slices/bottomIconsActivitySlice';
+
+const ParticipantsComponent = () => {
+  const { t } = useTranslation();
+  const dispatch = useAppDispatch();
+  const [searchParticipant, setSearchParticipant] = useState<string>('');
+  const [removeParticipantData, setRemoveParticipantData] =
+    useState<IRemoveParticipantAlertModalData>();
+  const [showRandomPicker, setShowRandomPicker] = useState<boolean>(false);
+  const [highlightedUserId, setHighlightedUserId] = useState<string>();
+
+  const { currentUser, currentIsAdmin, currentUserUserId, allowViewOtherUsers } = useMemo(() => {
+    const session = store.getState().session;
+    const currentUser = session.currentUser;
+    return {
+      currentUser,
+      currentIsAdmin: !!currentUser?.metadata?.isAdmin,
+      currentUserUserId: currentUser?.userId,
+      allowViewOtherUsers: !!session.currentRoom.metadata?.roomFeatures?.allowViewOtherUsersList,
+    };
+  }, []);
+
+  const participants = useAppSelector((state) =>
+    selectVisibleParticipants(
+      state,
+      currentIsAdmin,
+      searchParticipant,
+      allowViewOtherUsers,
+      currentUserUserId,
+    ),
+  );
+
+  const { outerRef, innerRef, items } = useVirtual({
+    itemCount: participants.length,
+  });
+
+  const onOpenRemoveParticipantAlert = useCallback(
+    (name: string, user_id: string, type: string) => {
+      setRemoveParticipantData({
+        name,
+        userId: user_id,
+        removeType: type,
+      });
+    },
+    [],
+  );
+
+  const onCloseAlertModal = () => {
+    setRemoveParticipantData(undefined);
+  };
+
+  const closePanel = () => {
+    dispatch(setActiveSidePanel(null));
+  };
+
+  const closeRandomPicker = useCallback(() => {
+    setShowRandomPicker(false);
+    setHighlightedUserId(undefined);
+  }, []);
+
+  const closeBtnRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      closeBtnRef.current?.focus();
+    }, 350);
+    return () => clearTimeout(timer);
+  }, []);
+
+  const renderParticipant = useCallback(
+    (index: number) => {
+      if (!participants.length || typeof participants[index] === 'undefined') {
+        return null;
+      }
+      const participant = participants[index];
+      const isRemoteParticipant = currentUser?.userId !== participant.userId;
+
+      return (
+        <ParticipantComponent
+          key={participant.userId}
+          participant={participant}
+          isRemoteParticipant={isRemoteParticipant}
+          isHighlighted={participant.userId === highlightedUserId}
+          openRemoveParticipantAlert={onOpenRemoveParticipantAlert}
+          currentUser={currentUser}
+        />
+      );
+    },
+    [participants, currentUser, highlightedUserId, onOpenRemoveParticipantAlert],
+  );
+
+  return (
+    <div className="side-panel-bg-color relative z-10 w-full bg-Gray-25 dark:bg-dark-primary border-s border-Gray-200 dark:border-Gray-800 h-full">
+      <button
+        ref={closeBtnRef}
+        type="button"
+        aria-label={t('close').toString()}
+        className="absolute z-50 end-3 3xl:end-5 top-0 h-10 inline-flex items-center justify-center text-Gray-600 dark:text-white cursor-pointer focus-ring"
+        onClick={closePanel}
+      >
+        <CloseIconSVG />
+      </button>
+      <div className="inner-wrapper relative z-20 w-full">
+        <div className="top flex items-center h-10 px-3 3xl:px-5">
+          <p className="min-w-0 truncate text-sm text-Gray-950 dark:text-white font-medium leading-tight">
+            {t('left-panel.participants', {
+              total: participants.length,
+            })}
+          </p>
+          {currentIsAdmin && (
+            <button
+              type="button"
+              aria-label={t('left-panel.picker.open').toString()}
+              title={t('left-panel.picker.open').toString()}
+              className="shrink-0 ms-auto me-7 inline-flex items-center justify-center w-7 h-7 rounded-lg text-Gray-600 dark:text-white hover:bg-Gray-100 dark:hover:bg-Gray-800 transition-colors duration-200 cursor-pointer focus-ring"
+              onClick={() => setShowRandomPicker(true)}
+            >
+              <ShuffleIconSVG />
+            </button>
+          )}
+        </div>
+        <div className="search-participants-wrap h-[55px] flex items-center px-3 3xl:px-5 border-y border-Gray-200 dark:border-Gray-800">
+          <div className="w-full relative">
+            <div className="search-icon text-Gray-600 dark:text-white absolute top-1/2 -translate-y-1/2 start-3 3xl:start-4 pointer-events-none">
+              <SearchIconSVG />
+            </div>
+            <input
+              dir="auto"
+              type="text"
+              name="search-participants"
+              id="search-participants"
+              placeholder={t('left-panel.search-participant')}
+              className="text-Gray-950 dark:text-white placeholder:text-Gray-600 dark:placeholder:text-white h-9 rounded-lg 3xl:rounded-[15px] bg-white dark:bg-dark-primary border border-Gray-200 dark:border-Gray-800 w-full ps-8 3xl:ps-10 outline-hidden focus-ring text-xs 3xl:text-sm"
+              onChange={(e) => setSearchParticipant(e.target.value)}
+            />
+          </div>
+        </div>
+
+        <div ref={outerRef as any} className="scrollBar overflow-auto h-[calc(100vh-240px)]">
+          <ul
+            className="all-participants-wrap px-2 xl:px-3 3xl:px-5 list-none"
+            ref={innerRef as any}
+          >
+            {items.map(({ index, measureRef }) => (
+              <li
+                key={index}
+                ref={measureRef}
+                className="w-full list-none min-h-[40px] 3xl:min-h-[60px] py-1 flex items-center"
+              >
+                {renderParticipant(index)}
+              </li>
+            ))}
+          </ul>
+        </div>
+      </div>
+
+      {removeParticipantData && (
+        <RemoveParticipantAlertModal
+          name={removeParticipantData.name}
+          userId={removeParticipantData.userId}
+          removeType={removeParticipantData.removeType}
+          closeAlertModal={onCloseAlertModal}
+        />
+      )}
+
+      {currentIsAdmin && showRandomPicker && (
+        <RandomPickerModal
+          excludeUserId={currentUserUserId}
+          onResult={setHighlightedUserId}
+          onClose={closeRandomPicker}
+        />
+      )}
+    </div>
+  );
+};
+
+export default ParticipantsComponent;

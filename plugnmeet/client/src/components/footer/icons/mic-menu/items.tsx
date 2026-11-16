@@ -1,0 +1,174 @@
+import React, { useCallback } from 'react';
+import { MenuItem, MenuItems } from '@headlessui/react';
+import { Room, Track } from 'livekit-client';
+import { useTranslation } from 'react-i18next';
+import { NativeMediaSource } from 'plugnmeet-protocol-js';
+
+import { useAppDispatch, useAppSelector } from '../../../../store';
+import { updateSelectedAudioDevice } from '../../../../store/slices/roomSettingsSlice';
+import {
+  updateIsActiveMicrophone,
+  updateIsMicMuted,
+  updateShowMicrophoneModal,
+} from '../../../../store/slices/bottomIconsActivitySlice';
+import { isHybridMode } from '../../../../helpers/nativeBridge';
+import {
+  unpublishNativeMedia,
+  muteNativeMedia,
+  unmuteNativeMedia,
+} from '../../../../helpers/nativeBridge';
+import { CheckMarkIcon } from '../../../../assets/Icons/CheckMarkIcon';
+import { Microphone } from '../../../../assets/Icons/Microphone';
+import { MicrophoneOff } from '../../../../assets/Icons/MicrophoneOff';
+
+interface IMicMenuItemsProps {
+  currentRoom: Room;
+  hybrid?: boolean;
+  isLocked?: boolean;
+}
+
+const MicMenuItems = ({ currentRoom, hybrid, isLocked }: IMicMenuItemsProps) => {
+  const dispatch = useAppDispatch();
+  const { t } = useTranslation();
+
+  const audioDevices = useAppSelector((state) => state.roomSettings.audioDevices);
+  const isMicMuted = useAppSelector((state) => state.bottomIconsActivity.isMicMuted);
+  const selectedAudioDevice = useAppSelector((state) => state.roomSettings.selectedAudioDevice);
+  const isHybrid = hybrid ?? isHybridMode();
+
+  const handleDeviceChange = useCallback(
+    async (deviceId: string) => {
+      await currentRoom.switchActiveDevice('audioinput', deviceId);
+      dispatch(updateSelectedAudioDevice(deviceId));
+    },
+    [currentRoom, dispatch],
+  );
+
+  const muteUnmuteMic = useCallback(async () => {
+    if (isLocked) return;
+    if (isHybrid) {
+      if (isMicMuted) {
+        unmuteNativeMedia(NativeMediaSource.MIC);
+      } else {
+        muteNativeMedia(NativeMediaSource.MIC);
+      }
+      return;
+    }
+    // existing non-hybrid logic...
+    if (!currentRoom) return;
+    const publication = currentRoom.localParticipant.getTrackPublication(Track.Source.Microphone);
+    if (publication && publication.track) {
+      if (publication.isMuted) {
+        await currentRoom.localParticipant.setMicrophoneEnabled(true);
+      } else {
+        await currentRoom.localParticipant.setMicrophoneEnabled(false);
+      }
+    }
+  }, [isHybrid, isMicMuted, currentRoom, isLocked]);
+
+  const leaveMic = useCallback(async () => {
+    if (isLocked) return;
+    if (isHybrid) {
+      unpublishNativeMedia(NativeMediaSource.MIC);
+      return;
+    }
+    // existing non-hybrid logic...
+    if (!currentRoom) return;
+    const publication = currentRoom.localParticipant.getTrackPublication(Track.Source.Microphone);
+    if (publication && publication.track) {
+      await currentRoom.localParticipant.unpublishTrack(publication.track, true);
+    }
+    dispatch(updateIsActiveMicrophone(false));
+    dispatch(updateIsMicMuted(false));
+    dispatch(updateSelectedAudioDevice(''));
+  }, [isHybrid, currentRoom, dispatch, isLocked]);
+
+  return (
+    <MenuItems
+      unmount={false}
+      anchor="top end"
+      transition
+      className="menu z-10 border border-Gray-100 dark:border-Gray-700 bg-white dark:bg-dark-primary shadow-lg rounded-2xl p-2 w-max focus:outline-hidden [--anchor-gap:8px] transition ease-out data-[closed]:scale-95 data-[closed]:opacity-0 data-[enter]:duration-200 data-[leave]:duration-150"
+    >
+      {!isHybrid && (
+        <>
+          <div className="title h-8 w-full flex items-center text-xs leading-none text-Gray-700 dark:text-dark-text px-2 uppercase">
+            {t('footer.icons.select-microphone')}
+          </div>
+          <div className="max-h-56 overflow-auto scrollBar">
+            {audioDevices.map((device) => (
+              <MenuItem key={device.id}>
+                {() => (
+                  <button
+                    type="button"
+                    title={device.label}
+                    className={`${
+                      selectedAudioDevice === device.id ? 'bg-Gray-50 dark:bg-dark-secondary2' : ''
+                    } h-8 w-full flex items-center justify-between text-sm gap-2 leading-none font-medium text-Gray-950 dark:text-white px-2 rounded-lg transition-all duration-300 hover:bg-Gray-50 dark:hover:bg-dark-secondary2 data-[focus]:bg-Gray-50 dark:data-[focus]:bg-dark-secondary2 focus-ring cursor-pointer`}
+                    onClick={() => handleDeviceChange(device.id)}
+                  >
+                    <span dir="ltr" className="max-w-56 truncate">
+                      {device.label}
+                    </span>
+                    {selectedAudioDevice === device.id ? <CheckMarkIcon /> : ''}
+                  </button>
+                )}
+              </MenuItem>
+            ))}
+          </div>
+          <MenuItem disabled={isLocked}>
+            {() => (
+              <button
+                type="button"
+                className="h-8 w-full flex items-center text-sm gap-2 leading-none font-medium text-Gray-950 dark:text-white px-2 rounded-lg transition-all duration-300 hover:bg-Gray-50 dark:hover:bg-dark-secondary2 data-[focus]:bg-Gray-50 dark:data-[focus]:bg-dark-secondary2 focus-ring cursor-pointer"
+                onClick={() => dispatch(updateShowMicrophoneModal(true))}
+              >
+                {t('footer.modal.change-microphone')}
+              </button>
+            )}
+          </MenuItem>
+          <div className="divider h-1 w-[110%] bg-Gray-50 dark:bg-Gray-700 -ms-3 my-1"></div>
+        </>
+      )}
+      <div className="" role="none">
+        <MenuItem disabled={isLocked}>
+          {() => (
+            <button
+              type="button"
+              className="h-8 w-full flex items-center text-sm gap-2 leading-none font-medium text-red-700 px-2 rounded-lg transition-all duration-300 hover:bg-Red-600 hover:text-white data-[focus]:bg-Red-600 data-[focus]:text-white focus-ring cursor-pointer"
+              onClick={muteUnmuteMic}
+            >
+              {isMicMuted ? (
+                <>
+                  <Microphone classes={'h-4 w-auto'} />
+                  {t('footer.menus.unmute-microphone')}
+                </>
+              ) : (
+                <>
+                  <MicrophoneOff classes={'h-4 w-auto'} />
+                  {t('footer.menus.mute-microphone')}
+                </>
+              )}
+            </button>
+          )}
+        </MenuItem>
+      </div>
+      <div className="" role="none">
+        <MenuItem disabled={isLocked}>
+          {() => (
+            <button
+              type="button"
+              className="group h-8 w-full flex items-center text-sm gap-2 leading-none font-medium px-2 rounded-lg transition-all duration-300 hover:bg-Red-600 hover:text-white data-[focus]:bg-Red-600 data-[focus]:text-white text-red-700 focus-ring cursor-pointer"
+              onClick={leaveMic}
+            >
+              <i className="pnm-logout text-base transition ease-in" />
+              {t('footer.menus.leave-microphone')}
+            </button>
+          )}
+        </MenuItem>
+      </div>
+    </MenuItems>
+  );
+};
+
+export default MicMenuItems;

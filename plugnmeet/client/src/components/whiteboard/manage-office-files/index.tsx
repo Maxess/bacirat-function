@@ -1,0 +1,232 @@
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Button, Dialog, DialogPanel, DialogTitle } from '@headlessui/react';
+import type { ExcalidrawImperativeAPI } from '@excalidraw/excalidraw/types';
+import { debounce } from 'es-toolkit';
+import { useTranslation } from 'react-i18next';
+
+import { PopupCloseSVGIcon } from '../../../assets/Icons/PopupCloseSVGIcon';
+import { updateCurrentWhiteboardOfficeFileId } from '../../../store/slices/whiteboard';
+import { addUserNotification } from '../../../store/slices/roomSettingsSlice';
+import { store, useAppDispatch } from '../../../store';
+import FileUploadProgress from './fileUploadProgress';
+import UploadedFilesList from './uploadedFilesList';
+import { IWhiteboardOfficeFile } from '../../../store/slices/interfaces/whiteboard';
+import { getWhiteboardController, loadWhiteboardLastPage } from '../collab';
+import { broadcastCurrentFileId } from '../helpers/handleRequests';
+import { RefreshIcon } from '../../../assets/Icons/RefreshIcon';
+
+interface ManageOfficeFilesModalProps {
+  roomId: string;
+  excalidrawAPI: ExcalidrawImperativeAPI;
+  isOpen: boolean;
+  onClose: () => void;
+  showSwitchingWarning: () => boolean;
+}
+
+const ManageOfficeFilesModal = ({
+  roomId,
+  excalidrawAPI,
+  isOpen,
+  onClose,
+  showSwitchingWarning,
+}: ManageOfficeFilesModalProps) => {
+  const { t } = useTranslation();
+  const dispatch = useAppDispatch();
+  const [refresh, setRefresh] = useState(0);
+  // A file switch waits for the presenter's save; ignore repeats meanwhile.
+  const isFlushingRef = useRef(false);
+
+  const { allowedFileTypes, maxAllowedFileSize, officeFileTypes } = useMemo(() => {
+    const maxAllowedFileSize =
+      store.getState().session.currentRoom.metadata?.roomFeatures?.whiteboardFeatures
+        ?.maxAllowedFileSize ?? '30';
+    // oxfmt-ignore
+    const allowedFileTypes: string[] = ['pdf', 'docx', 'doc', 'odt', 'txt', 'rtf', 'xml', 'xlsx', 'xls', 'ods', 'csv', 'pptx', 'ppt', 'odp', 'vsd', 'odg', 'html'];
+    const officeFileTypes = allowedFileTypes.map((ext) => '.' + ext).join(',');
+    return {
+      maxAllowedFileSize,
+      allowedFileTypes,
+      officeFileTypes,
+    };
+  }, []);
+
+  const inputFile = useRef<HTMLInputElement>(null);
+  const [fileToUpload, setFileToUpload] = useState<File | undefined>(undefined);
+  const [selectedOfficeFile, setSelectedOfficeFile] = useState<IWhiteboardOfficeFile | undefined>(
+    undefined,
+  );
+  const [disableUploading, setDisableUploading] = useState<boolean>(false);
+
+  const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const selectedFiles = e.target.files ? Array.from(e.target.files) : [];
+    if (selectedFiles.length) {
+      setFileToUpload(selectedFiles[0]);
+    }
+  }, []);
+
+  const onUploadFinished = useCallback(() => {
+    if (inputFile.current) {
+      inputFile.current.value = '';
+    }
+    setFileToUpload(undefined);
+  }, []);
+
+  useEffect(() => {
+    if (isOpen) {
+      setRefresh(Date.now());
+    }
+  }, [isOpen]);
+
+  const debouncedAddToWhiteboard = useMemo(
+    () =>
+      debounce(async (officeFile: IWhiteboardOfficeFile) => {
+        if (!excalidrawAPI || isFlushingRef.current) {
+          return;
+        }
+        // save current file information
+        const { currentWhiteboardOfficeFileId } = store.getState().whiteboard;
+        if (currentWhiteboardOfficeFileId === officeFile.fileId) {
+          // same file selected, nothing to do
+          onClose();
+          return;
+        }
+
+        isFlushingRef.current = true;
+        try {
+          // Flush the current page to the server before switching files.
+          const saved = await getWhiteboardController().flushBeforeSwitch();
+          if (!saved) {
+            dispatch(
+              addUserNotification({
+                message: t('whiteboard.save-pending-warning'),
+                typeOption: 'warning',
+              }),
+            );
+          }
+          const lastPage = await loadWhiteboardLastPage(officeFile.fileId);
+          const page = lastPage ?? 1;
+          // Switch locally first so the new file is live here before peers react.
+          dispatch(
+            updateCurrentWhiteboardOfficeFileId({
+              fileId: officeFile.fileId,
+              page,
+            }),
+          );
+          await broadcastCurrentFileId(officeFile.fileId, page);
+          onClose();
+        } finally {
+          isFlushingRef.current = false;
+        }
+      }, 300),
+    // oxlint-disable-next-line react/memo-dependencies
+    [excalidrawAPI, dispatch, onClose, t],
+  );
+
+  return (
+    <Dialog
+      open={isOpen}
+      as="div"
+      className="relative z-10 focus:outline-hidden"
+      unmount={false}
+      onClose={() => false}
+    >
+      <div className="excalidrawUploadFiles fixed inset-0 w-screen overflow-y-auto z-10 bg-Gray-950/70 dark:bg-Gray-950/80">
+        <div className="flex min-h-full items-center justify-center py-4">
+          <DialogPanel
+            transition
+            className="w-full max-w-lg bg-white dark:bg-dark-primary border border-Gray-200 dark:border-Gray-800 shadow-virtual-pOP rounded-xl overflow-hidden duration-300 ease-out data-closed:transform-[scale(95%)] data-closed:opacity-0"
+          >
+            <DialogTitle
+              as="h3"
+              className="flex items-center justify-between text-base font-semibold leading-7 text-Gray-950 dark:text-white px-4 py-2 border-b border-Gray-100 dark:border-Gray-800"
+            >
+              <div className="flex items-center gap-2">
+                {t('whiteboard.upload-files-title')}
+                <button
+                  type="button"
+                  className="cursor-pointer focus-ring"
+                  onClick={() => setRefresh(Date.now())}
+                >
+                  <RefreshIcon />
+                </button>
+              </div>
+              <Button className="cursor-pointer" onClick={() => onClose()}>
+                <PopupCloseSVGIcon classes="text-Gray-600 dark:text-white" />
+              </Button>
+            </DialogTitle>
+            <div className="wrap p-4 bg-Gray-25 dark:bg-dark-primary">
+              <div className="input-wrap relative rounded-xl border border-dashed border-Gray-200 dark:border-Gray-800 py-8 px-6 cursor-pointer">
+                <input
+                  type="file"
+                  multiple={false}
+                  disabled={disableUploading}
+                  ref={inputFile}
+                  onChange={handleFileChange}
+                  accept={officeFileTypes}
+                  className="w-full h-full absolute top-0 left-0 opacity-0 cursor-pointer"
+                />
+                <div className="text-wrap text-sm font-medium text-center cursor-pointer">
+                  <p className="text-[12px] text-Gray-700 dark:text-white font-semibold pb-1">
+                    {t('whiteboard.drag-drop-file')}
+                  </p>
+                  <p className="text-Gray-950 dark:text-dark-text">
+                    {t('whiteboard.max-file-size', {
+                      size: maxAllowedFileSize,
+                    })}
+                  </p>
+                  <div className="divider flex justify-center items-center gap-3 py-3">
+                    <span className="line inline-block h-[1px] w-20 bg-Gray-200 dark:bg-Gray-700"></span>
+                    <span className="text-Gray-600 dark:text-dark-text">{t('whiteboard.or')}</span>
+                    <span className="line inline-block h-[1px] w-20 bg-Gray-200 dark:bg-Gray-700"></span>
+                  </div>
+                  <button className="h-9 w-auto m-auto px-4 flex items-center justify-center rounded-xl text-sm font-medium 3xl:font-semibold text-Gray-950 dark:text-white bg-Gray-25 dark:bg-dark-secondary2 border border-Gray-300 dark:border-Gray-700 transition-all duration-300 hover:bg-Gray-50 shadow-button-shadow dark:shadow-none cursor-pointer">
+                    <i className="pnm-attachment text-[14px] ltr:mr-1 rtl:ml-1" />
+                    {t('whiteboard.select-file')}
+                  </button>
+                </div>
+              </div>
+              <div className="file-preview-list grid gap-2 pt-4">
+                {
+                  <FileUploadProgress
+                    excalidrawAPI={excalidrawAPI}
+                    allowedFileTypes={allowedFileTypes}
+                    maxAllowedFileSize={maxAllowedFileSize}
+                    file={fileToUpload}
+                    setDisableUploading={setDisableUploading}
+                    onUploadFinished={onUploadFinished}
+                  />
+                }
+                <UploadedFilesList
+                  roomId={roomId}
+                  onSelectOfficeFile={setSelectedOfficeFile}
+                  selectedOfficeFile={selectedOfficeFile}
+                  refresh={refresh}
+                />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-3 px-4 py-4 border-t border-Gray-100 dark:border-Gray-800">
+              <button
+                className="secondary-button h-9 w-full flex items-center justify-center rounded-xl text-sm font-medium 3xl:font-semibold text-Gray-950 bg-Gray-25 border border-Gray-300 transition-all duration-300 hover:bg-Gray-50 shadow-button-shadow cursor-pointer"
+                onClick={() => onClose()}
+              >
+                {t('close')}
+              </button>
+              <button
+                className="primary-button h-9 w-full flex items-center justify-center rounded-xl text-sm font-medium 3xl:font-semibold text-white bg-Blue2-500 border border-Blue2-600 transition-all duration-300 hover:bg-Blue2-600  shadow-button-shadow cursor-pointer"
+                onClick={() => {
+                  if (!showSwitchingWarning() && selectedOfficeFile)
+                    debouncedAddToWhiteboard(selectedOfficeFile);
+                }}
+                disabled={selectedOfficeFile === undefined || disableUploading}
+              >
+                {t('whiteboard.add-to-whiteboard')}
+              </button>
+            </div>
+          </DialogPanel>
+        </div>
+      </div>
+    </Dialog>
+  );
+};
+
+export default React.memo(ManageOfficeFilesModal);

@@ -1,0 +1,900 @@
+import type { BinaryFileData, ExcalidrawImperativeAPI } from '@excalidraw/excalidraw/types';
+import type {
+  ExcalidrawImageElement,
+  OrderedExcalidrawElement,
+} from '@excalidraw/excalidraw/element/types';
+import { getConfigValue, randomString } from '../../../helpers/utils';
+import {
+  GetRoomUploadedFilesReqSchema,
+  GetRoomUploadedFilesResSchema,
+  RoomUploadedFileType,
+} from 'plugnmeet-protocol-js';
+import { create, fromBinary, toBinary } from '@bufbuild/protobuf';
+import sendAPIRequest from '../../../helpers/api/plugNmeetAPI';
+import { store } from '../../../store';
+import { uploadResumableFile } from '../../../helpers/fileUpload';
+import {
+  IWhiteboardFile,
+  IWhiteboardOfficeFile,
+  WhiteboardFileConversionRes,
+  WhiteboardOfficePageMeta,
+} from '../../../store/slices/interfaces/whiteboard';
+import { DB_STORE_NAMES, idbGet, idbStore } from '../../../helpers/libs/idb';
+import { addWhiteboardUploadedOfficeFile } from '../../../store/slices/whiteboard';
+import { convertToExcalidrawElements, newElementWith } from '@excalidraw/excalidraw';
+import {
+  DEFAULT_A4_MARGIN,
+  DEFAULT_PAGE_ORIENTATION,
+  PageOrientation,
+  VIRTUAL_WORKSPACE_WIDTH,
+  VIRTUAL_WORKSPACE_HEIGHT,
+} from '../export-pdf/types';
+import { getPageSize, pageSizeFromMetaPixels, resolvePageOrientation } from '../export-pdf/utils';
+
+export interface FileReaderResult {
+  image: BinaryFileData;
+  elms: OrderedExcalidrawElement[];
+}
+
+export interface ImageCustomData {
+  fileUrl: string;
+  isOfficeFile: boolean;
+  uploaderWhiteboardHeight?: number;
+  uploaderWhiteboardWidth?: number;
+  pageOrientation?: PageOrientation;
+  /** Exact logical page size stamped when the image was placed (from page_N_meta.json). */
+  pageWidth?: number;
+  pageHeight?: number;
+}
+
+/** Exact page info for an office page (orientation + logical size). */
+export interface OfficePageInfo {
+  orientation: PageOrientation;
+  pageWidth: number;
+  pageHeight: number;
+}
+
+const processedImageElements: Map<string, string> = new Map();
+const uploadPromises: Map<string, Promise<void>> = new Map();
+const imageDataCache: Map<string, BinaryFileData> = new Map();
+const memoryImageCache: Map<string, string> = new Map();
+const inFlightImageFetches: Map<string, Promise<string | null>> = new Map();
+/** Data URL -> already decoded `<img>` (what Excalidraw's image cache stores). */
+const decodedHtmlImageCache: Map<string, HTMLImageElement> = new Map();
+const inFlightHtmlImageDecodes: Map<string, Promise<HTMLImageElement | null>> = new Map();
+
+export const createAndRegisterOfficeFile = (
+  whiteboardFileConversionRes: WhiteboardFileConversionRes,
+  uploaderWhiteboardHeight = VIRTUAL_WORKSPACE_HEIGHT,
+  uploaderWhiteboardWidth = VIRTUAL_WORKSPACE_WIDTH,
+) => {
+  const files: Array<IWhiteboardFile> = [];
+
+  for (let i = 0; i < whiteboardFileConversionRes.totalPages; i++) {
+    const pageNum = i + 1;
+    const fileName = `page_${pageNum}.png`;
+    const metaFileName = `page_${pageNum}_meta.json`;
+    files.push({
+      id: randomString(),
+      currentPage: pageNum,
+      filePath: `${whiteboardFileConversionRes.filePath}/${fileName}`,
+      fileName,
+      // Orientation always comes from this sidecar at page open time.
+      metaFilePath: `${whiteboardFileConversionRes.filePath}/${metaFileName}`,
+      uploaderWhiteboardHeight,
+      uploaderWhiteboardWidth,
+      isOfficeFile: true,
+    });
+  }
+
+  const newFile: IWhiteboardOfficeFile = {
+    fileId: whiteboardFileConversionRes.fileId,
+    fileName: whiteboardFileConversionRes.fileName,
+    filePath: whiteboardFileConversionRes.filePath,
+    totalPages: whiteboardFileConversionRes.totalPages,
+    pageFiles: JSON.stringify(files),
+  };
+
+  store.dispatch(addWhiteboardUploadedOfficeFile(newFile));
+  return newFile;
+};
+
+/**
+ * Registers the room's converted whiteboard files missing from the local store;
+ * the server record carries the authoritative `totalPages`.
+ */
+export const registerRoomWhiteboardFiles = async (roomId: string) => {
+  const body = create(GetRoomUploadedFilesReqSchema, {
+    roomId,
+    fileType: RoomUploadedFileType.WHITEBOARD_CONVERTED_FILE,
+  });
+  const r = await sendAPIRequest(
+    'getRoomFilesByType',
+    toBinary(GetRoomUploadedFilesReqSchema, body),
+    false,
+    'application/protobuf',
+    'arraybuffer',
+  );
+  const res = fromBinary(GetRoomUploadedFilesResSchema, new Uint8Array(r));
+  if (!res.status || !res.files) {
+    return;
+  }
+
+  // Page orientation is always loaded from page_N_meta.json on page open.
+  const known = store.getState().whiteboard.whiteboardUploadedOfficeFiles;
+  res.files.forEach((file) => {
+    const exist = known.find((f) => f.fileId === file.fileId);
+    if (!exist) {
+      createAndRegisterOfficeFile({
+        msg: '',
+        status: true,
+        fileId: file.fileId,
+        fileName: file.fileName,
+        filePath: file.filePath,
+        totalPages: file.totalPages ?? 0,
+      });
+    }
+  });
+};
+
+const getDownloadBaseUrl = () =>
+  getConfigValue<string>('serverUrl', 'http://localhost:8080', 'PLUG_N_MEET_SERVER_URL') +
+  '/download/uploadedFile/';
+
+/** page_1.png path/url -> page_1_meta.json */
+export const toOfficePageMetaPath = (imagePathOrUrl: string): string => {
+  return imagePathOrUrl.replace(/\.png(\?.*)?$/i, '_meta.json$1');
+};
+
+/** Loads page_N_meta.json written beside converted page images (IDB-cached). */
+export const fetchOfficePageMeta = async (
+  metaFilePathOrUrl: string,
+): Promise<WhiteboardOfficePageMeta | null> => {
+  const url = metaFilePathOrUrl.startsWith('http')
+    ? metaFilePathOrUrl
+    : getDownloadBaseUrl() + metaFilePathOrUrl;
+
+  // 1. Check IDB cache first (same pattern as fetchAndCacheImage).
+  const cached = await idbGet<WhiteboardOfficePageMeta>(DB_STORE_NAMES.OFFICE_PAGE_META_CACHE, url);
+  if (cached?.orientation) {
+    return {
+      ...cached,
+      orientation: resolvePageOrientation(cached.orientation),
+    };
+  }
+
+  let meta: WhiteboardOfficePageMeta | null = null;
+  try {
+    // 2. If not cached, fetch from the network.
+    const res = await fetch(url);
+    if (!res.ok) {
+      return null;
+    }
+    const raw = (await res.json()) as WhiteboardOfficePageMeta;
+    if (!raw?.orientation) {
+      return null;
+    }
+    meta = {
+      ...raw,
+      orientation: resolvePageOrientation(raw.orientation),
+    };
+  } catch (e) {
+    console.warn('Failed to fetch office page meta', e);
+  } finally {
+    // 3. Cache successful fetches for later page opens / preload.
+    if (meta) {
+      await idbStore(DB_STORE_NAMES.OFFICE_PAGE_META_CACHE, url, meta);
+    }
+  }
+
+  return meta;
+};
+
+const getBoundaryMetrics = (
+  orientation: PageOrientation,
+  pageWidth?: number,
+  pageHeight?: number,
+) => {
+  const size =
+    pageWidth && pageHeight ? { width: pageWidth, height: pageHeight } : getPageSize(orientation);
+  const width = size.width - DEFAULT_A4_MARGIN;
+  const height = size.height - DEFAULT_A4_MARGIN;
+  return {
+    width,
+    height,
+    startX: (VIRTUAL_WORKSPACE_WIDTH - width) / 2,
+    startY: (VIRTUAL_WORKSPACE_HEIGHT - height) / 2,
+  };
+};
+
+const parsePageFiles = (pageFilesJson?: string | null): IWhiteboardFile[] => {
+  if (!pageFilesJson) {
+    return [];
+  }
+  try {
+    const pages = JSON.parse(pageFilesJson) as IWhiteboardFile[];
+    return Array.isArray(pages) ? pages : [];
+  } catch {
+    return [];
+  }
+};
+
+const defaultOfficePageInfo = (): OfficePageInfo => {
+  const size = getPageSize(DEFAULT_PAGE_ORIENTATION);
+  return {
+    orientation: DEFAULT_PAGE_ORIENTATION,
+    pageWidth: size.width,
+    pageHeight: size.height,
+  };
+};
+
+/**
+ * Loads the page's meta for its exact frame size; A4 long side + real aspect
+ * ratio, falling back to portrait A4 if the meta cannot be fetched.
+ */
+export const resolveOfficePageInfo = async (
+  metaFilePath?: string,
+  imageFilePathOrUrl?: string,
+): Promise<OfficePageInfo> => {
+  const metaPath =
+    metaFilePath || (imageFilePathOrUrl ? toOfficePageMetaPath(imageFilePathOrUrl) : undefined);
+
+  if (!metaPath) {
+    return defaultOfficePageInfo();
+  }
+
+  const meta = await fetchOfficePageMeta(metaPath);
+  if (!meta) {
+    return defaultOfficePageInfo();
+  }
+
+  const orientation = resolvePageOrientation(meta.orientation);
+  const size = pageSizeFromMetaPixels(meta.width, meta.height) ?? getPageSize(orientation);
+
+  return {
+    orientation,
+    pageWidth: size.width,
+    pageHeight: size.height,
+  };
+};
+
+/**
+ * Decodes a data URL into an `HTMLImageElement` and keeps it for the session.
+ * Concurrent calls share one decode; environments without `Image` resolve null.
+ */
+export const preloadHtmlImage = (dataURL: string): Promise<HTMLImageElement | null> => {
+  const cached = decodedHtmlImageCache.get(dataURL);
+  if (cached) {
+    return Promise.resolve(cached);
+  }
+  const inFlight = inFlightHtmlImageDecodes.get(dataURL);
+  if (inFlight) {
+    return inFlight;
+  }
+  if (typeof Image === 'undefined') {
+    return Promise.resolve(null);
+  }
+
+  const promise = new Promise<HTMLImageElement | null>((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const finish = () => {
+        decodedHtmlImageCache.set(dataURL, img);
+        resolve(img);
+      };
+      if (typeof img.decode === 'function') {
+        img.decode().then(finish, finish);
+      } else {
+        finish();
+      }
+    };
+    img.onerror = () => resolve(null);
+    img.src = dataURL;
+  }).finally(() => {
+    inFlightHtmlImageDecodes.delete(dataURL);
+  });
+
+  inFlightHtmlImageDecodes.set(dataURL, promise);
+  return promise;
+};
+
+/** Internal Excalidraw image cache (`Map<FileId, {image, mimeType}>`). */
+type ExcalidrawImageCache = Map<string, { image: HTMLImageElement; mimeType: string }>;
+
+/**
+ * Resolves Excalidraw's internal `App.imageCache` (not public API, stable in 0.18)
+ * via the `selection`/`setViewport` back references; null if neither yields a `Map`.
+ */
+const getExcalidrawImageCache = (
+  excalidrawAPI: ExcalidrawImperativeAPI,
+): ExcalidrawImageCache | null => {
+  try {
+    const api = excalidrawAPI as unknown as {
+      selection?: { app?: { imageCache?: unknown } };
+      setViewport?: { app?: { imageCache?: unknown } };
+    };
+    const candidates = [api?.selection?.app?.imageCache, api?.setViewport?.app?.imageCache];
+    for (const candidate of candidates) {
+      if (candidate instanceof Map) {
+        return candidate as ExcalidrawImageCache;
+      }
+    }
+  } catch {
+    // Unknown internals are not an error: the caller falls back to `addFiles`.
+  }
+  return null;
+};
+
+/**
+ * Primes Excalidraw's image cache with pre-decoded bitmaps; must run *after*
+ * `addFiles`, which drops each new file's cache entry. Returns true when all
+ * files were primed — otherwise callers should let the public `addFiles` decode.
+ */
+export const primeExcalidrawImageCache = (
+  excalidrawAPI: ExcalidrawImperativeAPI,
+  files: readonly BinaryFileData[],
+): boolean => {
+  const cache = getExcalidrawImageCache(excalidrawAPI);
+  if (!cache) {
+    return false;
+  }
+  let primedAll = true;
+  for (const file of files) {
+    const decoded = decodedHtmlImageCache.get(file.dataURL);
+    if (decoded) {
+      cache.set(file.id, { image: decoded, mimeType: file.mimeType });
+    } else {
+      primedAll = false;
+    }
+  }
+  return primedAll;
+};
+
+/**
+ * Asks Excalidraw to (re)decode the on-canvas images on a microtask, so it lands
+ * right after the caller's `updateScene` and only uses the public `addFiles` API.
+ */
+const scheduleImageCacheFallback = (excalidrawAPI: ExcalidrawImperativeAPI): void => {
+  queueMicrotask(() => {
+    excalidrawAPI.addFiles([]);
+  });
+};
+
+/**
+ * Fetches an image URL, converts it to a base64 Data URL and caches it in memory.
+ * Resolves null when the fetch fails.
+ */
+export const fetchAndCacheImage = (url: string): Promise<string | null> => {
+  // Fast path: already fetched this session (avoids an async IDB roundtrip).
+  const inMemory = memoryImageCache.get(url);
+  if (inMemory) {
+    return Promise.resolve(inMemory);
+  }
+  // Coalesce concurrent requests for the same image.
+  const inFlight = inFlightImageFetches.get(url);
+  if (inFlight) {
+    return inFlight;
+  }
+
+  const fetchPromise = (async (): Promise<string | null> => {
+    // 1. Check if the image is already in the cache.
+    const cachedImage = await idbGet<string>(DB_STORE_NAMES.IMAGE_CACHE, url);
+    if (cachedImage) {
+      memoryImageCache.set(url, cachedImage);
+      void preloadHtmlImage(cachedImage);
+      return cachedImage;
+    }
+
+    let base64: string | null = null;
+    try {
+      // 2. If not cached, fetch the image from the network.
+      const res = await fetch(url);
+      if (!res.ok) {
+        console.error(`Failed to fetch file from ${url}: ${res.statusText}`);
+      } else {
+        // 3. Convert the response to a blob, then to a base64 Data URL.
+        const imageData = await res.blob();
+        base64 = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result as string);
+          reader.onerror = reject;
+          reader.readAsDataURL(imageData);
+        });
+      }
+    } catch (error) {
+      console.error(`Error fetching or processing file from ${url}:`, error);
+    } finally {
+      // 4. If the fetch was successful, store the base64 data in the cache.
+      if (base64) {
+        memoryImageCache.set(url, base64);
+        // Decode in the background: a later page switch primes Excalidraw's
+        // image cache with an already resolved `<img>`.
+        void preloadHtmlImage(base64);
+        await idbStore(DB_STORE_NAMES.IMAGE_CACHE, url, base64);
+      }
+    }
+    // 5. Return the result (either the base64 string or null if it failed).
+    return base64;
+  })();
+
+  inFlightImageFetches.set(url, fetchPromise);
+  const cleanup = () => {
+    inFlightImageFetches.delete(url);
+  };
+  fetchPromise.then(cleanup, cleanup);
+  return fetchPromise;
+};
+
+export const fetchFileWithElm = async (
+  url: string,
+  file_id: string,
+  is_office_file: boolean,
+  uploaderWhiteboardHeight?: number,
+  uploaderWhiteboardWidth?: number,
+  metaFilePath?: string,
+): Promise<FileReaderResult | null> => {
+  try {
+    // Office pages: always fetch page_N_meta.json (exact size; default portrait A4 if missing).
+    const pageInfoPromise = is_office_file
+      ? resolveOfficePageInfo(metaFilePath, url)
+      : Promise.resolve(defaultOfficePageInfo());
+
+    // Use the shared helper to get the image data from cache or network.
+    const [imgData, pageInfo] = await Promise.all([fetchAndCacheImage(url), pageInfoPromise]);
+
+    if (!imgData) {
+      // If fetching/caching failed, stop here.
+      return null;
+    }
+
+    const fileMimeType = imgData.substring('data:'.length, imgData.indexOf(';base64'));
+
+    if (
+      fileMimeType === 'image/png' ||
+      fileMimeType === 'image/jpeg' ||
+      fileMimeType === 'image/jpg'
+    ) {
+      // Decoding gives both the bitmap Excalidraw wants and its pixel size.
+      const image = await preloadHtmlImage(imgData);
+      if (!image) {
+        return null;
+      }
+
+      const boundary = getBoundaryMetrics(
+        pageInfo.orientation,
+        pageInfo.pageWidth,
+        pageInfo.pageHeight,
+      );
+
+      const { fileHeight, fileWidth } = getFileDimension(
+        image.naturalHeight || image.height,
+        image.naturalWidth || image.width,
+        boundary.width,
+        boundary.height,
+      );
+
+      const res = prepareForExcalidraw(
+        file_id,
+        url,
+        imgData,
+        fileMimeType,
+        fileHeight,
+        fileWidth,
+        is_office_file,
+        uploaderWhiteboardHeight,
+        uploaderWhiteboardWidth,
+        pageInfo,
+      );
+      imageDataCache.set(res.image.id, res.image);
+      return res;
+    } else if (fileMimeType === 'image/svg+xml') {
+      await preloadHtmlImage(imgData);
+
+      const boundary = getBoundaryMetrics(
+        pageInfo.orientation,
+        pageInfo.pageWidth,
+        pageInfo.pageHeight,
+      );
+      const fileWidth = boundary.width * 0.9;
+      const fileHeight = fileWidth * (boundary.height / boundary.width);
+
+      const res = prepareForExcalidraw(
+        file_id,
+        url,
+        imgData,
+        fileMimeType,
+        fileHeight,
+        fileWidth,
+        is_office_file,
+        uploaderWhiteboardHeight,
+        uploaderWhiteboardWidth,
+        pageInfo,
+      );
+      imageDataCache.set(res.image.id, res.image);
+      return res;
+    } else {
+      console.error('unsupported file type:', fileMimeType);
+      return null;
+    }
+  } catch (error) {
+    console.error('Error fetching or processing file:', error);
+    return null;
+  }
+};
+
+const prepareForExcalidraw = (
+  fileId: string,
+  fileUrl: string,
+  imgData: string,
+  fileMimeType: string,
+  fileHeight: number,
+  fileWidth: number,
+  isOfficeFile: boolean,
+  uploaderWhiteboardHeight?: number,
+  uploaderWhiteboardWidth?: number,
+  pageInfo: OfficePageInfo = defaultOfficePageInfo(),
+): FileReaderResult => {
+  const image: BinaryFileData = {
+    id: fileId as BinaryFileData['id'],
+    dataURL: imgData as BinaryFileData['dataURL'],
+    mimeType: fileMimeType as BinaryFileData['mimeType'],
+    created: Date.now(),
+  };
+
+  // Get target A4 bounding box properties matching prepareA4BoundaryGuide
+  const {
+    width: targetBoundaryWidth,
+    height: targetBoundaryHeight,
+    startX: boundaryStartX,
+    startY: boundaryStartY,
+  } = getBoundaryMetrics(pageInfo.orientation, pageInfo.pageWidth, pageInfo.pageHeight);
+
+  // Center horizontally; pin office pages to the top of the guide so landscape
+  // (and letterboxed) pages don't leave a large empty band above the content.
+  const imageX = boundaryStartX + (targetBoundaryWidth - fileWidth) / 2;
+  const imageY = isOfficeFile
+    ? boundaryStartY
+    : boundaryStartY + (targetBoundaryHeight - fileHeight) / 2;
+
+  const elms = convertToExcalidrawElements([
+    {
+      fileId: image.id,
+      type: 'image',
+      x: imageX,
+      y: imageY,
+      width: fileWidth,
+      height: fileHeight,
+      locked: isOfficeFile,
+      status: 'saved',
+      customData: {
+        fileUrl,
+        isOfficeFile,
+        uploaderWhiteboardHeight,
+        uploaderWhiteboardWidth,
+        pageOrientation: pageInfo.orientation,
+        pageWidth: pageInfo.pageWidth,
+        pageHeight: pageInfo.pageHeight,
+      },
+    },
+  ]);
+
+  return {
+    image,
+    elms,
+  };
+};
+
+/** Resolve exact page info for an office page by always fetching its meta file. */
+export const getOfficePageInfo = async (
+  pageNumber: number,
+  pageFilesJson?: string,
+): Promise<OfficePageInfo> => {
+  const pages = parsePageFiles(pageFilesJson ?? store.getState().whiteboard.currentOfficeFilePages);
+  const page = pages.find((p) => p.currentPage === pageNumber);
+  if (!page?.isOfficeFile) {
+    return defaultOfficePageInfo();
+  }
+  return resolveOfficePageInfo(page.metaFilePath, page.filePath);
+};
+
+const getFileDimension = (
+  height: number,
+  width: number,
+  targetWidth: number,
+  targetHeight: number,
+) => {
+  // If the image already fits inside both bounds, no scaling is needed.
+  if (width <= targetWidth && height <= targetHeight) {
+    return { fileHeight: height, fileWidth: width };
+  }
+
+  // Calculate scale ratios for both dimensions and pick the most restrictive one (Math.min)
+  const widthRatio = targetWidth / width;
+  const heightRatio = targetHeight / height;
+  const scaleRatio = Math.min(widthRatio, heightRatio);
+
+  return {
+    fileHeight: height * scaleRatio,
+    fileWidth: width * scaleRatio,
+  };
+};
+
+const dataURLtoFile = (dataUrl: string, filename: string): File | null => {
+  const arr = dataUrl.split(',');
+  if (!arr[0]) return null;
+
+  const mimeMatch = arr[0].match(/:(.*?);/);
+  if (!mimeMatch) return null;
+
+  const mime = mimeMatch[1];
+  const bstr = atob(arr[1]);
+  let n = bstr.length;
+  const u8arr = new Uint8Array(n);
+
+  while (n--) {
+    u8arr[n] = bstr.charCodeAt(n);
+  }
+  return new File([u8arr], filename, { type: mime });
+};
+
+export const uploadCanvasBinaryFile = (
+  elm: ExcalidrawImageElement,
+  file: BinaryFileData,
+  excalidrawAPI?: ExcalidrawImperativeAPI,
+) => {
+  // This ensures concurrent calls wait for the same upload.
+  if (uploadPromises.has(file.id)) {
+    return;
+  }
+
+  // Create a new promise that encapsulates the entire upload process.
+  const uploadPromise = new Promise<void>((resolve, reject) => {
+    try {
+      const imageFile = dataURLtoFile(file.dataURL, `${file.id}.png`);
+      if (!imageFile) {
+        // If conversion fails, reject the promise.
+        console.error('Failed to convert canvas data to a file.');
+        return reject(new Error('Failed to convert canvas data to a file.'));
+      }
+
+      uploadResumableFile(
+        [],
+        undefined,
+        RoomUploadedFileType.WHITEBOARD_IMAGE_FILE,
+        [imageFile],
+        (res) => {
+          // This is the onSuccess callback
+          if (!res.status || !res.filePath) {
+            console.error('Failed to upload canvas binary file.');
+            return reject(new Error('Upload failed.'));
+          }
+
+          const fileUrl =
+            getConfigValue<string>('serverUrl', 'http://localhost:8080', 'PLUG_N_MEET_SERVER_URL') +
+            '/download/uploadedFile/' +
+            res.filePath;
+
+          const customData: ImageCustomData = {
+            fileUrl,
+            isOfficeFile: false,
+            uploaderWhiteboardHeight: excalidrawAPI?.getAppState().height,
+            uploaderWhiteboardWidth: excalidrawAPI?.getAppState().width,
+          };
+
+          const localElements = excalidrawAPI?.getSceneElementsIncludingDeleted() ?? [];
+          let updatedImageElement: ExcalidrawImageElement | undefined;
+
+          // Use map for a cleaner, immutable update.
+          const newElms = localElements.map((el) => {
+            if (el.id === elm.id && el.type === 'image') {
+              updatedImageElement = newElementWith(el, {
+                status: 'saved',
+                customData,
+              });
+              return updatedImageElement;
+            }
+            return el;
+          });
+
+          // Finally, update the scene with the element marked as 'saved'.
+          excalidrawAPI?.updateScene({
+            elements: newElms,
+          });
+          // Resolve the promise on success.
+          resolve();
+        },
+        undefined, // isUploading
+        undefined, // uploadingProgress
+        (errorMsg) => {
+          // Reject the promise on error.
+          console.error('Error during canvas file upload:', errorMsg);
+          reject(new Error(errorMsg));
+        },
+      );
+    } catch (error) {
+      // Reject the promise if any synchronous error occurs.
+      console.error('Error preparing canvas file for upload:', error);
+      reject(error);
+    }
+  });
+
+  // **Immediately** store the promise in the map. This is the atomic part.
+  uploadPromises.set(file.id, uploadPromise);
+
+  // When the promise is settled (either success or failure),
+  // remove it from the map so a re-upload can be attempted later if needed.
+  uploadPromise.finally(() => {
+    uploadPromises.delete(file.id);
+  });
+
+  // Return the newly created promise.
+  return uploadPromise;
+};
+
+export const getImageData = async (
+  elm: ExcalidrawImageElement,
+  customData: ImageCustomData,
+): Promise<BinaryFileData | null> => {
+  if (!elm.fileId || !customData.fileUrl) {
+    return null;
+  }
+
+  const cached = imageDataCache.get(elm.fileId);
+  if (cached) {
+    return cached;
+  }
+
+  const result = await fetchFileWithElm(
+    customData.fileUrl,
+    elm.fileId,
+    customData.isOfficeFile,
+    customData.uploaderWhiteboardHeight,
+    customData.uploaderWhiteboardWidth,
+    customData.isOfficeFile ? toOfficePageMetaPath(customData.fileUrl) : undefined,
+  );
+
+  if (result) {
+    imageDataCache.set(elm.fileId, result.image);
+    return result.image;
+  }
+
+  return null;
+};
+
+/** Whether the canvas image cache already holds `fileId`. */
+const canvasHasFile = (excalidrawAPI: ExcalidrawImperativeAPI, fileId: string): boolean => {
+  const canvasFiles = excalidrawAPI.getFiles();
+  return (
+    Boolean(canvasFiles[fileId]) || Object.values(canvasFiles).some((file) => file.id === fileId)
+  );
+};
+
+export const ensureImageDataIsLoaded = async (
+  excalidrawAPI: ExcalidrawImperativeAPI,
+  elm: ExcalidrawImageElement,
+  customData: ImageCustomData,
+) => {
+  if (!elm.fileId) {
+    return;
+  }
+
+  if (canvasHasFile(excalidrawAPI, elm.fileId)) {
+    return;
+  }
+
+  if (processedImageElements.has(elm.id)) {
+    return;
+  }
+  processedImageElements.set(elm.id, elm.fileId);
+
+  // Fast path: binary data already in memory (e.g. after reopening the whiteboard).
+  const cached = imageDataCache.get(elm.fileId);
+  if (cached) {
+    excalidrawAPI.addFiles([cached]);
+    if (!primeExcalidrawImageCache(excalidrawAPI, [cached])) {
+      // Priming failed: let Excalidraw decode right after the caller's `updateScene`.
+      scheduleImageCacheFallback(excalidrawAPI);
+    }
+    return;
+  }
+
+  const imageData = await getImageData(elm, customData);
+  if (!imageData) {
+    console.error('fetching image file failed', customData.fileUrl);
+    processedImageElements.delete(elm.id);
+    return;
+  }
+
+  // Another caller's coalesced fetch may have registered the file meanwhile.
+  if (!canvasHasFile(excalidrawAPI, imageData.id)) {
+    excalidrawAPI.addFiles([imageData]);
+    // On failure the element may not be on the canvas yet, so let Excalidraw
+    // retry the decode through its public API right after `updateScene`.
+    if (!primeExcalidrawImageCache(excalidrawAPI, [imageData])) {
+      scheduleImageCacheFallback(excalidrawAPI);
+    }
+  }
+};
+
+/** Drops all cached image references for the instance (element bookkeeping, files, cache). */
+export function cleanProcessedImageElementsMap(excalidrawAPI?: ExcalidrawImperativeAPI | null) {
+  processedImageElements.clear();
+  if (!excalidrawAPI) {
+    return;
+  }
+  try {
+    const files = excalidrawAPI.getFiles?.();
+    if (files && typeof files === 'object') {
+      for (const key of Object.keys(files)) {
+        delete files[key];
+      }
+    }
+    getExcalidrawImageCache(excalidrawAPI)?.clear();
+  } catch {
+    // Ignore if Excalidraw internals change in a future version.
+  }
+}
+
+/**
+ * Preloads office page images into the in-memory cache: the next 5 pages on page 1,
+ * otherwise the previous 2 and the next 4.
+ */
+export const preloadOfficeFilePages = (allPages: IWhiteboardFile[], currentPage: number) => {
+  const pagesToPreload: number[] = [];
+  const totalPages = allPages.length;
+
+  if (currentPage === 1) {
+    // If on the first page, preload the next 5 pages.
+    for (let i = 1; i <= 5; i++) {
+      const pageToLoad = currentPage + i;
+      if (pageToLoad > totalPages) break;
+      pagesToPreload.push(pageToLoad);
+    }
+  } else {
+    // Preload the previous 2 pages.
+    for (let i = 1; i <= 2; i++) {
+      const pageToLoad = currentPage - i;
+      if (pageToLoad < 1) break;
+      pagesToPreload.push(pageToLoad);
+    }
+
+    // Preload the next 4 pages.
+    for (let i = 1; i <= 4; i++) {
+      const pageToLoad = currentPage + i;
+      if (pageToLoad > totalPages) break;
+      pagesToPreload.push(pageToLoad);
+    }
+  }
+
+  // Filter out the current page and any pages that don't exist.
+  const uniquePagesToPreload = [...new Set(pagesToPreload)].filter(
+    (p) => p !== currentPage && p > 0 && p <= totalPages,
+  );
+
+  const preloadPromises = uniquePagesToPreload.map(async (pageNumber) => {
+    const fileToPreload = allPages.find((p) => p.currentPage === pageNumber);
+    if (!fileToPreload) {
+      return;
+    }
+
+    const url = getDownloadBaseUrl() + fileToPreload.filePath;
+
+    // Prefetch image + page meta (meta is required for office page size), then
+    // finish the decode so the page is fully ready before it is switched to.
+    const [dataUrl] = await Promise.all([
+      fetchAndCacheImage(url),
+      fileToPreload.isOfficeFile
+        ? resolveOfficePageInfo(fileToPreload.metaFilePath, fileToPreload.filePath)
+        : Promise.resolve(defaultOfficePageInfo()),
+    ]);
+    if (dataUrl) {
+      await preloadHtmlImage(dataUrl);
+    }
+  });
+
+  // We run all promises concurrently but don't block the main thread.
+  // This is a "fire and forget" for the batch with centralized error handling.
+  Promise.all(preloadPromises).catch((e) => {
+    console.error('An error occurred during page preloading:', e);
+  });
+};

@@ -1,0 +1,131 @@
+import { join, resolve } from 'path';
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+import { viteStaticCopy, ViteStaticCopyOptions } from 'vite-plugin-static-copy';
+import tailwindcss from '@tailwindcss/vite';
+import oxlintPlugin from 'vite-plugin-oxlint';
+import cleanPlugin from 'vite-plugin-clean';
+
+const isProduction = process.env.NODE_ENV === 'production';
+
+export default defineConfig({
+  root: join(import.meta.dirname, 'src'),
+  base: '',
+  resolve: {
+    extensions: ['.tsx', '.ts', '.js', '.jsx'],
+    alias: {
+      '~': resolve(import.meta.dirname, 'src'),
+    },
+  },
+  server: {
+    port: 3000,
+  },
+  build: {
+    outDir: '../dist',
+    emptyOutDir: false,
+    sourcemap: !isProduction,
+    assetsInlineLimit: 0,
+    chunkSizeWarningLimit: 6000,
+    cssCodeSplit: false,
+    rolldownOptions: {
+      output: {
+        entryFileNames: 'assets/js/main-module.[hash].js',
+        chunkFileNames: 'assets/chunks/[name].[hash].js',
+        assetFileNames: ({ names }) => assetFileNames(names),
+      },
+      watch: {
+        exclude: 'node_modules/**',
+      },
+    },
+  },
+  worker: {
+    format: 'iife',
+    rolldownOptions: {
+      output: {
+        entryFileNames: 'assets/worker/[name].[hash].js',
+      },
+    },
+  },
+  plugins: [
+    react(),
+    tailwindcss(),
+    viteStaticCopy(getStaticFilesToCopy()),
+    oxlintPlugin(),
+    cleanPlugin({
+      targetFiles: [
+        'dist/assets/js',
+        'dist/assets/css',
+        'dist/assets/chunks',
+        'dist/assets/worker',
+      ],
+    }),
+  ],
+  define: {
+    IS_PRODUCTION: isProduction,
+    PNM_VERSION: JSON.stringify(process.env.npm_package_version),
+    BUILD_TIME: Math.floor(Date.now() / 1000),
+    'process.env': {
+      IS_PREACT: false,
+    },
+  },
+});
+
+function assetFileNames(names: string[]) {
+  const name = names[0];
+  if (/\.(woff2?|ttf|eot)$/.test(name)) {
+    return 'assets/fonts/[name][extname]';
+  }
+  if (name.endsWith('.css')) {
+    return 'assets/css/main.[hash][extname]';
+  }
+  if (name.endsWith('.ico')) {
+    return 'assets/imgs/[name][extname]';
+  }
+  return 'assets/js/[name][extname]';
+}
+
+function getStaticFilesToCopy(): ViteStaticCopyOptions {
+  const noiseSuppressorPkg = '../node_modules/@sapphi-red/web-noise-suppressor';
+  return {
+    targets: [
+      {
+        src: [
+          'assets/audio',
+          'assets/backgrounds',
+          'assets/imgs',
+          'assets/locales',
+          'assets/lti',
+          'assets/config_sample.js',
+          !isProduction ? 'assets/config.js' : '',
+        ].filter(Boolean),
+        dest: 'assets/',
+        rename: { stripBase: 1 },
+      },
+      {
+        src: `${noiseSuppressorPkg}/dist/gtcrn/workletProcessor.js`,
+        dest: 'assets/wasm/',
+        rename: { stripBase: true, name: 'gtcrn-worklet.js' },
+      },
+      {
+        // The worklet's inline sourceMappingURL keeps this filename.
+        src: `${noiseSuppressorPkg}/dist/gtcrn/workletProcessor.js.map`,
+        dest: 'assets/wasm/',
+        rename: { stripBase: true },
+      },
+      {
+        src: `${noiseSuppressorPkg}/dist/gtcrn.wasm`,
+        dest: 'assets/wasm/',
+        rename: { stripBase: true },
+      },
+      {
+        src: `${noiseSuppressorPkg}/LICENSE`,
+        dest: 'assets/wasm/',
+        rename: { stripBase: true, name: 'licenses/web-noise-suppressor-LICENSE.txt' },
+      },
+      {
+        src: 'login.html',
+        dest: './',
+      },
+    ],
+  };
+}

@@ -1,0 +1,249 @@
+import { deleteDB, IDBPDatabase, openDB } from 'idb';
+import { getConfigValue } from '../utils';
+
+// Define all exportable store names in a single object to act as the source of truth.
+export const DB_STORE_NAMES = {
+  USER_SETTINGS: 'userSettings',
+  WHITEBOARD: 'whiteboard', // yjs whiteboard page snapshots (key `${fileId}_${page}`)
+  NOTEPAD: 'notepad', // yjs notepad snapshot (fixed key 'snapshot')
+  IMAGE_CACHE: 'imageCache',
+  OFFICE_PAGE_META_CACHE: 'officePageMetaCache',
+  CHAT_MESSAGES: 'chatMessages',
+  USER_NOTIFICATIONS: 'userNotifications',
+  SPEECH_TO_TEXT_FINAL_TEXTS: 'speechToTextFinalTexts',
+  WHITEBOARD_AI_CHATS: 'whiteboardAiChats',
+  INSIGHTS_AI_TEXT_CHATS: 'insightsAiTextChats',
+} as const; // 'as const' makes the object readonly and its values literal types.
+
+// Derive the type from the values of the object.
+// This ensures the type is always in sync with the defined stores.
+export type IDBStoreName = (typeof DB_STORE_NAMES)[keyof typeof DB_STORE_NAMES];
+
+const DB_STORE_METADATA = 'metadata';
+// Databases older than this will be cleaned up on startup (6 hours).
+const DB_MAX_AGE_MS = getConfigValue('dbMaxAgeMs', 6 * 60 * 60 * 1000);
+const DB_VERSION = 4;
+
+class IDBManager {
+  /**
+   * A list of all object stores used in the application.
+   * This centralized list ensures that all stores are created when the database is initialized.
+   */
+  private readonly ALL_STORES: string[] = [
+    DB_STORE_METADATA, // Internal metadata store
+    ...Object.values(DB_STORE_NAMES), // Dynamically get all other stores
+  ];
+  private dbPromise: Promise<IDBPDatabase> | null = null;
+  private dbName: string | null = null;
+  private isDbActive = false;
+
+  /**
+   * Initializes a session-specific database. This must be called once at the
+   * beginning of a session before any other database operations are performed.
+   * The database name is based on the provided room SID.
+   * @param roomSid The session ID of the current room.
+   * @param userId The user ID of the current user.
+   */
+  public init = (roomSid: string, userId: string) => {
+    // If the database has already been initialized, do nothing.
+    if (this.dbPromise) {
+      return;
+    }
+
+    // Use a stable name for persistence across reloads.
+    this.dbName = `pnm-${roomSid}-${userId}`;
+    this.isDbActive = true;
+    this.dbPromise = openDB(this.dbName, DB_VERSION, {
+      upgrade: (db) => {
+        // Create all necessary object stores if they don't already exist.
+        for (const storeName of this.ALL_STORES) {
+          if (!db.objectStoreNames.contains(storeName)) {
+            db.createObjectStore(storeName);
+          }
+        }
+      },
+    });
+
+    // After connecting, run cleanup and update the 'lastAccessed' timestamp.
+    this.dbPromise
+      .then((db) => db.put(DB_STORE_METADATA, Date.now(), 'lastAccessed'))
+      .catch((e) => console.error('Failed to update DB timestamp:', e))
+      .finally(() => this.cleanupStaleDBs());
+  };
+
+  /**
+   * Saves a value to a specified object store in the current session's database.
+   * @param storeName The name of the object store.
+   * @param key The key for the value.
+   * @param value The value to save.
+   */
+  public store = async (storeName: IDBStoreName, key: string, value: any) => {
+    if (!this.isDbActive) {
+      return;
+    }
+    const db = await this.getDb();
+    // Update the timestamp on every write to keep the DB "alive".
+    const tx = db.transaction([storeName, DB_STORE_METADATA], 'readwrite');
+    await Promise.all([
+      tx.objectStore(storeName).put(value, key),
+      tx.objectStore(DB_STORE_METADATA).put(Date.now(), 'lastAccessed'),
+    ]);
+    await tx.done;
+  };
+
+  /**
+   * Retrieves a value from a specified object store in the current session's database.
+   * @param storeName The name of the object store.
+   * @param key The key of the value to retrieve.
+   * @returns The value, or undefined if not found.
+   */
+  public get = async <T>(storeName: IDBStoreName, key: string): Promise<T | undefined> => {
+    if (!this.isDbActive) {
+      return;
+    }
+    const db = await this.getDb();
+    if (!db.objectStoreNames.contains(storeName)) {
+      return undefined;
+    }
+    return db.get(storeName, key);
+  };
+
+  /**
+   * Retrieves all values from a specified object store.
+   * @param storeName The name of the object store.
+   * @returns An array of all values in the store.
+   */
+  public getAll = async <T>(storeName: IDBStoreName): Promise<T[]> => {
+    if (!this.isDbActive) {
+      return [];
+    }
+    const db = await this.getDb();
+    if (!db.objectStoreNames.contains(storeName)) {
+      return [];
+    }
+    return db.getAll(storeName);
+  };
+
+  /**
+   * Retrieves all keys from a specified object store.
+   * @param storeName The name of the object store.
+   * @returns An array of all keys in the store.
+   */
+  public getAllKeys = async (storeName: IDBStoreName): Promise<IDBValidKey[]> => {
+    if (!this.isDbActive) {
+      return [];
+    }
+    const db = await this.getDb();
+    if (!db.objectStoreNames.contains(storeName)) {
+      return [];
+    }
+    return db.getAllKeys(storeName);
+  };
+
+  /**
+   * Deletes a value from a specified object store in the current session's database.
+   * @param storeName The name of the object store.
+   * @param key The key of the value to delete.
+   */
+  public del = async (storeName: IDBStoreName, key: string) => {
+    if (!this.isDbActive) {
+      return;
+    }
+    const db = await this.getDb();
+    if (!db.objectStoreNames.contains(storeName)) {
+      return;
+    }
+    await db.delete(storeName, key);
+  };
+
+  /**
+   * Deletes the entire database for the current session.
+   */
+  public deleteDB = async () => {
+    this.isDbActive = false;
+    if (this.dbName) {
+      // Ensure the current connection is closed before deleting.
+      if (this.dbPromise) {
+        const db = await this.dbPromise;
+        db.close();
+      }
+      await deleteDB(this.dbName);
+      this.dbPromise = null;
+      this.dbName = null;
+    }
+  };
+
+  /**
+   * Returns the active database connection promise.
+   * Throws an error if the database has not been initialized.
+   */
+  private getDb(): Promise<IDBPDatabase> {
+    if (!this.dbPromise) {
+      throw new Error('IndexedDB has not been initialized. Call initIDB() first.');
+    }
+    return this.dbPromise;
+  }
+
+  /**
+   * Scans for and deletes any old plugNmeet databases that don't match the current session.
+   * This handles cases where the browser was closed without proper cleanup.
+   */
+  private async cleanupStaleDBs() {
+    if (!('databases' in indexedDB)) {
+      console.warn(
+        'indexedDB.databases() is not supported; automatic cleanup of stale databases is disabled.',
+      );
+      return;
+    }
+
+    const allDBs = await indexedDB.databases();
+    const now = Date.now();
+
+    // O(1) lookup for the databases that belong to the active session.
+    const skipNames = new Set<string>();
+    if (this.dbName) {
+      skipNames.add(this.dbName);
+    }
+
+    for (const dbInfo of allDBs) {
+      const name = dbInfo.name;
+      if (!name || skipNames.has(name)) {
+        continue;
+      }
+
+      let storeName: string;
+      if (name.startsWith('pnm-')) {
+        storeName = DB_STORE_METADATA;
+      } else {
+        continue;
+      }
+
+      try {
+        // Briefly open the DB to check its lastAccessed timestamp.
+        const db = await openDB(name);
+        const lastAccessed = await db.get(storeName, 'lastAccessed');
+        db.close();
+
+        if (typeof lastAccessed !== 'number' || now - lastAccessed > DB_MAX_AGE_MS) {
+          console.log(`Deleting stale IndexedDB: ${name}`);
+          await deleteDB(name);
+        }
+      } catch (e) {
+        console.error(`Could not check or delete stale DB ${name}:`, e);
+      }
+    }
+  }
+}
+
+// Create a single instance to be used as a singleton.
+const idbManager = new IDBManager();
+
+const initIDB = idbManager.init;
+const idbStore = idbManager.store;
+const idbGet = idbManager.get;
+const idbGetAll = idbManager.getAll;
+const idbGetAllKeys = idbManager.getAllKeys;
+const idbDel = idbManager.del;
+const deleteRoomDB = idbManager.deleteDB;
+
+export { initIDB, idbStore, idbGet, idbGetAll, idbGetAllKeys, idbDel, deleteRoomDB };

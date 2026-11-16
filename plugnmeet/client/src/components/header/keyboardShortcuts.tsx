@@ -1,0 +1,133 @@
+import React from 'react';
+import { useTranslation } from 'react-i18next';
+
+import { useAppDispatch, useAppSelector } from '../../store';
+import { updateShowKeyboardShortcutsModal } from '../../store/slices/roomSettingsSlice';
+import Modal from '../../helpers/ui/modal';
+
+const KeyboardShortcuts = () => {
+  const dispatch = useAppDispatch();
+  const { t } = useTranslation();
+  const isShowKeyboardShortcuts = useAppSelector(
+    (state) => state.roomSettings.isShowKeyboardShortcuts,
+  );
+
+  const closeModal = () => {
+    dispatch(updateShowKeyboardShortcutsModal(false));
+  };
+
+  return (
+    <Modal
+      show={isShowKeyboardShortcuts}
+      onClose={closeModal}
+      title={t('header.keyboard-shortcuts.title')}
+      maxWidth="max-w-2xl"
+      customClass="KeyboardShortcuts"
+    >
+      <table className="border-collapse border border-slate-500 w-full text-Gray-950 dark:text-dark-text">
+        <thead>
+          <tr>
+            <th className="ps-2 border-b border-e border-slate-700 text-xs sm:text-sm md:text-base">
+              <strong>{t('header.keyboard-shortcuts.key-comb')}</strong>
+            </th>
+            <th className="ps-2 border-b border-slate-700 text-xs sm:text-sm md:text-base">
+              <strong>{t('header.keyboard-shortcuts.actions')}</strong>
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td className="ps-2 border-b border-e border-slate-700 text-xs sm:text-sm md:text-base">
+              ctrl + alt/option + m
+            </td>
+            <td className="ps-2 border-b border-slate-700 text-xs sm:text-sm md:text-base ">
+              {t('header.keyboard-shortcuts.mute-unmute')}
+            </td>
+          </tr>
+          <tr>
+            <td className="ps-2 border-b border-e border-slate-700 text-xs sm:text-sm md:text-base">
+              ctrl + alt/option + a
+            </td>
+            <td className="ps-2 border-b border-slate-700 text-xs sm:text-sm md:text-base">
+              {t('header.keyboard-shortcuts.start-audio')}
+            </td>
+          </tr>
+          <tr>
+            <td className="ps-2 border-b border-e border-slate-700 text-xs sm:text-sm md:text-base">
+              ctrl + alt/option + o
+            </td>
+            <td className="ps-2 border-b border-slate-700 text-xs sm:text-sm md:text-base">
+              {t('header.keyboard-shortcuts.leave-audio')}
+            </td>
+          </tr>
+          <tr>
+            <td className="ps-2 border-b border-e border-slate-700 text-xs sm:text-sm md:text-base">
+              ctrl + alt/option + v
+            </td>
+            <td className="ps-2 border-b border-slate-700 text-xs sm:text-sm md:text-base">
+              {t('header.keyboard-shortcuts.start-webcam')}
+            </td>
+          </tr>
+          <tr>
+            <td className="ps-2 border-b border-e border-slate-700 text-xs sm:text-sm md:text-base">
+              ctrl + alt/option + x
+            </td>
+            <td className="ps-2 border-b border-slate-700 text-xs sm:text-sm md:text-base">
+              {t('header.keyboard-shortcuts.leave-webcam')}
+            </td>
+          </tr>
+          <tr>
+            <td className="ps-2 border-b border-e border-slate-700 text-xs sm:text-sm md:text-base">
+              ctrl + alt/option + u
+            </td>
+            <td className="ps-2 border-b border-slate-700 text-xs sm:text-sm md:text-base">
+              {t('header.keyboard-shortcuts.show-hide-user-list')}
+            </td>
+          </tr>
+          <tr>
+            <td className="ps-2 border-b border-e border-slate-700 text-xs sm:text-sm md:text-base">
+              ctrl + alt/option + c
+            </td>
+            <td className="ps-2 border-b border-slate-700 text-xs sm:text-sm md:text-base">
+              {t('header.keyboard-shortcuts.show-hide-chat')}
+            </td>
+          </tr>
+          <tr>
+            <td className="ps-2 border-b border-e border-slate-700 text-xs sm:text-sm md:text-base">
+              ctrl + alt/option + l
+            </td>
+            <td className="ps-2 border-b border-slate-700 text-xs sm:text-sm md:text-base">
+              {t('header.keyboard-shortcuts.show-hide-lock-settings')}
+            </td>
+          </tr>
+          <tr>
+            <td className="ps-2 border-b border-e border-slate-700 text-xs sm:text-sm md:text-base">
+              ctrl + alt/option + s
+            </td>
+            <td className="ps-2 border-b border-slate-700 text-xs sm:text-sm md:text-base">
+              {t('header.keyboard-shortcuts.show-hide-settings')}
+            </td>
+          </tr>
+          <tr>
+            <td className="ps-2 border-b border-e border-slate-700 text-xs sm:text-sm md:text-base">
+              ctrl + alt/option + w
+            </td>
+            <td className="ps-2 border-b border-slate-700 text-xs sm:text-sm md:text-base">
+              {t('header.keyboard-shortcuts.show-hide-whiteboard')}
+            </td>
+          </tr>
+          <tr>
+            <td className="ps-2 border-e border-slate-700 text-xs sm:text-sm md:text-base">
+              ctrl + alt/option + r
+            </td>
+            <td className="ps-2 border-slate-700 text-xs sm:text-sm md:text-base">
+              {t('header.keyboard-shortcuts.show-hide-hand')}
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </Modal>
+  );
+};
+
+export default KeyboardShortcuts;
