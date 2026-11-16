@@ -1,0 +1,146 @@
+recorder:
+  ## Note: All IDs must contain only valid characters.
+  ## Otherwise, issues may arise with NATS (https://docs.nats.io/nats-concepts/subjects#characters-allowed-and-recommended-for-subject-names)
+  ## Permitted characters: (a - z), (A - Z), (0 - 9), hyphen (-), and underscore (_)
+  id: node_01
+  # Operational mode for this instance. Can be one of:
+  # "both" (default): Runs both the recorder and transcoder services.
+  # "recorderOnly": Only records, then publishes jobs for a transcoder.
+  # "transcoderOnly": Only processes transcoding jobs from the queue.
+  mode: "both"
+  # Avoid processing more than 10 concurrent recordings on a single server.
+  # It is recommended to use multiple servers if higher capacity is necessary.
+  max_limit: 10
+  # If enabled, debug logs will be displayed in the terminal.
+  debug: false
+  # Enable this to post-process the raw MP4 recording for improved quality.
+  # Note: This increases CPU usage and processing time.
+  post_mp4_convert: true
+  # Optional: Set a CPU usage limit (in percent) for starting new transcoding jobs when running in "both" mode and post_mp4_convert = true
+  # If the current CPU usage exceeds this value, the transcoding task will be delayed. This helps prioritize live recordings over transcoding.
+  # Defaults to 80.0. Set to 0 to disable.
+  transcoding_cpu_limit_both_mode: 80.0
+  # Optional: Set the dimensions of the virtual recording window.
+  # The output video will match this resolution.
+  width: 1920
+  height: 1080
+  # Optional: Adjust the DPI of the xvfb virtual window.
+  # Higher DPI can enhance image clarity but may affect performance and compatibility.
+  xvfb_dpi: 96
+  # Optional: A local temp directory for recording.
+  # Highly recommended if 'main_path' is a network disk (e.g., NFS) to prevent I/O errors.
+  # The file is moved to 'main_path' after recording, and the temporary copy is then deleted.
+  # IMPORTANT: Ensure this directory has sufficient free space for raw recordings.
+  # temporary_dir: "/tmp/recordings"
+  copy_to_path:
+    # The plugNmeet server must have access to this path for users to download recordings.
+    # This can be an NFS or other network-accessible path.
+    main_path: "../recording_files"
+    # Optional: Specify a subdirectory for this recorder instance.
+    # This path must reside within main_path and will be stored in the database.
+    sub_path: "node_01"
+
+log_settings:
+  log_file: "./logs/recorder.log"
+  # Maximum log file size in megabytes.
+  maxsize: 20
+  # Maximum number of backup log files to retain.
+  maxbackups: 4
+  # Maximum age (in days) before log rotation stops.
+  maxage: 2
+  # Log levels: info, warn, error, fatal, debug, or panic.
+  log_level: "info"
+
+# Define custom FFmpeg options here.
+ffmpeg_settings:
+  recording:
+    # Options to apply before the input (-i) parameter.
+    pre_input: "-loglevel error -thread_queue_size 1024 -framerate 30 -draw_mouse 0 -threads 1"
+    # Options to apply after the input (-i) parameter.
+    post_input: "-c:v libx264 -pix_fmt yuv420p -bf 0 -x264-params keyint=120:scenecut=0 -preset ultrafast -crf 23 -c:a copy -movflags frag_keyframe+empty_moov+default_base_moof -flush_packets 1 -tune zerolatency -y"
+
+  post_recording:
+    pre_input: "-loglevel error"
+    post_input: "-c:v libx264 -profile:v high -level:v 4.1 -pix_fmt yuv420p -preset medium -crf 20 -movflags faststart -y -c:a aac -b:a 128k -af highpass=f=80,lowpass=f=8000,afftdn"
+
+  rtmp:
+    pre_input: "-loglevel error -thread_queue_size 512 -framerate 30 -draw_mouse 0 -threads 1"
+    post_input: "-c:v libx264 -profile:v baseline -pix_fmt yuv420p -bf 0 -x264-params keyint=60:scenecut=0:nal-hrd=cbr -b:v 2500k -maxrate 2500k -bufsize 2500k -video_size 1920x1080 -c:a aac -b:a 128k -ar 44100 -preset ultrafast -tune zerolatency -flush_packets 1 -f flv"
+
+  whip:
+    pre_input: "-loglevel error -thread_queue_size 512 -framerate 30 -draw_mouse 0 -threads 1"
+    post_input: "-c:v libx264 -profile:v baseline -pix_fmt yuv420p -bf 0 -x264-params keyint=60:scenecut=0:nal-hrd=cbr -b:v 2500k -maxrate 2500k -bufsize 2500k -video_size 1920x1080 -c:a libopus -ar 48000 -b:a 128k -preset ultrafast -tune zerolatency -flush_packets 1 -f whip"
+
+# Optional: Custom Chrome/Chromium browser settings.
+# Custom flags replace built-in flags with the same name. However,
+# these protected flags cannot be overridden:
+#   window-size, display, PULSE_SINK
+#chrome_settings:
+  # Specify a custom Chrome binary path if required.
+  # custom_chrome_path: "/usr/bin/google-chrome-stable"
+  # Add custom Chrome command-line flags.
+  # flags:
+  #   - name: "use-gl"
+  #     value: "swiftshader"
+  #   - name: "enable-webgl"
+  #     value: true           # boolean: --enable-webgl
+
+plugNmeet_info:
+  # Example: http://localhost:8080
+  host: PLUG_N_MEET_SERVER_DOMAIN
+  api_key: PLUG_N_MEET_API_KEY
+  api_secret: PLUG_N_MEET_SECRET
+  # Optional: Use join_host if the plugNmeet client is hosted separately.
+  # For non-localhost servers, use an HTTPS URL, or it will not function correctly.
+  # Format: https://PLUG_N_MEET_SERVER_DOMAIN/?access_token=
+  # join_host: "http://localhost:3000/?access_token="
+
+nats_info:
+  nats_urls:
+    - "nats://127.0.0.1:4222"
+  num_replicas: 1 # Acceptable values: 1, 3, or 5
+  recorder:
+    recorder_channel: "recorderChannel"
+    recorder_info_kv: "pnm-recorderInfo"
+    transcoding_jobs_subject: "pnm-RecorderTranscoderJobs"
+
+# ----------------------------------------------------------------
+# Scripting Hooks
+#
+# Automate tasks at different stages of the recording process.
+# All scripts are long-lived processes that communicate via newline-delimited JSON on stdin/stdout.
+# See the README.md for detailed information on the data payloads for each stage.
+# ----------------------------------------------------------------
+#hooks:
+#  # For each hook category, you can specify a 'pool_size', a 'hook_timeout' and a list of 'scripts'.
+#  # 'pool_size' controls how many pipelines for that category can run in parallel.
+#  # 'hook_timeout' sets a specific timeout for this category.
+#  # If a value is not set or is 0, it will default to 1 for pool_size and 1h for hook_timeout.
+#
+#  # Runs on the RECORDER after the raw file is saved.
+#  # Purpose: Upload the raw file to shared storage (NFS, S3, etc.).
+#  post_recording:
+#    pool_size: 2
+#    hook_timeout: 2h
+#    scripts:
+#      - script: "/path/to/your/script.sh"
+#        is_one_shot: false
+#      - script: "http-request http://localhost:8090/your/endpoint"
+#        is_one_shot: true
+#
+#  # Runs on the TRANSCODER before ffmpeg starts.
+#  # Purpose: Download the file from shared storage to a local path.
+#  pre_transcoding:
+#    pool_size: 2
+#    hook_timeout: 2h
+#    scripts:
+#      - script: "/path/to/your/script.sh"
+#        is_one_shot: false
+#
+#  # Runs on the TRANSCODER after ffmpeg finishes.
+#  # Purpose: Final cleanup, notification, or upload of the processed file.
+#  post_transcoding:
+#    # If pool_size and hook_timeout are omitted, they will use the default values.
+#    scripts:
+#      - script: "/path/to/your/script.sh"
+#        is_one_shot: false

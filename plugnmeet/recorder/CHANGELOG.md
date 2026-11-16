@@ -1,0 +1,390 @@
+# Changelog
+
+## [2.3.2](https://github.com/mynaparrot/plugNmeet-recorder/compare/v2.3.1...v2.3.2) (2026-10-28)
+
+
+### Bug Fixes
+
+* added cli option to push transcoding task manually ([f877953](https://github.com/mynaparrot/plugNmeet-recorder/commit/f8779535722bc336af2fd27cd517c3bddef3730c))
+* bump chrome-installer ([2bc0df8](https://github.com/mynaparrot/plugNmeet-recorder/commit/2bc0df8a8b902e96cdfa2aad5717828b2e3d2142))
+* bump go to `1.27.3` ([167f77d](https://github.com/mynaparrot/plugNmeet-recorder/commit/167f77dcf2069a95423ea551dbdf71be8a9fa2ab))
+* upgrade `chromedp` to `v0.21.0` ([bc6c57d](https://github.com/mynaparrot/plugNmeet-recorder/commit/bc6c57dd4f5ed4f663109dd6a80fb718f67cb495))
+
+## [2.3.1](https://github.com/mynaparrot/plugNmeet-recorder/compare/v2.3.0...v2.3.1) (2026-09-09)
+
+
+### Bug Fixes
+
+* added `WHIP` support for live broadcasting ([a71de51](https://github.com/mynaparrot/plugNmeet-recorder/commit/a71de51c1052e41653cbd0261f2419202fd68b79))
+* use FFmpeg from `BtbN/FFmpeg-Builds` ([ab1a15e](https://github.com/mynaparrot/plugNmeet-recorder/commit/ab1a15ee47d10cc6354bfc2d21a1d333d58a1a9b))
+
+## [2.3.0](https://github.com/mynaparrot/plugNmeet-recorder/compare/v2.2.0...v2.3.0) (2026-08-11)
+
+
+### Features
+
+* added config option to set custom chrome flags ([def69fa](https://github.com/mynaparrot/plugNmeet-recorder/commit/def69fa24f167f66c0086f095d64a034865608f2))
+
+
+### Bug Fixes
+
+* ensure to tag latest as well ([eda7ede](https://github.com/mynaparrot/plugNmeet-recorder/commit/eda7edef0f38d6cbe379637da36457c282e53696))
+* remove condition from `Checkout` ([1830d97](https://github.com/mynaparrot/plugNmeet-recorder/commit/1830d97d7bd5160ebcf472d4adaba93df7d7f2f7))
+
+## [2.2.0](https://github.com/mynaparrot/plugNmeet-recorder/compare/v2.1.1...v2.2.0) (2026-07-06)
+
+
+### Features
+
+* **refactor:** refactored project to use `uber fx` ([916bc1e](https://github.com/mynaparrot/plugNmeet-recorder/commit/916bc1ea268ae615a5747826a01ac48531d61992))
+* **refactor:** refactored project to use `uber fx` ([af773cc](https://github.com/mynaparrot/plugNmeet-recorder/commit/af773ccf057a6f2f2e0cad1cf06029c791bb3c8c))
+* storage hook ([af8168a](https://github.com/mynaparrot/plugNmeet-recorder/commit/af8168a5dd578a083c642fb2d4499bac21d8d809))
+
+
+### Bug Fixes
+
+* added hooks option to clean temporary objects ([395ad3d](https://github.com/mynaparrot/plugNmeet-recorder/commit/395ad3dacc669847a3eb9e5dd1642109c86a2aae))
+* added option to set `LogOutput` ([57e6c84](https://github.com/mynaparrot/plugNmeet-recorder/commit/57e6c84f6868041384a17f29f9dad6b74219fe66))
+* added option to set hook timeout ([aba1f0b](https://github.com/mynaparrot/plugNmeet-recorder/commit/aba1f0b2a9d084b495c74eeddbd8c98f9f4a4c53))
+* allowing the OS to respect the shebang ([5c7c113](https://github.com/mynaparrot/plugNmeet-recorder/commit/5c7c11387859ef8da5f5d558f6894ca1ae054bf9))
+* bump proto + permission ([32e1cf5](https://github.com/mynaparrot/plugNmeet-recorder/commit/32e1cf5dc00854ac0be4e62397d99bf95927c745))
+* detect error if any, during initialization ([c18fd9c](https://github.com/mynaparrot/plugNmeet-recorder/commit/c18fd9c3541cc99979fe4de41e95e50e88b8eb7b))
+* **feat:** implemented recording hook with backward compatibility ([90dab1b](https://github.com/mynaparrot/plugNmeet-recorder/commit/90dab1b7574aeb6bef47e532375215974a86b564))
+* **feat:** option to modify path before transcoding using `pre_transcode_scripts` ([5452992](https://github.com/mynaparrot/plugNmeet-recorder/commit/545299255743f05155d0f9c1146691fce40b2eec))
+* **feat:** option to modify path before transcoding using `pre_transcode_scripts` ([bca13f5](https://github.com/mynaparrot/plugNmeet-recorder/commit/bca13f5f69354d1b6546a05d2d02ecdb2f873411))
+* handle backward compatibility ([c4da6d2](https://github.com/mynaparrot/plugNmeet-recorder/commit/c4da6d226c5e1abc7f5684af5b55dd18f7dec37f))
+* **hooks:** use same pattern for communicating with hooks scripts ([6a4a534](https://github.com/mynaparrot/plugNmeet-recorder/commit/6a4a53460ee9e2529ab3a6480d5b0fd732049fec))
+* implemented long-lived hook ([e078490](https://github.com/mynaparrot/plugNmeet-recorder/commit/e078490a0afbe90426a69efd927fce5008619fbd))
+* improvement in ffmpeg args ([3bd80f7](https://github.com/mynaparrot/plugNmeet-recorder/commit/3bd80f7f12a7484de40c3e583f96c55e7dc3d7a8))
+* invalid path was sending to hooks script ([58d8885](https://github.com/mynaparrot/plugNmeet-recorder/commit/58d8885450590240748348780f649d186032fb0e))
+* missed to initialized ([1cf70c6](https://github.com/mynaparrot/plugNmeet-recorder/commit/1cf70c66816a8a59a6bac74e40fb2c00be38e6ac))
+* moved all hooks related logic to own file ([621a6ce](https://github.com/mynaparrot/plugNmeet-recorder/commit/621a6ce8b44738fa81a36f4e2e384c9f2cc7f93c))
+* moved all related code to `BootstrapModule` ([548a57d](https://github.com/mynaparrot/plugNmeet-recorder/commit/548a57de8e8fd897c2bb79ede61d8a28c0dd85e5))
+* **refactor:** implemented multi pools hook script support ([344c3c1](https://github.com/mynaparrot/plugNmeet-recorder/commit/344c3c1cbf33eea936757ba707f2d2e3ed436ecc))
+* **refactor:** run `PostTranscoding` scripts before sending notification + standardize script execution ([11f2bdd](https://github.com/mynaparrot/plugNmeet-recorder/commit/11f2bdd7a7902de267a471e2a67222e5be36c42e))
+* **refactor:** run `PostTranscoding` scripts before sending notification + standardize script execution ([5638413](https://github.com/mynaparrot/plugNmeet-recorder/commit/5638413caa244cbf18151693b39ed893ce14e7eb))
+* **refactor:** support for both `long-lived` and `one-shot` commands ([5362443](https://github.com/mynaparrot/plugNmeet-recorder/commit/53624433a32461eb81428cb157bd706530b69966))
+* removed confusing `XDG_RUNTIME_DIR` environment value ([f5710b8](https://github.com/mynaparrot/plugNmeet-recorder/commit/f5710b82770557402e74d993134ca359b6845143))
+* yaml lib replaced with `goccy/go-yaml` ([1da70f4](https://github.com/mynaparrot/plugNmeet-recorder/commit/1da70f4c027e0a1ee64b1aaa5005996e7d2c7ec2))
+
+## [2.1.1](https://github.com/mynaparrot/plugNmeet-recorder/compare/v2.1.0...v2.1.1) (2026-06-07)
+
+
+### Bug Fixes
+
+* **transcoder:** make the heartbeat concurrency-safe (review feedback) ([082812e](https://github.com/mynaparrot/plugNmeet-recorder/commit/082812eae528683f13ebd8a107b13ecaa58101ad))
+* **transcoder:** renew ack deadline for long transcodes (InProgress heartbeat) ([17aee71](https://github.com/mynaparrot/plugNmeet-recorder/commit/17aee718faea97547566d4dbe2fabe2f263e7f1a))
+* **transcoder:** renew ack deadline for long transcodes to prevent duplicate processing ([66b0268](https://github.com/mynaparrot/plugNmeet-recorder/commit/66b0268ca131e2cb868b684127ed0b4d45ab170d))
+* wrap processing in a function to leverage defer for panic-safe cleanup ([328d238](https://github.com/mynaparrot/plugNmeet-recorder/commit/328d238d329796201ef2f5d20e16e83b02bb98e4))
+
+## [2.1.0](https://github.com/mynaparrot/plugNmeet-recorder/compare/v2.0.4...v2.1.0) (2026-05-31)
+
+
+### Features
+
+* handle merge recordings transcoding request ([ef25447](https://github.com/mynaparrot/plugNmeet-recorder/commit/ef2544764bc194d36629bd4ea0f25f9a6121ddc2))
+
+
+### Bug Fixes
+
+* added logs ([df67933](https://github.com/mynaparrot/plugNmeet-recorder/commit/df679332fba96015694f4dd54e45e74ebe26bce0))
+* bump `chrome-installer` to fix `libasound2` install as correct `libasound2t64` ([36d47d2](https://github.com/mynaparrot/plugNmeet-recorder/commit/36d47d251587e9590dd75559e2a9897af6cb1d80))
+* cleanup + merge duplicate code ([5ba04f5](https://github.com/mynaparrot/plugNmeet-recorder/commit/5ba04f54f630a2619714f2944fbd15074e87ecc7))
+* replace `QEMU` with native runner ([ecfd215](https://github.com/mynaparrot/plugNmeet-recorder/commit/ecfd215b466b8fa2a09cb29a35133191176773ff))
+* use base tag for faster build ([76ef9b6](https://github.com/mynaparrot/plugNmeet-recorder/commit/76ef9b6902bc2751665fbbe240d1496658a70260))
+
+## [2.0.4](https://github.com/mynaparrot/plugNmeet-recorder/compare/v2.0.3...v2.0.4) (2026-05-09)
+
+
+### Bug Fixes
+
+* added missing `-threads 1` ([15d8beb](https://github.com/mynaparrot/plugNmeet-recorder/commit/15d8beb5d0367b171e057acb948a67d01e838878))
+* added optional config param `transcoding_cpu_limit_both_mode` ([4e2862e](https://github.com/mynaparrot/plugNmeet-recorder/commit/4e2862e5075f9f2d86cd2e9c7704356a9908dd61))
+* bump proto ([7f70097](https://github.com/mynaparrot/plugNmeet-recorder/commit/7f700972cfb86dddd7ca4b36e29ac883cbb9b665))
+* consider CPU usage during selecting recorder ([70c24eb](https://github.com/mynaparrot/plugNmeet-recorder/commit/70c24ebee29798b49c2ca455252c73abfdf4e27e))
+* declared app mode clearly ([854956f](https://github.com/mynaparrot/plugNmeet-recorder/commit/854956f2249705300ddd2fe33231833a976fed12))
+* **deps:** update module github.com/nats-io/nats.go to v1.51.0 ([448df7b](https://github.com/mynaparrot/plugNmeet-recorder/commit/448df7b1aa47f04272c8bf811fede6206a6f6f2a))
+* **deps:** update module github.com/nats-io/nats.go to v1.51.0 ([1443759](https://github.com/mynaparrot/plugNmeet-recorder/commit/1443759e2e122f317bfde39ccbd0e984939d8a40))
+* updated logs ([d220ccb](https://github.com/mynaparrot/plugNmeet-recorder/commit/d220ccbfa0a499120903a83b46bb7635bb9e8d47))
+* updated logs ([7ab6b25](https://github.com/mynaparrot/plugNmeet-recorder/commit/7ab6b253757a409fcebdb351aea69c9cd7e6e05f))
+* use `sync/atomic` ([0b275a2](https://github.com/mynaparrot/plugNmeet-recorder/commit/0b275a2d43067386b08b48e82bad5469e3748300))
+
+## [2.0.3](https://github.com/mynaparrot/plugNmeet-recorder/compare/v2.0.2...v2.0.3) (2026-04-04)
+
+
+### Bug Fixes
+
+* bump dependencies ([bfc3b4c](https://github.com/mynaparrot/plugNmeet-recorder/commit/bfc3b4cd6173d918ca57cdcc38fb762f3867848a))
+* bump dependencies ([1511574](https://github.com/mynaparrot/plugNmeet-recorder/commit/1511574ba93e138e5e18578624284fd19422ccd5))
+* **deps:** update module github.com/chromedp/chromedp to v0.15.1 ([d7e8988](https://github.com/mynaparrot/plugNmeet-recorder/commit/d7e898893e9fe5186c5a55864090884a0df9c310))
+* **deps:** update module github.com/chromedp/chromedp to v0.15.1 ([e5be198](https://github.com/mynaparrot/plugNmeet-recorder/commit/e5be19812207350cbd9ceddb87aa004e47b217ec))
+* **deps:** update module github.com/nats-io/nats.go to v1.50.0 ([e772a64](https://github.com/mynaparrot/plugNmeet-recorder/commit/e772a646b18c080dcada51e4c151e1dcaca02b3a))
+* **deps:** update module github.com/nats-io/nats.go to v1.50.0 ([bb433e9](https://github.com/mynaparrot/plugNmeet-recorder/commit/bb433e98102b765e04ea291846e2ecf7ee249d6a))
+* **deps:** update module mvdan.cc/sh/v3 to v3.13.0 ([4f63bf9](https://github.com/mynaparrot/plugNmeet-recorder/commit/4f63bf9f854f8905a4991a2e27635f3fbc322c75))
+* **deps:** update module mvdan.cc/sh/v3 to v3.13.0 ([f1ea809](https://github.com/mynaparrot/plugNmeet-recorder/commit/f1ea809d527f536506a929754356e405630d37c4))
+* nats connection tag name ([883605f](https://github.com/mynaparrot/plugNmeet-recorder/commit/883605fd0ea6ee0ec65e3f6731ce18e0f3d33c65))
+
+## [2.0.2](https://github.com/mynaparrot/plugNmeet-recorder/compare/v2.0.1...v2.0.2) (2026-01-30)
+
+
+### Bug Fixes
+
+* `transcoderOnly` was wiping all data ([9bc7267](https://github.com/mynaparrot/plugNmeet-recorder/commit/9bc72676be8043a83826d0e676de16b1b1e54d54))
+* clean up + bump proto ([2c97ead](https://github.com/mynaparrot/plugNmeet-recorder/commit/2c97eade5ce5d987727b1df830b916be816060df))
+* **deps:** update module github.com/mynaparrot/plugnmeet-protocol to v1.2.0 ([511de23](https://github.com/mynaparrot/plugNmeet-recorder/commit/511de23be09010f38eae0bf1c24ea46cef2132a6))
+* **deps:** update module github.com/mynaparrot/plugnmeet-protocol to v1.2.0 ([d24cd40](https://github.com/mynaparrot/plugNmeet-recorder/commit/d24cd40ba12ab33ae80997735ff1e2380775945f))
+* **deps:** update module github.com/sirupsen/logrus to v1.9.4 ([668e291](https://github.com/mynaparrot/plugNmeet-recorder/commit/668e291b88c0822b93f472956ae018455ab1e196))
+* **deps:** update module github.com/sirupsen/logrus to v1.9.4 ([25b9d8a](https://github.com/mynaparrot/plugNmeet-recorder/commit/25b9d8a1ce74562ec411c4a9b7fc621fdb57e8b1))
+* only register as an active recorder if we are in a mode that can handle recordings. ([1f3a1bc](https://github.com/mynaparrot/plugNmeet-recorder/commit/1f3a1bc1659a70dee4a37312bf03a5e756b080ad))
+* option to override mode by `-mode` flag ([d1e4e90](https://github.com/mynaparrot/plugNmeet-recorder/commit/d1e4e9001f331425617cb6e26014728098bc63df))
+* recording file size record ([b291268](https://github.com/mynaparrot/plugNmeet-recorder/commit/b2912689d8ceeaf7fa9c926b02226649f98164b4))
+* **refactor:** recorders will use single KV bucket ([36f1c08](https://github.com/mynaparrot/plugNmeet-recorder/commit/36f1c083b1ea2f3db0aaa17e954f4a106bb96f3d))
+* way to prevent duplicate recorder ID ([00ed5f6](https://github.com/mynaparrot/plugNmeet-recorder/commit/00ed5f6a415053895cad15146821a200beffdeea))
+
+## [2.0.1](https://github.com/mynaparrot/plugNmeet-recorder/compare/v2.0.0...v2.0.1) (2026-01-10)
+
+
+### Bug Fixes
+
+* move the mouse to the top-left corner to remove hover effects. ([6546895](https://github.com/mynaparrot/plugNmeet-recorder/commit/654689503662904aa8d3ae2dd8ffd1251350813f))
+
+## [2.0.0](https://github.com/mynaparrot/plugNmeet-recorder/compare/v1.6.0...v2.0.0) (2025-12-19)
+
+
+### ⚠ BREAKING CHANGES
+
+* align with new UI + API + features
+
+### Features
+
+* align with new UI + API + features ([ee41b5e](https://github.com/mynaparrot/plugNmeet-recorder/commit/ee41b5e98ea43e4728f727dd0e22908ec15546cb))
+
+## [1.6.0](https://github.com/mynaparrot/plugNmeet-recorder/compare/v1.5.6...v1.6.0) (2025-10-30)
+
+
+### Features
+
+* added option to set temporary working path ([82b9b0f](https://github.com/mynaparrot/plugNmeet-recorder/commit/82b9b0fe3341d4e1dc1e6291f9401053ad915033))
+* Implement multi-mode recorder with NATS JetStream for decoupled transcoding ([5ca6c7e](https://github.com/mynaparrot/plugNmeet-recorder/commit/5ca6c7e451bf0b5e8ae66898b1839770bf3ee662))
+
+
+### Bug Fixes
+
+* better logging + clean up ([db619f9](https://github.com/mynaparrot/plugNmeet-recorder/commit/db619f955221ded9ff08837f1b72ddaed2c64632))
+* **cleanup:** simplified logic ([2432b1d](https://github.com/mynaparrot/plugNmeet-recorder/commit/2432b1ded6e2a0ebe020718804374d8647c923a9))
+* further tuning params ([5429506](https://github.com/mynaparrot/plugNmeet-recorder/commit/54295061ca7b667f93f0f3031c660c35897db7ef))
+* missed to update default value ([b1ad733](https://github.com/mynaparrot/plugNmeet-recorder/commit/b1ad73381049aa31bca68767f7a3f1b702732ea5))
+* moved log to proto ([c3c34e2](https://github.com/mynaparrot/plugNmeet-recorder/commit/c3c34e235509483c95f99cd48b6f3dad3d66ec40))
+* moved retry logic checker upper level ([eb489fa](https://github.com/mynaparrot/plugNmeet-recorder/commit/eb489fa0b6e7a8407e3082316d8edef0e26fd3b2))
+* **recorder:** improve worker robustness ([cda9be4](https://github.com/mynaparrot/plugNmeet-recorder/commit/cda9be45ac3e152e52f7bbb6f996cdc5f3dac146))
+* service wasn't starting properly ([f79eddf](https://github.com/mynaparrot/plugNmeet-recorder/commit/f79eddf01b83b9504b458de1c2d4be60f03902e0))
+* specify the Pixel Format `yuv420p` ([f170463](https://github.com/mynaparrot/plugNmeet-recorder/commit/f170463c33d3ac31972ca37808c04636eaf7899f))
+* update read me ([8704524](https://github.com/mynaparrot/plugNmeet-recorder/commit/8704524c0f4973c8ca44cd245a6d2ce08f222b63))
+* updated comments ([5f8da6b](https://github.com/mynaparrot/plugNmeet-recorder/commit/5f8da6b5800b46856ff22c058c08590d61d036fc))
+* use default preset `ultrafast` ([a77a2a4](https://github.com/mynaparrot/plugNmeet-recorder/commit/a77a2a407c0428d9ccc7fa9e24472ed7b551c41c))
+
+## [1.5.6](https://github.com/mynaparrot/plugNmeet-recorder/compare/v1.5.5...v1.5.6) (2025-09-13)
+
+
+### Bug Fixes
+
+* dependencies upgrade ([d0c72d5](https://github.com/mynaparrot/plugNmeet-recorder/commit/d0c72d5093211871ab4533589fe383f354a410c5))
+* end processes in individual goroutine ([afbd588](https://github.com/mynaparrot/plugNmeet-recorder/commit/afbd588433ca1cb0be16d049ee921172a7b94133))
+* improve logging + bug fixed related `relativePath` getting ([68fa9af](https://github.com/mynaparrot/plugNmeet-recorder/commit/68fa9af1474bfe5f2b77e0d7e1466eaed1330995))
+* mod tidy ([99abc5c](https://github.com/mynaparrot/plugNmeet-recorder/commit/99abc5c13744f07cb6a0eb4498553c027e5ccd1f))
+* protocol update ([2fdf40d](https://github.com/mynaparrot/plugNmeet-recorder/commit/2fdf40d3af706fd30821aee6ccc8277070b02699))
+
+## [1.5.5](https://github.com/mynaparrot/plugNmeet-recorder/compare/v1.5.4...v1.5.5) (2025-08-12)
+
+
+### Bug Fixes
+
+* dependencies upgrade ([700f276](https://github.com/mynaparrot/plugNmeet-recorder/commit/700f27680b99459e11223699ed4c48e03df9901b))
+* **deps:** update module github.com/chromedp/chromedp to v0.14.0 ([e83615f](https://github.com/mynaparrot/plugNmeet-recorder/commit/e83615f1def12c1fdf35c3d47f5c4d935402f688))
+* **deps:** update module github.com/chromedp/chromedp to v0.14.0 ([292279b](https://github.com/mynaparrot/plugNmeet-recorder/commit/292279b6daaf43339825e9088329c78a52e014fb))
+* **deps:** update module github.com/nats-io/nats.go to v1.44.0 ([c478d1d](https://github.com/mynaparrot/plugNmeet-recorder/commit/c478d1d76371cace359ae41731666f9dce53d545))
+* **deps:** update module github.com/nats-io/nats.go to v1.44.0 ([8a5200d](https://github.com/mynaparrot/plugNmeet-recorder/commit/8a5200da33b8d6129c36cbba53f1ff4b139afc58))
+* **deps:** update module mvdan.cc/sh/v3 to v3.12.0 ([51fe233](https://github.com/mynaparrot/plugNmeet-recorder/commit/51fe233b0bb900d905e2cde31ab8718cf98fe2ba))
+* **deps:** update module mvdan.cc/sh/v3 to v3.12.0 ([fe6841f](https://github.com/mynaparrot/plugNmeet-recorder/commit/fe6841f0602c914b53b240886c77eeed1b1b4645))
+* invalid file path was sending ([bcd01ea](https://github.com/mynaparrot/plugNmeet-recorder/commit/bcd01ea17578b6c22b6966e272568e02f160ec2a))
+* use roomId for better management. Filename should be always unique ([1d4272d](https://github.com/mynaparrot/plugNmeet-recorder/commit/1d4272d01c4aec455a54973f2580cd839e3c0a16))
+
+## [1.5.4](https://github.com/mynaparrot/plugNmeet-recorder/compare/v1.5.3...v1.5.4) (2025-07-01)
+
+
+### Bug Fixes
+
+* chrome scale factor ([8fd466b](https://github.com/mynaparrot/plugNmeet-recorder/commit/8fd466bda177d4e1560d49dc4ace65c135a35531))
+* **deps:** update github.com/mynaparrot/plugnmeet-protocol digest to 238ce2b ([a344561](https://github.com/mynaparrot/plugNmeet-recorder/commit/a3445616b54d23e9e5219b2ac900015287c7d2c8))
+* **deps:** update github.com/mynaparrot/plugnmeet-protocol digest to 238ce2b ([7cfc5f0](https://github.com/mynaparrot/plugNmeet-recorder/commit/7cfc5f0a1e1762f2e591573e1687fac7639ea44a))
+* **deps:** update github.com/mynaparrot/plugnmeet-protocol digest to d710940 ([a32e956](https://github.com/mynaparrot/plugNmeet-recorder/commit/a32e956f075bfd21e182e54f2f4f0c3af375bcdc))
+* **deps:** update github.com/mynaparrot/plugnmeet-protocol digest to d710940 ([a9e9f4f](https://github.com/mynaparrot/plugNmeet-recorder/commit/a9e9f4ffd7aa4e1bd0f83287c5687eb3c258fa4a))
+* **deps:** update module github.com/nats-io/nats.go to v1.42.0 ([0fb0181](https://github.com/mynaparrot/plugNmeet-recorder/commit/0fb0181ad39862fad98d55add54ae1c7a611a73c))
+* **deps:** update module github.com/nats-io/nats.go to v1.42.0 ([2bbf752](https://github.com/mynaparrot/plugNmeet-recorder/commit/2bbf7520160707dcbad5e1f6215e426e91f8be32))
+* **deps:** update module github.com/urfave/cli/v3 to v3.3.1 ([1f84873](https://github.com/mynaparrot/plugNmeet-recorder/commit/1f84873946afe9c23b12c8b035c9bfcfc79ce1d6))
+* **deps:** update module github.com/urfave/cli/v3 to v3.3.1 ([1f0610d](https://github.com/mynaparrot/plugNmeet-recorder/commit/1f0610d393fa9b2d3378bbdc6c05af06acb35f19))
+* **deps:** update module github.com/urfave/cli/v3 to v3.3.2 ([5e42b01](https://github.com/mynaparrot/plugNmeet-recorder/commit/5e42b01842345369a25ce9b151971cd7c87a9244))
+* **deps:** update module github.com/urfave/cli/v3 to v3.3.2 ([36c051e](https://github.com/mynaparrot/plugNmeet-recorder/commit/36c051e861679c54e5d2f96ddea018cdd3ddeb43))
+* **deps:** update module github.com/urfave/cli/v3 to v3.3.3 ([92d0104](https://github.com/mynaparrot/plugNmeet-recorder/commit/92d01048fd124ac72ae0099df45c1f21726f02ff))
+* **deps:** update module github.com/urfave/cli/v3 to v3.3.3 ([e86e6d6](https://github.com/mynaparrot/plugNmeet-recorder/commit/e86e6d667d04659c93daf881abffda82cc7fdd64))
+* **improve:** few improvements and cleanup ([6370b9b](https://github.com/mynaparrot/plugNmeet-recorder/commit/6370b9b53ef273f292a7ec5a39767c82e0ec683c))
+* **improve:** few improvements and cleanup ([c39ad23](https://github.com/mynaparrot/plugNmeet-recorder/commit/c39ad2371d0cea78cfe6626200157e467334a55f))
+* updated text ([b67db33](https://github.com/mynaparrot/plugNmeet-recorder/commit/b67db33fce8fc1dc27dbbe1defafb6e1a4b5e00e))
+* updated text ([62dbeff](https://github.com/mynaparrot/plugNmeet-recorder/commit/62dbeff36f91dee55ade3575831be6d7037019c8))
+
+## [1.5.3](https://github.com/mynaparrot/plugNmeet-recorder/compare/v1.5.2...v1.5.3) (2025-04-10)
+
+
+### Bug Fixes
+
+* deps update ([906bc0c](https://github.com/mynaparrot/plugNmeet-recorder/commit/906bc0c3e0b181b97362b916a47f71d58eda15f8))
+* **deps:** dependencies update ([75734b3](https://github.com/mynaparrot/plugNmeet-recorder/commit/75734b30a6bca10f8d31613dce64156745f88c04))
+* **deps:** update module github.com/chromedp/chromedp to v0.13.0 ([afd4ea7](https://github.com/mynaparrot/plugNmeet-recorder/commit/afd4ea7d43a7f1a6c90f54a425740dc3d2e153f4))
+* **deps:** update module github.com/chromedp/chromedp to v0.13.0 ([ab9cf8d](https://github.com/mynaparrot/plugNmeet-recorder/commit/ab9cf8d7588113b371d553731ed1346e728857b7))
+* **deps:** update module github.com/chromedp/chromedp to v0.13.3 ([72673fb](https://github.com/mynaparrot/plugNmeet-recorder/commit/72673fb61002294eac49941e98f524b3f671b36d))
+* **deps:** update module github.com/chromedp/chromedp to v0.13.3 ([cc89ca0](https://github.com/mynaparrot/plugNmeet-recorder/commit/cc89ca054b528434e846da5fde33af58bb9f1193))
+* **deps:** update module github.com/chromedp/chromedp to v0.13.6 ([9d80ba2](https://github.com/mynaparrot/plugNmeet-recorder/commit/9d80ba26fa30e3b9e6ebc848e475c9a812a7bb5e))
+* **deps:** update module github.com/chromedp/chromedp to v0.13.6 ([ed00064](https://github.com/mynaparrot/plugNmeet-recorder/commit/ed00064a3991257985e136afa6c4303b16d1d85f))
+* **deps:** update module github.com/nats-io/nats.go to v1.40.1 ([506ec5b](https://github.com/mynaparrot/plugNmeet-recorder/commit/506ec5b1b0098cdf746e7734c016e4d91c3b6652))
+* **deps:** update module github.com/nats-io/nats.go to v1.40.1 ([d0057bb](https://github.com/mynaparrot/plugNmeet-recorder/commit/d0057bbfc3dd580efee871a011f621b4e2893d60))
+
+## [1.5.2](https://github.com/mynaparrot/plugNmeet-recorder/compare/v1.5.1...v1.5.2) (2025-02-20)
+
+
+### Bug Fixes
+
+* bump proto ([2fde3a9](https://github.com/mynaparrot/plugNmeet-recorder/commit/2fde3a9c66a07f525a091d57a58952ef16212e23))
+* clean up ([db3321a](https://github.com/mynaparrot/plugNmeet-recorder/commit/db3321a685567255e48f8b11bae9332aa79f4b9e))
+* **deps:** update module github.com/mynaparrot/plugnmeet-protocol to v1.0.12 ([92a4080](https://github.com/mynaparrot/plugNmeet-recorder/commit/92a4080cbdac30a377b9e44d2bce61b2f286f3c1))
+* **deps:** update module github.com/nats-io/nats.go to v1.39.0 ([7fc5e1d](https://github.com/mynaparrot/plugNmeet-recorder/commit/7fc5e1df0b07070bb9bd4a451c65bd7f4e316dde))
+* invalid checksum ([785987e](https://github.com/mynaparrot/plugNmeet-recorder/commit/785987e57e575fb5bdcc481da23714ca4b6110e3))
+* option to add nkey ([9d6a051](https://github.com/mynaparrot/plugNmeet-recorder/commit/9d6a05159754ea75cb549cea72f219a1272e30dc))
+* recording server will authenticate with plugNmeet server for nats ([e2f1045](https://github.com/mynaparrot/plugNmeet-recorder/commit/e2f104543795b4cfdba3fc1b34a99989b624a66c))
+* replacing with nkey for new installations ([9de1f76](https://github.com/mynaparrot/plugNmeet-recorder/commit/9de1f768e4b4e86829d91b91db56f43dd1d9a89b))
+* typo ([1bb16ef](https://github.com/mynaparrot/plugNmeet-recorder/commit/1bb16ef375b8f0226394018f28369e5f54a9f8f8))
+* typo ([ee6044e](https://github.com/mynaparrot/plugNmeet-recorder/commit/ee6044edebdc323c3ebb5f1ac16a1cc13fe4aa51))
+* update dep ([02cdcd8](https://github.com/mynaparrot/plugNmeet-recorder/commit/02cdcd8d68ff74f9516850c9d16b6c9a2712a5b1))
+
+## [1.5.1](https://github.com/mynaparrot/plugNmeet-recorder/compare/v1.5.1...v1.5.1) (2025-02-02)
+
+
+### Features
+
+* End-to-End encryption (E2EE) ([5ad9991](https://github.com/mynaparrot/plugNmeet-recorder/commit/5ad999197b79cfa857fa9ccbadc19008e2e9eba6))
+* migrate project to `golang` using `chromedp` ([#203](https://github.com/mynaparrot/plugNmeet-recorder/issues/203)) ([59f8505](https://github.com/mynaparrot/plugNmeet-recorder/commit/59f850537cf8c1c8f520b21b47d093be6d739b50))
+* option for post-processing ([caeac50](https://github.com/mynaparrot/plugNmeet-recorder/commit/caeac50d468516df56f476279a7b379e96948bee))
+* pdf file upload support for whiteboard ([ec4a18a](https://github.com/mynaparrot/plugNmeet-recorder/commit/ec4a18ac32c911e18ed18fd6af4ef30d0da51196))
+* redis sentinel ([dca2286](https://github.com/mynaparrot/plugNmeet-recorder/commit/dca2286ecbc68355d746d6fb9e78787336157b79))
+* redis sentinel ([#5](https://github.com/mynaparrot/plugNmeet-recorder/issues/5)) ([dca2286](https://github.com/mynaparrot/plugNmeet-recorder/commit/dca2286ecbc68355d746d6fb9e78787336157b79))
+
+
+### Bug Fixes
+
+* backed to `23.3.1` ([bba01f6](https://github.com/mynaparrot/plugNmeet-recorder/commit/bba01f68e0d21f8fa0bbaf3f8088222e0ef0796e))
+* backed to `23.3.1` ([52e0e42](https://github.com/mynaparrot/plugNmeet-recorder/commit/52e0e42280972553a3cd951940ad69f3d8cc5309))
+* bump ([fd33f75](https://github.com/mynaparrot/plugNmeet-recorder/commit/fd33f750e949e331611861500c057a5eb166d407))
+* bump deps ([9b81357](https://github.com/mynaparrot/plugNmeet-recorder/commit/9b81357de692c3610f00d47bf83e072095a50a3b))
+* bump nodejs ([09c5b6e](https://github.com/mynaparrot/plugNmeet-recorder/commit/09c5b6e39771297c8fc121661d1b2ac48599047e))
+* clean up ([7ed1f1f](https://github.com/mynaparrot/plugNmeet-recorder/commit/7ed1f1fdd3768ffb87a2cf23483c6e55d0ef4e2a))
+* deps ([d51a939](https://github.com/mynaparrot/plugNmeet-recorder/commit/d51a939af20627b395a2efd3abef9eb4fa370b06))
+* deps update ([48abad6](https://github.com/mynaparrot/plugNmeet-recorder/commit/48abad6f0781d901fb07e61ac5840ef61a96f4ed))
+* **deps:** deps update ([71bb01e](https://github.com/mynaparrot/plugNmeet-recorder/commit/71bb01e74e604a864175e24a25363a47851bfc66))
+* **deps:** update dependency @bufbuild/protobuf to ^0.1.0 ([#20](https://github.com/mynaparrot/plugNmeet-recorder/issues/20)) ([ce0d125](https://github.com/mynaparrot/plugNmeet-recorder/commit/ce0d125431fda08d26e923174481fc9e0c3f32c6))
+* **deps:** update dependency @bufbuild/protobuf to ^0.3.0 ([c86d8ab](https://github.com/mynaparrot/plugNmeet-recorder/commit/c86d8ab91e1e7bd1c4c3c4236acb2c3db0dc0a90))
+* **deps:** update dependency @bufbuild/protobuf to v1.10.0 ([7a8e60a](https://github.com/mynaparrot/plugNmeet-recorder/commit/7a8e60a916d111bac285d5aef888398875562c3b))
+* **deps:** update dependency @bufbuild/protobuf to v1.3.0 ([1d8242c](https://github.com/mynaparrot/plugNmeet-recorder/commit/1d8242ca1c8c0d90be23899ac93ca015bb021e96))
+* **deps:** update dependency @bufbuild/protobuf to v1.3.3 ([34ce4bb](https://github.com/mynaparrot/plugNmeet-recorder/commit/34ce4bb8d0ef6c0eee3aceff5ceb1912aae444fd))
+* **deps:** update dependency @bufbuild/protobuf to v1.7.2 ([8bd8ba4](https://github.com/mynaparrot/plugNmeet-recorder/commit/8bd8ba441602163432532667d3e1337a116530c9))
+* **deps:** update dependency axios to v1.5.1 ([34f7ee4](https://github.com/mynaparrot/plugNmeet-recorder/commit/34f7ee4b2fefb5f25e4d1cb082d4a193eb6d9cb3))
+* **deps:** update dependency axios to v1.6.7 ([fca8da8](https://github.com/mynaparrot/plugNmeet-recorder/commit/fca8da8016a988d0f0e95068c50dc4081ff3b660))
+* **deps:** update dependency axios to v1.7.2 ([8e2930e](https://github.com/mynaparrot/plugNmeet-recorder/commit/8e2930ef4736b595c2e4d5aa113b80988ce88b1b))
+* **deps:** update dependency axios to v1.7.4 [security] ([9a824ce](https://github.com/mynaparrot/plugNmeet-recorder/commit/9a824ce3829f1b46dede4d55a8ddba6d116677c3))
+* **deps:** update dependency axios to v1.7.6 ([9ef8688](https://github.com/mynaparrot/plugNmeet-recorder/commit/9ef8688e8909830a81146db9d5d979443617e859))
+* **deps:** update dependency axios to v1.7.7 ([d2f74a1](https://github.com/mynaparrot/plugNmeet-recorder/commit/d2f74a1b669c86f03703d50681dd73fb680a64d4))
+* **deps:** update dependency axios-retry to v3.5.1 ([3caa154](https://github.com/mynaparrot/plugNmeet-recorder/commit/3caa154e3d22090ebc4fe819fd6b3ba31bd8bae1))
+* **deps:** update dependency axios-retry to v3.8.0 ([4acf8e6](https://github.com/mynaparrot/plugNmeet-recorder/commit/4acf8e6e8332607133caf5f492264c5d7d6624d5))
+* **deps:** update dependency axios-retry to v4 ([093259d](https://github.com/mynaparrot/plugNmeet-recorder/commit/093259d4035a692211c580021d2b705f9a18a907))
+* **deps:** update dependency axios-retry to v4.3.0 ([dac7848](https://github.com/mynaparrot/plugNmeet-recorder/commit/dac7848959a8f13b12e7fad953758fcb1c13806b))
+* **deps:** update dependency axios-retry to v4.4.0 ([31d10fb](https://github.com/mynaparrot/plugNmeet-recorder/commit/31d10fb525bf432b4e220db782455ea7c6af0f87))
+* **deps:** update dependency axios-retry to v4.4.1 ([3a56519](https://github.com/mynaparrot/plugNmeet-recorder/commit/3a56519d915fd85057b512aad48e1cc5d509f199))
+* **deps:** update dependency ioredis to v5.4.1 ([dd3022d](https://github.com/mynaparrot/plugNmeet-recorder/commit/dd3022d85d4431f6f55e4842c8c0b9ccf3841aad))
+* **deps:** update dependency plugnmeet-protocol-js to v1.0.5-rc.4 ([8786289](https://github.com/mynaparrot/plugNmeet-recorder/commit/8786289260182da1d1d41a5a22281191075b6c82))
+* **deps:** update dependency puppeteer to v16 ([#13](https://github.com/mynaparrot/plugNmeet-recorder/issues/13)) ([d7b7500](https://github.com/mynaparrot/plugNmeet-recorder/commit/d7b750044d457f29943552fcb9acc5f7e082dbb3))
+* **deps:** update dependency puppeteer to v17 ([#24](https://github.com/mynaparrot/plugNmeet-recorder/issues/24)) ([54fe415](https://github.com/mynaparrot/plugNmeet-recorder/commit/54fe415587fcb6619336274e78ce1ccc75521948))
+* **deps:** update dependency puppeteer to v18 ([#32](https://github.com/mynaparrot/plugNmeet-recorder/issues/32)) ([eb2eb87](https://github.com/mynaparrot/plugNmeet-recorder/commit/eb2eb87c8d6985dc9085ba3d516fe1c12adbb0f9))
+* **deps:** update dependency puppeteer to v20.8.3 ([f1e608d](https://github.com/mynaparrot/plugNmeet-recorder/commit/f1e608d554a1bb8454244da7bc2e30e7c94291c0))
+* **deps:** update dependency puppeteer to v21.1.0 ([8687f77](https://github.com/mynaparrot/plugNmeet-recorder/commit/8687f77df1b672cb34d99fd98f67adafd855e41d))
+* **deps:** update dependency puppeteer to v21.11.0 ([c4a69b7](https://github.com/mynaparrot/plugNmeet-recorder/commit/c4a69b7a1ee95ef8db64e9de3e30a81a8b34f049))
+* **deps:** update dependency puppeteer to v21.3.6 ([c8d066a](https://github.com/mynaparrot/plugNmeet-recorder/commit/c8d066a4e74b38facf70342b2a4b4545469fbe8c))
+* **deps:** update dependency puppeteer to v21.3.8 ([5186967](https://github.com/mynaparrot/plugNmeet-recorder/commit/518696711aab93a523b4d690bbbf93481d5198fa))
+* **deps:** update dependency puppeteer to v21.4.1 ([2b00621](https://github.com/mynaparrot/plugNmeet-recorder/commit/2b006216a35d043cc6ecf6047b849e71df467d30))
+* **deps:** update dependency puppeteer to v21.5.0 ([64c6c2d](https://github.com/mynaparrot/plugNmeet-recorder/commit/64c6c2d78815651212dc3d7c03578c6b4ccfdf87))
+* **deps:** update dependency puppeteer to v22.10.0 ([7c25e4f](https://github.com/mynaparrot/plugNmeet-recorder/commit/7c25e4f7401d97a10203d0e6912af3bc35c9652d))
+* **deps:** update dependency puppeteer to v22.11.2 ([de470c6](https://github.com/mynaparrot/plugNmeet-recorder/commit/de470c6cbfe7d576f065e0c9694c9cadc6eb636b))
+* **deps:** update dependency winston to v3.10.0 ([7f80134](https://github.com/mynaparrot/plugNmeet-recorder/commit/7f801344896181b0884a472dc7aa97a7d3c641ca))
+* **deps:** update dependency winston to v3.11.0 ([dacc232](https://github.com/mynaparrot/plugNmeet-recorder/commit/dacc23293282ef16c8c00c6381d92ed19194a804))
+* **deps:** update dependency winston to v3.13.0 ([fefd71f](https://github.com/mynaparrot/plugNmeet-recorder/commit/fefd71f168f562f7c7fee38d2523501b1e804b5c))
+* **deps:** update dependency ws to v8.14.1 ([37a3f32](https://github.com/mynaparrot/plugNmeet-recorder/commit/37a3f323957859bbe9f38eff62c953238ac3e978))
+* **deps:** update dependency ws to v8.14.2 ([5475b17](https://github.com/mynaparrot/plugNmeet-recorder/commit/5475b1749b94f7f77846a5bb7bac51ccfb5136ff))
+* **deps:** update dependency ws to v8.16.0 ([0c0240c](https://github.com/mynaparrot/plugNmeet-recorder/commit/0c0240cb4130b19e7d1de9e3919393eaf7f79b3b))
+* **deps:** update dependency ws to v8.17.0 ([5f885d7](https://github.com/mynaparrot/plugNmeet-recorder/commit/5f885d7317dc6439886b5a2a979842445b8c8fd1))
+* **deps:** update dependency ws to v8.17.1 [security] ([c787513](https://github.com/mynaparrot/plugNmeet-recorder/commit/c78751301b321629a48995d9a9dea13356f83024))
+* **deps:** update dependency ws to v8.18.0 ([3ac4d9c](https://github.com/mynaparrot/plugNmeet-recorder/commit/3ac4d9ce9b7da4101394133d926568cddb06b874))
+* **deps:** update module github.com/chromedp/chromedp to v0.12.1 ([2d32089](https://github.com/mynaparrot/plugNmeet-recorder/commit/2d320894a54e6deb8b06734b0165d9a5b123ee1f))
+* **deps:** update module github.com/mynaparrot/plugnmeet-protocol to v1.0.11 ([bc80b35](https://github.com/mynaparrot/plugNmeet-recorder/commit/bc80b35054dc20f618837f516ebc529c89879041))
+* few updates ([e7558d2](https://github.com/mynaparrot/plugNmeet-recorder/commit/e7558d2cf44de3c4c999aecf8737422a18a654bf))
+* json wasn't encoding properly ([30c3991](https://github.com/mynaparrot/plugNmeet-recorder/commit/30c3991df9bf0a37fc3d444c38f83f73183293d3))
+* rearranged ([aa0226a](https://github.com/mynaparrot/plugNmeet-recorder/commit/aa0226a7a1ebd0db5ceccbdeb665e66f8b552a18))
+* release-as ([8eb6cb9](https://github.com/mynaparrot/plugNmeet-recorder/commit/8eb6cb9d1faf3b7da6bd9cf95296a697e5a869d4))
+* release-please ([3721063](https://github.com/mynaparrot/plugNmeet-recorder/commit/37210630b7d68f28fd0a8564c62b3077112a27c4))
+* remove duplicate tag ([b0d66ce](https://github.com/mynaparrot/plugNmeet-recorder/commit/b0d66ced2af1d4622693d1d2520e3bb5e95b9382))
+* should use `continue` not `return` ([67912c9](https://github.com/mynaparrot/plugNmeet-recorder/commit/67912c9cca3131b38b309e7b8ea8d7de4ad95750))
+* stopping one service was closing another one too. ([420d71f](https://github.com/mynaparrot/plugNmeet-recorder/commit/420d71fd9f25110597d47feb8040d79f1e8598eb))
+* trigger the creation release workflow on tag push ([915f7db](https://github.com/mynaparrot/plugNmeet-recorder/commit/915f7db75a354977447b5d1d798ef51431c41db1))
+
+## [1.5.1](https://github.com/mynaparrot/plugNmeet-recorder/compare/v1.5.0...v1.5.1) (2025-02-02)
+
+
+### Bug Fixes
+
+* deps update ([48abad6](https://github.com/mynaparrot/plugNmeet-recorder/commit/48abad6f0781d901fb07e61ac5840ef61a96f4ed))
+* **deps:** update module github.com/chromedp/chromedp to v0.12.1 ([2d32089](https://github.com/mynaparrot/plugNmeet-recorder/commit/2d320894a54e6deb8b06734b0165d9a5b123ee1f))
+* **deps:** update module github.com/mynaparrot/plugnmeet-protocol to v1.0.11 ([bc80b35](https://github.com/mynaparrot/plugNmeet-recorder/commit/bc80b35054dc20f618837f516ebc529c89879041))
+* few updates ([e7558d2](https://github.com/mynaparrot/plugNmeet-recorder/commit/e7558d2cf44de3c4c999aecf8737422a18a654bf))
+* remove duplicate tag ([b0d66ce](https://github.com/mynaparrot/plugNmeet-recorder/commit/b0d66ced2af1d4622693d1d2520e3bb5e95b9382))
+
+## [1.5.0](https://github.com/mynaparrot/plugNmeet-recorder/compare/v1.4.3...v1.5.0) (2025-01-19)
+
+
+### Features
+
+* migrate project to `golang` using `chromedp` ([#203](https://github.com/mynaparrot/plugNmeet-recorder/issues/203)) ([59f8505](https://github.com/mynaparrot/plugNmeet-recorder/commit/59f850537cf8c1c8f520b21b47d093be6d739b50))
+
+## [1.4.3](https://github.com/mynaparrot/plugNmeet-recorder/compare/v1.4.2...v1.4.3) (2025-01-12)
+
+
+### Bug Fixes
+
+* backed to `23.3.1` ([bba01f6](https://github.com/mynaparrot/plugNmeet-recorder/commit/bba01f68e0d21f8fa0bbaf3f8088222e0ef0796e))
+* backed to `23.3.1` ([52e0e42](https://github.com/mynaparrot/plugNmeet-recorder/commit/52e0e42280972553a3cd951940ad69f3d8cc5309))
+* bump deps ([9b81357](https://github.com/mynaparrot/plugNmeet-recorder/commit/9b81357de692c3610f00d47bf83e072095a50a3b))
+* bump nodejs ([09c5b6e](https://github.com/mynaparrot/plugNmeet-recorder/commit/09c5b6e39771297c8fc121661d1b2ac48599047e))
+
+## [1.4.2](https://github.com/mynaparrot/plugNmeet-recorder/compare/v1.4.1...v1.4.2) (2024-11-06)
+
+
+### Bug Fixes
+
+* **deps:** deps update ([71bb01e](https://github.com/mynaparrot/plugNmeet-recorder/commit/71bb01e74e604a864175e24a25363a47851bfc66))
+* should use `continue` not `return` ([67912c9](https://github.com/mynaparrot/plugNmeet-recorder/commit/67912c9cca3131b38b309e7b8ea8d7de4ad95750))
+
+## [1.4.1](https://github.com/mynaparrot/plugNmeet-recorder/compare/v1.4.0...v1.4.1) (2024-11-04)
+
+
+### Bug Fixes
+
+* clean up ([7ed1f1f](https://github.com/mynaparrot/plugNmeet-recorder/commit/7ed1f1fdd3768ffb87a2cf23483c6e55d0ef4e2a))
+* deps ([d51a939](https://github.com/mynaparrot/plugNmeet-recorder/commit/d51a939af20627b395a2efd3abef9eb4fa370b06))
+* rearranged ([aa0226a](https://github.com/mynaparrot/plugNmeet-recorder/commit/aa0226a7a1ebd0db5ceccbdeb665e66f8b552a18))
+* release-please ([3721063](https://github.com/mynaparrot/plugNmeet-recorder/commit/37210630b7d68f28fd0a8564c62b3077112a27c4))
+* trigger the creation release workflow on tag push ([915f7db](https://github.com/mynaparrot/plugNmeet-recorder/commit/915f7db75a354977447b5d1d798ef51431c41db1))
