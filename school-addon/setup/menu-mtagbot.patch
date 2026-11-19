@@ -1,0 +1,20 @@
+--- a/includes/header.php
++++ b/includes/header.php
+@@ -91,4 +91,5 @@
+             <div class="sidebar-section-title">آموزش، کلاس و دبیران</div>
+             <a href="courses-management.php" class="sidebar-item <?php echo in_array(basename($_SERVER['PHP_SELF']), ['courses-management.php','classes.php','import-teachers.php','import-schedule.php']) ? 'active' : ''; ?>">📚 مدیریت دروس</a>
++            <a href="online-classroom/" class="sidebar-item">🎙 کلاس آنلاین</a>
+         <?php endif; ?>
+         <?php if (has_permission('manage_reports')): ?>
+@@ -120,4 +121,5 @@
+     <aside class="sidebar w-64 bg-card border-l border-color p-4 flex flex-col gap-2 shrink-0 shadow-lg">
+         <a href="student-panel.php" class="sidebar-item <?php echo basename($_SERVER['PHP_SELF']) == 'student-panel.php' ? 'active' : ''; ?>">داشبورد و کارنامه‌های من</a>
++        <a href="online-classroom/" class="sidebar-item">🎙 کلاس آنلاین</a>
+         <div class="sidebar-section-title">ارزشیابی و امتحانات</div>
+         <a href="student-online-exams.php" class="sidebar-item font-bold text-indigo-600 <?php echo in_array(basename($_SERVER['PHP_SELF']), ['student-online-exams.php','online-exam-take.php','online-exam-result.php']) ? 'active' : ''; ?>" style="background:rgba(79,70,229,0.08);border-right:3px solid #4f46e5;">🧪 آزمون‌های مجازی من</a>
+@@ -126,4 +128,5 @@
+     <aside class="sidebar w-64 bg-card border-l border-color p-4 flex flex-col gap-2 shrink-0 shadow-lg">
+         <a href="teacher-panel.php" class="sidebar-item <?php echo basename($_SERVER['PHP_SELF']) == 'teacher-panel.php' ? 'active' : ''; ?>">👨‍🏫 پنل دبیر</a>
++        <a href="online-classroom/" class="sidebar-item">🎙 کلاس آنلاین</a>
+         <div class="sidebar-section-title">ارزشیابی و امتحانات</div>
+         <a href="teacher-panel.php?tab=exams" class="sidebar-item <?php echo basename($_SERVER['PHP_SELF']) == 'teacher-panel.php' && ($_GET['tab']??'')=='exams' ? 'active' : ''; ?>">📝 امتحانات حضوری / طراحی تشریحی</a>
