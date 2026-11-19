@@ -13,8 +13,8 @@ HOST = ROOT / 'plugin-manager'
 SRC = ROOT / 'school-addon/upload/online-classroom'
 LEGACY = ARTIFACTS / 'school-classroom-pilot-v0.1.0.zip'
 LEGACY_SHA = 'bebc35a02f57346880373a034ee493b757a8017a12812a133ab957358d9de161'
-VERSION = '0.2.2'
-MANAGER_VERSION = '0.1.3'
+VERSION = '0.2.3'
+MANAGER_VERSION = '0.1.4'
 
 
 def write_zip(path, entries):
@@ -58,7 +58,7 @@ def main():
     opts = parser.parse_args()
     entries = plugin_entries()
     expected = hashlib.sha256(entries['plugin.json']).hexdigest()
-    manager = HOST / 'school-plugins.php'
+    manager = HOST / 'plugins/school-plugins.php'
     code = manager.read_text(encoding='utf-8')
     if f"const MPM_VERSION = '{MANAGER_VERSION}';" not in code:
         raise ValueError('Manager source and archive versions differ')
@@ -75,7 +75,7 @@ def main():
     opts.output_dir.mkdir(parents=True, exist_ok=True)
     write_zip(opts.output_dir / f'school-classroom-plugin-v{VERSION}.zip', entries)
     write_zip(opts.output_dir / f'mtagbot-plugin-manager-v{MANAGER_VERSION}.zip', {
-        'school-plugins.php': manager.read_bytes(), 'README-fa.md': (HOST / 'README-fa.md').read_bytes(),
+        'plugins/school-plugins.php': manager.read_bytes(), 'README-fa.md': (HOST / 'README-fa.md').read_bytes(),
     })
     print(f'Built both archives; classroom manifest SHA-256: {expected}')
 

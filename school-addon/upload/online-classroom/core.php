@@ -60,7 +60,8 @@ function cl_api_href(): string
 
 function cl_site_href(string $page): string
 {
-    return (cl_manager_context() ? '' : '../') . $page;
+    $context = cl_manager_context();
+    return ($context ? ($context['site_base'] ?? '') : '../') . $page;
 }
 
 function cl_config(): array

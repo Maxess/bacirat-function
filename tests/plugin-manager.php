@@ -1,6 +1,5 @@
 <?php
 declare(strict_types=1);
-require __DIR__ . '/../plugin-manager/school-plugins.php';
 
 function expect(bool $ok, string $what): void {
     if (!$ok) throw new RuntimeException($what);
@@ -17,11 +16,21 @@ function submit(PDO $db, array $site, string $action, array $data = []): string 
 $work = sys_get_temp_dir() . '/mtag-plugin-fixture-' . bin2hex(random_bytes(6));
 mkdir($work, 0700);
 try {
-    $root = $work . '/public_html';
-    mkdir($root); mkdir($root . '/includes');
+    $web = $work . '/public_html';
+    $root = $web . '/school-test';
+    mkdir($root . '/plugins', 0755, true);
+    mkdir($root . '/includes');
+    copy(__DIR__ . '/../plugin-manager/plugins/school-plugins.php', $root . '/plugins/school-plugins.php');
+    require $root . '/plugins/school-plugins.php';
     $_SERVER['DOCUMENT_ROOT'] = $root;
     $_SERVER['HTTP_HOST'] = 'test-school.example.ir';
     $_SERVER['HTTPS'] = 'on';
+    $origin = mpm_origin();
+    expect(mpm_host_root() === $root, 'nested gateway still locates the site root');
+    expect(mpm_storage($origin) === $work . '/.mtagbot-plugins-' . substr(hash('sha256', $root . '|' . $origin), 0, 24), 'storage identity stays compatible with previous managers');
+    mkdir($web . '/not-private');
+    denied(fn()=>mpm_private_dir($web . '/not-private'));
+    $_SERVER['DOCUMENT_ROOT'] = $web;
     $other = '<div class="card integrated-tabs"><a>Before</a></div>';
     $header = "<a href=\"courses-management.php\">admin</a>\n<a href=\"student-panel.php\">student</a>\n<a href=\"teacher-panel.php\">teacher</a>\n";
     file_put_contents($root . '/other-settings.php', $other);
@@ -48,12 +57,12 @@ try {
     $slug = 'school-classroom';
     $table = mpm_data_table($slug);
     $package = __DIR__ . '/../artifacts/school-classroom-plugin-v0.2.0.zip';
-    $intermediate = __DIR__ . '/../artifacts/school-classroom-plugin-v0.2.1.zip';
-    $upgrade = __DIR__ . '/../artifacts/school-classroom-plugin-v0.2.2.zip';
+    $intermediate = __DIR__ . '/../artifacts/school-classroom-plugin-v0.2.2.zip';
+    $upgrade = __DIR__ . '/../artifacts/school-classroom-plugin-v0.2.3.zip';
     mpm_link_menus($root, $dir);
     $menus = static fn() => [file_get_contents($root . '/other-settings.php'), file_get_contents($root . '/includes/header.php')];
     $managerMenus = $menus();
-    expect(str_contains($managerMenus[0], 'mpm-host-tab-v1') && substr_count($managerMenus[1], 'mpm-host-nav-v1-') === 3, 'generic hooks in all panels');
+    expect(str_contains($managerMenus[0], 'href="plugins/school-plugins.php"') && substr_count($managerMenus[1], "'/plugins/school-plugins.php'") === 6, 'new gateway is used in all menu hooks');
     expect(file_get_contents($dir . '/menu-before-other-settings.php') === $other && file_get_contents($dir . '/menu-before-header.php') === $header, 'menu backups');
     mpm_link_menus($root, $dir);
     expect($menus() === $managerMenus, 'idempotent menu setup');
@@ -73,12 +82,28 @@ try {
     denied(fn()=>mpm_post($db, $site, $site['origin'], 'fixture-form-token'));
     expect(http_response_code() === 403, 'same-origin form still needs a valid token');
     http_response_code(200);
+    $legacyMenus = str_replace('plugins/school-plugins.php', 'school-plugins.php', $managerMenus);
+    file_put_contents($root . '/other-settings.php', $legacyMenus[0]);
+    $editedHeader = str_replace("mpm_navigation('student')", "mpm_navigation('custom')", $legacyMenus[1]);
+    file_put_contents($root . '/includes/header.php', $editedHeader);
+    denied(fn()=>submit($db, $site, 'menus'));
+    expect($menus() === [$legacyMenus[0], $editedHeader], 'never overwrite customized or only partially checked hooks');
+    file_put_contents($root . '/includes/header.php', $legacyMenus[1]);
+    submit($db, $site, 'menus');
+    submit($db, $site, 'menus');
+    expect($menus() === $managerMenus && file_get_contents($dir . '/menu-before-header.php') === $header, 'old hooks are repaired in place and original backups kept');
 
     $db->exec("CREATE TABLE `$table` (id INT PRIMARY KEY, owner TEXT,settings TEXT); INSERT INTO `$table` VALUES(1,'unrelated','keep');");
     denied(fn()=>mpm_install($db, $dir, $package));
     expect($db->query("SELECT settings FROM `$table`")->fetchColumn() === 'keep' && !mpm_row($db, $slug), 'never take or drop an existing table');
-    expect(glob($dir . '/school-classroom-*') === [], 'failed install cleaned its own files');
+    expect(!is_dir($dir . '/plugins/school-classroom'), 'database collision does not create a plugin folder');
     $db->exec("DROP TABLE `$table`");
+    mkdir($root . '/online-classroom');
+    file_put_contents($root . '/online-classroom/manual.txt', 'unmanaged');
+    denied(fn()=>mpm_install($db, $dir, $upgrade));
+    expect(!mpm_row($db, $slug) && file_get_contents($root . '/online-classroom/manual.txt') === 'unmanaged', 'moved manager still detects the separate manual installation');
+    unlink($root . '/online-classroom/manual.txt');
+    rmdir($root . '/online-classroom');
     foreach (['wrong-manifest','tampered-file','extra-file'] as $bad) {
         $copy = $work . '/' . $bad . '.zip'; copy($package, $copy);
         $zip = new ZipArchive(); expect($zip->open($copy) === true, 'inspect fixture');
@@ -93,7 +118,8 @@ try {
     expect(!mpm_install($db, $dir, $package), 'new install is not an upgrade');
     denied(fn()=>mpm_install($db, $dir, $package));
     $row = mpm_row($db, $slug); $path = mpm_path($dir, $row);
-    expect($row['state'] === 'disabled' && is_file($path . '/index.php'), 'install disabled and private');
+    expect($path === $dir . '/plugins/school-classroom/' . $row['owner'] && $row['state'] === 'disabled' && is_file($path . '/index.php'), 'new install has a dedicated private folder');
+    expect(scandir($root . '/plugins') === ['.', '..', 'school-plugins.php'] && !file_exists($root . '/school-plugins.php'), 'no plugin payload or root gateway in the document tree');
     foreach (['student','teacher','admin'] as $role) expect(mpm_menu_items($db, $dir, $role) === [], 'inactive absent from every menu');
     denied(fn()=>mpm_dispatch($db, $site, $slug, 'page'));
     http_response_code(200);
@@ -106,7 +132,11 @@ try {
     $previous = mpm_settings($db, $dir, $row);
     [$newManifest, $newRaw] = mpm_read_package($upgrade);
     $staging = $path . '/release-' . hash('sha256', $newRaw);
-    submit($db, $site, 'enable');
+    denied(fn()=>submit($db, $site, 'enable')); // Old UI URLs do not work under plugins/.
+    mpm_state($db, $row, 'enabled'); // An enabled row left by a previous manager.
+    expect(mpm_menu_items($db, $dir, 'student') === [], 'incompatible pages are not linked at the new URL');
+    denied(fn()=>mpm_dispatch($db, $site, $slug, 'page'));
+    http_response_code(200);
     denied(fn()=>mpm_install($db, $dir, $upgrade));
     expect(mpm_row($db, $slug)['version'] === '0.2.0' && !file_exists($staging), 'active version cannot be replaced');
     submit($db, $site, 'disable');
@@ -124,8 +154,27 @@ try {
     expect(mpm_install($db, $dir, $intermediate), 'previous archive is still approved for in-place upgrade');
     $prior = mpm_row($db, $slug);
     $priorRelease = mpm_release_dir($dir, $prior);
-    expect($prior['version'] === '0.2.1' && $priorRelease !== $path && is_dir($priorRelease), 'upgrade starts from release-specific layout');
+    expect($prior['version'] === '0.2.2' && $priorRelease !== $path && is_dir($priorRelease), 'upgrade starts from release-specific layout');
+    $legacyPath = $dir . '/school-classroom-' . $row['owner'];
+    expect(rename($path, $legacyPath), 'simulate legacy owner directory with earlier releases');
+    clearstatcache(true);
+    expect(mpm_release_dir($dir, $prior) === $legacyPath . '/' . basename($priorRelease), 'older storage layout can still be read');
+    mkdir($path);
+    file_put_contents($path . '/collision', 'keep');
+    denied(fn()=>mpm_install($db, $dir, $upgrade));
+    expect(is_dir($legacyPath) && file_get_contents($path . '/collision') === 'keep', 'do not overwrite either of two existing paths');
+    unlink($path . '/collision'); rmdir($path);
+    mkdir($dir . '/plugins/other-plugin');
+    file_put_contents($dir . '/plugins/other-plugin/keep.txt', 'independent');
+    if (function_exists('symlink') && rmdir(dirname($path))) {
+        if (@symlink($dir . '/plugins/other-plugin', dirname($path))) {
+            denied(fn()=>mpm_install($db, $dir, $upgrade));
+            expect(is_dir($legacyPath) && file_get_contents($dir . '/plugins/other-plugin/keep.txt') === 'independent', 'refuse a symlink in a plugin parent');
+            unlink(dirname($path));
+        }
+    }
     expect(mpm_install($db, $dir, $upgrade), 'checked upgrade reuses the same installation');
+    expect(!file_exists($legacyPath) && mpm_path($dir, $prior) === $path && is_dir($priorRelease), 'atomic relocation retains older releases in the dedicated folder');
     $row = mpm_row($db, $slug);
     expect($row['state'] === 'disabled' && $row['version'] === $newManifest['version'] && $row['owner'] === $oldRow['owner'], 'upgrade only switches release pointer');
     expect(mpm_release_dir($dir, $row) === $staging && mpm_manifest_for($dir, $row) === $newManifest, 'staged release verified after retry');
@@ -140,12 +189,13 @@ try {
     $_SESSION = ['student_id' => 1];
     ob_start(); mpm_dispatch($db, $site, $slug, 'page'); $body = ob_get_clean();
     expect(str_contains($body, 'id="classroom"') && str_contains($body, 'id="mic-feedback"') && str_contains($body, 'route=api') && !str_contains($body, $secret), 'current classroom renders without a config file or credential leak');
+    expect(str_contains($body, 'href="../student-panel.php"') && str_contains($body, 'data-api="school-plugins.php?plugin='), 'school back link and same-gateway API resolve from plugins/');
     expect(!isset($_SESSION['school_classroom_csrf']), 'managed session leaves no classroom-specific state');
     $old = $_GET ?? []; $_GET['name'] = 'assets/classroom.css';
     ob_start(); mpm_dispatch($db, $site, $slug, 'asset'); $asset = ob_get_clean(); $_GET = $old;
     expect($asset === file_get_contents($staging . '/assets/classroom.css') && str_contains($asset, '.participant-controls'), 'new release serves its own assets');
     ob_start(); mpm_admin_page($db, $site, 'fixture', ''); $ui = ob_get_clean();
-    expect(!str_contains($ui, $secret), 'manager never echoes the saved secret');
+    expect(!str_contains($ui, $secret) && str_contains($ui, 'href="../other-settings.php"'), 'manager keeps root settings link without exposing the secret');
     denied(fn()=>submit($db, $site, 'remove'));
     expect(is_file($path . '/index.php') && mpm_table_exists($db, $table), 'explicit delete confirmation');
 
@@ -160,7 +210,8 @@ try {
     file_put_contents($work . '/outside.txt', 'do not delete');
     if (function_exists('symlink')) @symlink($work . '/outside.txt', $path . '/outside-link');
     submit($db, $site, 'remove', ['confirm_delete'=>'yes']);
-    expect(!is_dir($path) && !mpm_table_exists($db, $table) && !mpm_row($db, $slug), 'purged files, data table, and registry row');
+    expect(!is_dir(dirname($path)) && !mpm_table_exists($db, $table) && !mpm_row($db, $slug), 'purged dedicated folder, data table, and registry row');
+    expect(file_get_contents($dir . '/plugins/other-plugin/keep.txt') === 'independent', 'uninstall preserves the neighboring plugin folder');
     expect($menus() === $managerMenus && file_get_contents($root . '/student-panel.php') === 'unchanged-panel' && $normal() === $before, 'uninstall does not modify any host menu files, panels, or school records');
     expect(file_get_contents($work . '/outside.txt') === 'do not delete', 'unlink without following symlink');
     foreach (['student','teacher','admin'] as $role) expect(mpm_menu_items($db, $dir, $role) === [], 'removed from every panel');
@@ -177,7 +228,7 @@ try {
         expect(!mpm_table_exists($db, $table) && !mpm_row($db, $slug) && !file_exists(mpm_path($dir, $attempt)), 'aborted install recoverable despite partially applied DDL');
         foreach (['classes', 'students', 'admins', 'settings', MPM_REGISTRY, MPM_SITE] as $fixtureTable) $db->exec("DROP TABLE `$fixtureTable`");
     }
-    echo strtoupper($db->getAttribute(PDO::ATTR_DRIVER_NAME)) . " PASS plugin admin gate, reviewed ZIP only, verified state-preserving upgrade, real dispatch, hide/disable, complete uninstall, unchanged site, clean reinstall\n";
+    echo strtoupper($db->getAttribute(PDO::ATTR_DRIVER_NAME)) . " PASS nested gateway, protected per-plugin directories, old layout migration, reviewed ZIP only, state-preserving upgrade, real dispatch and scoped purge\n";
 } finally {
     mpm_remove_tree($work);
 }

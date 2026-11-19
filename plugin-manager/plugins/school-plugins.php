@@ -1,8 +1,8 @@
 <?php
 declare(strict_types=1);
 
-// Standalone mtagbot plugin host. Upload this one file beside other-settings.php.
-const MPM_VERSION = '0.1.3';
+// Standalone mtagbot plugin host. Deploy as plugins/school-plugins.php.
+const MPM_VERSION = '0.1.4';
 const MPM_REGISTRY = 'mtg_plugin_registry';
 const MPM_SITE = 'mtg_plugin_site';
 const MPM_MAX_ZIP = 2 * 1024 * 1024;
@@ -11,6 +11,7 @@ const MPM_CATALOG = [
         '0.2.0' => '67f080645d4dce5b709183556b0dd7297c0784388942b2dd00c6157d8a5a117b',
         '0.2.1' => '0cb2f12254559d3b92c925abb3e9244328a3caf9c3386325c8f7d11b0c8c7ea6',
         '0.2.2' => 'ac0eff553b77293722b3c594dac867c7ed1135b16e3c27d5a776a6d013f75931',
+        '0.2.3' => 'a9f39ab9a6b1aeb062973f2489b750f3245443b099ffff77915f555dfa92295b',
     ],
 ];
 
@@ -28,9 +29,14 @@ function mpm_query(PDO $db, string $sql, array $args = []): PDOStatement
     return $stmt;
 }
 
+function mpm_host_root(): string
+{
+    return dirname(__DIR__);
+}
+
 function mpm_database(): PDO
 {
-    $file = __DIR__ . '/config/database.php';
+    $file = mpm_host_root() . '/config/database.php';
     $cfg = is_file($file) ? require $file : null;
     if (!is_array($cfg) || ($cfg['driver'] ?? 'mysql') !== 'mysql' || empty($cfg['database'])) {
         throw new MpmNotice('اتصال به پایگاه MySQL سایت آزمایشی تنظیم نشده است.');
@@ -86,25 +92,28 @@ function mpm_under(string $path, string $dir): bool
     return $path === $dir || str_starts_with($path, rtrim($dir, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR);
 }
 
-function mpm_storage(string $origin): string
+function mpm_web_boundary(string $root): string
 {
-    $root = realpath(__DIR__);
-    $web = mpm_document_root();
-    if (!$root) {
-        throw new MpmNotice('ریشهٔ سایت آزمایشی پیدا نشد.');
-    }
-    $boundary = $web;
+    $boundary = mpm_document_root();
     for ($p = $root; $p !== dirname($p); $p = dirname($p)) {
-        if (in_array(strtolower(basename($p)), ['public_html', 'www', 'htdocs', 'httpdocs'], true)) {
-            $boundary = $p; // Supports test sites nested under public_html.
+        if (in_array(strtolower(basename($p)), ['public_html', 'www', 'htdocs', 'httpdocs'], true) && mpm_under($boundary, $p)) {
+            $boundary = $p; // Also exclude the public parent of a nested test site.
         }
     }
+    return $boundary;
+}
+
+function mpm_storage(string $origin): string
+{
+    $root = mpm_host_root();
+    $boundary = mpm_web_boundary($root);
     $homeValue = getenv('HOME');
     $home = $homeValue ? realpath($homeValue) : false;
     $parent = $home && $home !== '/' && mpm_under(dirname($boundary), $home) ? $home : dirname($boundary);
-    if (!is_writable($parent) || mpm_under($parent, $web) || mpm_under($parent, $root)) {
+    if (!is_writable($parent) || mpm_under($parent, $boundary) || mpm_under($parent, $root)) {
         throw new MpmNotice('PHP باید بتواند یک پوشهٔ خصوصی خارج از ریشهٔ عمومی وب ایجاد کند؛ محدودیت هاست را بررسی کن.');
     }
+    // Hash the school root, not the gateway's new plugins/ directory.
     return $parent . '/.mtagbot-plugins-' . substr(hash('sha256', $root . '|' . $origin), 0, 24);
 }
 
@@ -119,8 +128,10 @@ function mpm_document_root(): string
 function mpm_private_dir(string $path): string
 {
     $real = @realpath($path);
-    $web = mpm_document_root();
-    if (!$real || !is_dir($real) || @is_link($path) || mpm_under($real, $web) || mpm_under($real, __DIR__)) {
+    $root = mpm_host_root();
+    $boundary = mpm_web_boundary($root);
+    if (!$real || $real !== $path || !is_dir($real) || mpm_under($real, $boundary)
+        || mpm_under($real, $root) || mpm_under($boundary, $real)) {
         throw new MpmNotice('پوشهٔ خصوصی مدیر افزونه‌ها معتبر یا در دسترس نیست.');
     }
     return $real;
@@ -215,11 +226,55 @@ function mpm_data_table(string $slug): string
     return 'mtg_plug_' . str_replace('-', '_', mpm_slug($slug)) . '_data';
 }
 
-function mpm_path(string $dir, array $row): string
+function mpm_has_directory(string $path): bool
+{
+    if (is_link($path) || (file_exists($path) && (!is_dir($path) || realpath($path) !== $path))) {
+        throw new MpmNotice('مسیر پوشهٔ افزونه معتبر نیست؛ فایلی جابه‌جا یا حذف نشد.');
+    }
+    return is_dir($path);
+}
+
+function mpm_plugin_directory(string $dir, string $slug, bool $create = false): string
+{
+    foreach (['plugins', mpm_slug($slug)] as $component) {
+        $dir .= '/' . $component;
+        if (!mpm_has_directory($dir) && $create && !@mkdir($dir, 0700)) {
+            throw new MpmNotice('ساخت پوشهٔ اختصاصی افزونه ممکن نشد.');
+        }
+    }
+    return $dir;
+}
+
+function mpm_paths(string $dir, array $row): array
 {
     $owner = (string)($row['owner'] ?? '');
     if (!preg_match('/^[0-9a-f]{32}$/D', $owner)) throw new MpmNotice('مالک فایل‌های افزونه معتبر نیست.');
-    return $dir . '/' . mpm_slug((string)$row['slug']) . '-' . $owner;
+    $slug = mpm_slug((string)$row['slug']);
+    return [mpm_plugin_directory($dir, $slug) . '/' . $owner, $dir . '/' . $slug . '-' . $owner];
+}
+
+function mpm_path(string $dir, array $row): string
+{
+    [$current, $legacy] = mpm_paths($dir, $row);
+    $newExists = mpm_has_directory($current);
+    $oldExists = mpm_has_directory($legacy);
+    if ($newExists && $oldExists) throw new MpmNotice('دو پوشه برای همین نصب پیدا شد؛ هیچ‌کدام جابه‌جا یا حذف نشد.');
+    return $oldExists ? $legacy : $current;
+}
+
+// The caller holds the manager lock and has verified a disabled, owned installation.
+function mpm_relocate(string $dir, array $row): string
+{
+    $from = mpm_path($dir, $row);
+    [$to] = mpm_paths($dir, $row);
+    if ($from !== $to) {
+        mpm_plugin_directory($dir, $row['slug'], true);
+        if (mpm_has_directory($to) || !@rename($from, $to)) {
+            throw new MpmNotice('انتقال پوشهٔ قبلی ممکن نشد؛ فایل‌ها و تنظیمات قبلی حفظ شدند.');
+        }
+        clearstatcache(true);
+    }
+    return $to;
 }
 
 function mpm_row(PDO $db, string $slug): ?array
@@ -324,7 +379,7 @@ function mpm_upgrade(PDO $db, string $dir, array $row, array $manifest, string $
         throw new MpmNotice('ساختار تنظیمات نسخهٔ جدید با نصب فعلی سازگار نیست؛ تنظیمات تغییر نکرد.');
     }
     $sha = hash('sha256', $raw);
-    $staged = mpm_path($dir, $row) . '/release-' . $sha;
+    $staged = mpm_relocate($dir, $row) . '/release-' . $sha;
     // A retry may find an interrupted write of this exact reviewed release; never replace active files.
     mpm_remove_tree($staged);
     try {
@@ -349,15 +404,18 @@ function mpm_install(PDO $db, string $dir, string $zip): bool
         mpm_upgrade($db, $dir, $installed, $manifest, $raw, $files);
         return true;
     }
-    if ($slug === 'school-classroom' && (is_dir(__DIR__ . '/online-classroom')
-        || str_contains((string)@file_get_contents(__DIR__ . '/includes/header.php'), 'href="online-classroom/'))) {
+    $root = mpm_host_root();
+    if ($slug === 'school-classroom' && (is_dir($root . '/online-classroom')
+        || str_contains((string)@file_get_contents($root . '/includes/header.php'), 'href="online-classroom/'))) {
         throw new MpmNotice('نسخهٔ دستی کلاس آنلاین پیدا شد. اول آن را طبق راهنما جمع کن؛ مدیر فایل‌های نصب دستی را حذف نمی‌کند.');
     }
     $table = mpm_data_table($slug);
     if (mpm_table_exists($db, $table)) throw new MpmNotice('جدولی با نام اختصاصی افزونه از قبل وجود دارد؛ تغییری نکرد.');
     $row = ['slug' => $slug, 'owner' => bin2hex(random_bytes(16))];
     $owner = $row['owner'];
-    $path = mpm_path($dir, $row);
+    [$path, $legacy] = mpm_paths($dir, $row);
+    if (mpm_has_directory($path) || mpm_has_directory($legacy)) throw new MpmNotice('پوشهٔ این نصب از قبل وجود دارد؛ فایل‌ها دست‌نخورده ماندند.');
+    mpm_plugin_directory($dir, $slug, true);
     mpm_query($db, 'INSERT INTO ' . MPM_REGISTRY . ' (slug,version,manifest_sha,owner,state,installed_at) VALUES (?,?,?,?,?,?)',
         [$slug, $manifest['version'], hash('sha256', $raw), $owner, 'installing', gmdate('c')]);
     try {
@@ -489,6 +547,8 @@ function mpm_uninstall(PDO $db, string $dir, array $row, ?array $site = null): s
     if ($exists) mpm_assert_table_owner($db, $table, $row);
     $warning = $exists && $site && $row['state'] !== 'installing' ? mpm_deactivate($db, $site, $dir, $row) : '';
     mpm_remove_tree($path);
+    [$current] = mpm_paths($dir, $row);
+    if ($path === $current) @rmdir(dirname($current)); // Only remove an empty plugin container.
     if ($exists) $db->exec("DROP TABLE `$table`");
     mpm_query($db, 'DELETE FROM ' . MPM_REGISTRY . ' WHERE slug=? AND owner=?', [$row['slug'], $row['owner']]);
     return $warning;
@@ -500,10 +560,17 @@ function mpm_find_role(array $session): ?string
     return count($roles) === 1 ? $roles[0] : null;
 }
 
+function mpm_supports_nested_gateway(array $row): bool
+{
+    // Earlier audited classroom packages assume their page lives beside the host panels.
+    return $row['slug'] !== 'school-classroom' || version_compare($row['version'], '0.2.3', '>=');
+}
+
 function mpm_menu_items(PDO $db, string $dir, string $role): array
 {
     $items = [];
     foreach (mpm_query($db, 'SELECT * FROM ' . MPM_REGISTRY . " WHERE state='enabled' ORDER BY slug")->fetchAll(PDO::FETCH_ASSOC) as $row) {
+        if (!mpm_supports_nested_gateway($row)) continue;
         try {
             $manifest = mpm_manifest_for($dir, $row);
             $label = $manifest['menus'][$role] ?? '';
@@ -527,30 +594,49 @@ function mpm_navigation(string $role): void
         if (!$site || $site['origin'] !== $origin) return;
         $dir = mpm_private_dir($site['private_dir']);
         foreach (mpm_menu_items($db, $dir, $role) as $slug => $label) {
-            echo '<a class="sidebar-item" href="school-plugins.php?plugin=' . rawurlencode($slug) . '">' . mpm_html($label) . '</a>';
+            echo '<a class="sidebar-item" href="plugins/school-plugins.php?plugin=' . rawurlencode($slug) . '">' . mpm_html($label) . '</a>';
         }
     } catch (Throwable $ignored) {
         // The host panels must not depend on this subsystem being operational.
     }
 }
 
+// Replace only the exact hook emitted by previous releases; never rewrite arbitrary links.
+function mpm_update_hook(string $source, string $marker, string $old): ?string
+{
+    if (!str_contains($source, $marker)) return null;
+    $new = str_replace('school-plugins.php', 'plugins/school-plugins.php', $old);
+    if (substr_count($source, $marker) === 1) {
+        if (str_contains($source, $new)) return $source;
+        if (str_contains($source, $old)) return str_replace($old, $new, $source);
+    }
+    throw new MpmNotice('پیوند قبلی مدیر افزونه‌ها تغییر کرده است؛ هیچ فایل منو بازنویسی نشد.');
+}
+
 function mpm_templates(string $settings, string $header): array
 {
-    $marker = 'mpm-host-tab-v1';
-    if (!str_contains($settings, $marker)) {
-        $anchor = '<div class="card integrated-tabs">';
-        if (substr_count($settings, $anchor) !== 1) throw new MpmNotice('چیدمان «تنظیمات دیگر» ناشناخته است؛ هیچ فایل منو بازنویسی نشد.');
-        $tab = <<<'HTML'
+    $tab = <<<'HTML'
 <?php /* mpm-host-tab-v1 */ if (($_SESSION['admin_role'] ?? '') === 'super_admin' && is_file(__DIR__ . '/school-plugins.php')): ?><a class="btn btn-outline" href="school-plugins.php">افزونه‌ها</a><?php endif; ?>
 HTML;
-        $settings = str_replace($anchor, $anchor . $tab, $settings);
+    $patched = mpm_update_hook($settings, 'mpm-host-tab-v1', $tab);
+    if ($patched === null) {
+        $anchor = '<div class="card integrated-tabs">';
+        if (substr_count($settings, $anchor) !== 1) throw new MpmNotice('چیدمان «تنظیمات دیگر» ناشناخته است؛ هیچ فایل منو بازنویسی نشد.');
+        $settings = str_replace($anchor, $anchor . str_replace('school-plugins.php', 'plugins/school-plugins.php', $tab), $settings);
+    } else {
+        $settings = $patched;
     }
     foreach (['admin' => 'courses-management', 'student' => 'student-panel', 'teacher' => 'teacher-panel'] as $role => $page) {
-        if (str_contains($header, 'mpm-host-nav-v1-' . $role)) continue;
         $hook = <<<'HTML'
 <?php /* mpm-host-nav-v1-ROLE */ if (is_file(dirname(__DIR__) . '/school-plugins.php')) { try { require_once dirname(__DIR__) . '/school-plugins.php'; mpm_navigation('ROLE'); } catch (Throwable $ignored) {} } ?>
 HTML;
         $hook = str_replace('ROLE', $role, $hook);
+        $patched = mpm_update_hook($header, 'mpm-host-nav-v1-' . $role, $hook);
+        if ($patched !== null) {
+            $header = $patched;
+            continue;
+        }
+        $hook = str_replace('school-plugins.php', 'plugins/school-plugins.php', $hook);
         $pattern = '~^([ \t]*)<a href="' . preg_quote($page, '~') . '\.php"[^\n]*</a>\r?$~m';
         $header = preg_replace_callback($pattern, static fn($m) => $m[0] . "\n" . $m[1] . $hook, $header, -1, $count);
         if ($count !== 1) throw new MpmNotice('چیدمان یکی از پنل‌ها ناشناخته است؛ هیچ فایل منو بازنویسی نشد.');
@@ -611,6 +697,10 @@ function mpm_dispatch(PDO $db, array $site, string $slug, string $route): void
             http_response_code(404);
             throw new MpmNotice('افزونه نصب نیست یا فعال نشده است.');
         }
+        if (!mpm_supports_nested_gateway($row)) {
+            http_response_code(409);
+            throw new MpmNotice('این نسخه با مسیر جدید سازگار نیست؛ بستهٔ جدید کلاس را به‌روزرسانی کن.');
+        }
         $manifest = mpm_manifest_for($dir, $row);
         $role = mpm_find_role($_SESSION ?? []);
         if ($role === null || !array_key_exists($role, $manifest['menus'])) {
@@ -646,7 +736,7 @@ function mpm_call(PDO $db, array $site, string $dir, array $row, array $manifest
     }
     $table = mpm_data_table($row['slug']);
     $GLOBALS['MTAG_PLUGIN_CONTEXT'] = [
-        'pdo' => $db, 'base' => 'school-plugins.php?plugin=' . rawurlencode($row['slug']),
+        'pdo' => $db, 'base' => 'school-plugins.php?plugin=' . rawurlencode($row['slug']), 'site_base' => '../',
         // A pre-upgrade page must reload before calling a new version's API.
         'csrf' => hash_hmac('sha256', $row['owner'] . ':' . $row['manifest_sha'] . ':' . session_id(), mpm_key($dir)),
         'read_runtime' => static fn(): ?string => mpm_owned_row($db, $row)['runtime'],
@@ -703,14 +793,14 @@ function mpm_post(PDO $db, ?array $site, string $origin, string $csrf): string
         if ($site || ($_POST['confirm_test'] ?? '') !== 'yes') throw new MpmNotice('راه‌اندازی فقط پس از تأیید هاست و دیتابیس تست ممکن است.');
         if (!class_exists('ZipArchive') || !extension_loaded('openssl')) throw new MpmNotice('ابتدا PHP Zip و OpenSSL را در هاست تست فعال کن.');
         $site = mpm_initialize($db, $origin, mpm_storage($origin));
-        mpm_locked($site['private_dir'], true, static fn() => mpm_link_menus(__DIR__, $site['private_dir']));
+        mpm_locked($site['private_dir'], true, static fn() => mpm_link_menus(mpm_host_root(), $site['private_dir']));
         return 'مدیر آماده است. از این پس ZIP افزونه را همین‌جا نصب کن.';
     }
     if (!$site || $site['origin'] !== $origin) throw new MpmNotice('اول مدیر افزونه‌ها را روی دامنهٔ آزمایشی راه‌اندازی کن.');
     $dir = mpm_private_dir($site['private_dir']);
     return mpm_locked($dir, true, static function () use ($db, $site, $dir, $action): string {
         if ($action === 'menus') {
-            mpm_link_menus(__DIR__, $dir);
+            mpm_link_menus(mpm_host_root(), $dir);
             return 'پیوند تنظیمات و پنل‌ها آماده است.';
         }
         if ($action === 'install') {
@@ -744,6 +834,7 @@ function mpm_post(PDO $db, ?array $site, string $origin, string $csrf): string
         }
         if ($action === 'enable') {
             if ($row['state'] !== 'disabled') throw new MpmNotice('افزونه فعال است.');
+            if (!mpm_supports_nested_gateway($row)) throw new MpmNotice('برای فعال‌سازی در مسیر جدید، ابتدا ZIP جدید کلاس را نصب کن.');
             if (mpm_owned_row($db, $row)['runtime'] !== null) throw new MpmNotice('اتاق قبلی هنوز بسته نشده است؛ ابتدا دوباره بستن اتاق را امتحان کن.');
             if (mpm_settings($db, $dir, $row) === []) throw new MpmNotice('ابتدا تنظیمات را ذخیره کن.');
             foreach ($manifest['files'] as $name => $hash) mpm_verified_file($dir, $row, $manifest, $name);
@@ -773,7 +864,7 @@ function mpm_hidden(string $csrf, string $action, string $slug = ''): void
 function mpm_admin_page(PDO $db, ?array $site, string $csrf, string $notice): void
 {
     mpm_view_start();
-    echo '<p><a href="other-settings.php">بازگشت به تنظیمات دیگر</a></p>';
+    echo '<p><a href="../other-settings.php">بازگشت به تنظیمات دیگر</a></p>';
     if ($notice !== '') echo '<p role="status">' . mpm_html($notice) . '</p>';
     if (!$site) {
         echo '<section><h2>راه‌اندازی یک‌باره</h2><form method="post" action="school-plugins.php">';
@@ -832,13 +923,17 @@ function mpm_admin_page(PDO $db, ?array $site, string $csrf, string $notice): vo
             }
             echo '<button>ذخیرهٔ تنظیمات</button></form>';
         }
+        $compatible = mpm_supports_nested_gateway($row);
+        if (!$compatible && !$pending) echo '<p>برای استفاده در مسیر جدید، کلاس را به نسخهٔ ۰٫۲٫۳ یا بالاتر به‌روزرسانی کن.</p>';
         if ($manifest || $row['state'] === 'enabled') {
             $enabled = $row['state'] === 'enabled';
-            echo '<form method="post" action="school-plugins.php">';
             $retryRoom = !$enabled && $runtime !== null;
-            mpm_hidden($csrf, ($enabled || $retryRoom) ? 'disable' : 'enable', $slug);
-            echo '<button>' . ($enabled ? 'غیرفعال‌سازی (حفظ داده)' : ($retryRoom ? 'تلاش دوباره برای بستن اتاق VPS' : 'فعال‌سازی')) . '</button></form>';
-            if ($enabled) echo '<p><a href="school-plugins.php?plugin=' . rawurlencode($slug) . '">بازکردن افزونه</a></p>';
+            if ($enabled || $retryRoom || $compatible) {
+                echo '<form method="post" action="school-plugins.php">';
+                mpm_hidden($csrf, ($enabled || $retryRoom) ? 'disable' : 'enable', $slug);
+                echo '<button>' . ($enabled ? 'غیرفعال‌سازی (حفظ داده)' : ($retryRoom ? 'تلاش دوباره برای بستن اتاق VPS' : 'فعال‌سازی')) . '</button></form>';
+            }
+            if ($enabled && $compatible) echo '<p><a href="school-plugins.php?plugin=' . rawurlencode($slug) . '">بازکردن افزونه</a></p>';
         } elseif (!$pending) {
             echo '<p>فایل‌ها یا تنظیمات قابل خواندن نیستند. حذف کامل همچنان در دسترس است.</p>';
         }
@@ -861,8 +956,15 @@ function mpm_run(): void
     $route = $_GET['route'] ?? 'page';
     try {
         $origin = mpm_origin();
-        if (!is_file(__DIR__ . '/includes/functions.php')) throw new MpmNotice('این فایل را کنار other-settings.php سایت تست بگذار.');
-        require_once __DIR__ . '/includes/functions.php';
+        $root = mpm_host_root();
+        if (basename(__DIR__) !== 'plugins' || !mpm_under($root, mpm_document_root()) || !is_file($root . '/includes/functions.php')) {
+            throw new MpmNotice('این فایل را در plugins/school-plugins.php داخل سایت تست قرار بده.');
+        }
+        $legacy = $root . '/school-plugins.php';
+        if (is_link($legacy) || (is_file($legacy) && str_contains((string)@file_get_contents($legacy, false, null, 0, 1024), 'const MPM_REGISTRY = '))) {
+            throw new MpmNotice('مدیر قدیمی هنوز در ریشهٔ سایت است؛ پس از بکاپ، فقط همان نسخهٔ قدیمی را از مسیر عمومی بردار.');
+        }
+        require_once $root . '/includes/functions.php';
         $db = mpm_database();
         $site = mpm_site($db);
         if ($site && $site['origin'] !== $origin) {
@@ -909,7 +1011,7 @@ function mpm_run(): void
             echo json_encode(['ok' => false, 'message' => $message], JSON_UNESCAPED_UNICODE);
         } else {
             mpm_view_start();
-            echo '<p role="alert">' . mpm_html($message) . '</p><p><a href="index.php">بازگشت به سایت</a></p></main></html>';
+            echo '<p role="alert">' . mpm_html($message) . '</p><p><a href="../index.php">بازگشت به سایت</a></p></main></html>';
         }
     }
 }
