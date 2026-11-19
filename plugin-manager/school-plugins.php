@@ -632,9 +632,13 @@ function mpm_is_manager(PDO $db): bool
 function mpm_post(PDO $db, ?array $site, string $origin, string $csrf): string
 {
     $posted = $_POST['csrf'] ?? null;
-    if (!is_string($posted) || !hash_equals($csrf, $posted) || (isset($_SERVER['HTTP_ORIGIN']) && $_SERVER['HTTP_ORIGIN'] !== $origin)) {
+    if (!is_string($posted) || !hash_equals($csrf, $posted)) {
         http_response_code(403);
         throw new MpmNotice('نشست فرم معتبر نیست؛ صفحه را دوباره باز کن.');
+    }
+    if (isset($_SERVER['HTTP_ORIGIN']) && $_SERVER['HTTP_ORIGIN'] !== $origin) {
+        http_response_code(403);
+        throw new MpmNotice('مبدأ فرم با دامنهٔ سایت تست یکسان نیست؛ مدیر افزونه‌ها را مستقیم در همان دامنه باز کن.');
     }
     $action = $_POST['action'] ?? null;
     if ($action === 'initialize') {
@@ -694,6 +698,9 @@ function mpm_post(PDO $db, ?array $site, string $origin, string $csrf): string
 
 function mpm_view_start(): void
 {
+    // With no-referrer, a browser's ordinary same-origin form POST sends Origin: null.
+    // same-origin keeps that header usable for validation without sending referrers off-site.
+    header('Referrer-Policy: same-origin');
     header('Content-Type: text/html; charset=UTF-8');
     header("Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
     echo '<!doctype html><html lang="fa" dir="rtl"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>مدیر افزونه‌ها</title><style>body{font-family:system-ui,sans-serif;line-height:1.65;max-width:54rem;margin:2rem auto;padding:0 1rem}section{border:1px solid #888;border-radius:8px;margin-block:1rem;padding:1rem}label{display:block;margin:.5rem 0}button,input,select{font:inherit;max-width:100%}input[dir=ltr]{width:min(24rem,95%)}form{margin:.5rem 0}small{display:block}.danger{border-top:1px solid #888;padding-top:.6rem}</style><main><h1>افزونه‌ها</h1>';

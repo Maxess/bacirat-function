@@ -61,11 +61,15 @@ try {
     $_SESSION = ['admin_id' => 2]; expect(!mpm_is_manager($db), 'regular admin cannot install PHP');
     $_SESSION = ['student_id' => 1]; expect(!mpm_is_manager($db), 'student cannot manage');
     $_SESSION = ['admin_id' => 1];
-    $_SERVER['HTTP_ORIGIN'] = 'https://not-the-test-school.example';
-    denied(fn()=>submit($db, $site, 'menus'));
-    unset($_SERVER['HTTP_ORIGIN']);
+    foreach (['https://not-the-test-school.example', 'null'] as $badOrigin) {
+        $_SERVER['HTTP_ORIGIN'] = $badOrigin;
+        denied(fn()=>submit($db, $site, 'menus'));
+        expect(http_response_code() === 403, 'invalid Origin remains blocked despite a valid form token');
+    }
+    $_SERVER['HTTP_ORIGIN'] = $site['origin'];
     $_POST = ['csrf' => 'wrong', 'action' => 'remove'];
     denied(fn()=>mpm_post($db, $site, $site['origin'], 'fixture-form-token'));
+    expect(http_response_code() === 403, 'same-origin form still needs a valid token');
     http_response_code(200);
 
     $db->exec("CREATE TABLE `$table` (id INT PRIMARY KEY, owner TEXT,settings TEXT); INSERT INTO `$table` VALUES(1,'unrelated','keep');");

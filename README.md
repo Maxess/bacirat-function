@@ -2,7 +2,7 @@
 
 ## پایلوت صوتی سایت مدرسه — نصب و حذف از پنل
 
-1. [دانلود ZIP مدیر افزونه‌ها](artifacts/mtagbot-plugin-manager-v0.1.0.zip) — یک‌بار روی هاست **تست** فایل `school-plugins.php` را اضافه کن.
+1. [دانلود ZIP مدیر افزونه‌ها (۰٫۱٫۱)](artifacts/mtagbot-plugin-manager-v0.1.1.zip) — یک‌بار روی هاست **تست** فایل `school-plugins.php` را اضافه کن. اگر ۰٫۱٫۰ را گذاشته‌ای، فقط همین یک فایل را جایگزین کن؛ نسخهٔ جدید خطای ارسال فرم در مرورگر را برطرف می‌کند.
 2. [دانلود ZIP کلاس آنلاین](artifacts/school-classroom-plugin-v0.2.0.zip) — بدون Extract، از **تنظیمات دیگر ← افزونه‌ها** نصب کن.
 3. [راهنمای مدیر و کلاس آنلاین](plugin-manager/README-fa.md) · [راهنمای نصب LiveKit روی VPS](server/README-fa.md)
 
