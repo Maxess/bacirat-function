@@ -71,6 +71,9 @@ $panel = ['student' => 'student-panel.php', 'teacher' => 'teacher-panel.php', 'a
             </div>
             <section id="people-panel" hidden>
                 <h2>حاضران</h2>
+                <?php if ($actor['moderator']): ?>
+                <p class="label">چند نفر می‌توانند هم‌زمان نوبت صدا داشته باشند. «قطع تصویر» مجوز تصویر دوربین و اشتراک صفحه را می‌بندد؛ تصویر در این پایلوت فعال نیست.</p>
+                <?php endif; ?>
                 <ul id="people"></ul>
             </section>
             <div id="audio-tracks" aria-hidden="true"></div>

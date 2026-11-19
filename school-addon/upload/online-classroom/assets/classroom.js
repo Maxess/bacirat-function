@@ -11,6 +11,26 @@
 
     function message(value) { el('status').textContent = value; }
     function authenticatedRoomConnected() { return room?.state === lk.ConnectionState.Connected; }
+    function maySpeak(person) {
+        const permissions = person?.permissions;
+        const sources = permissions?.canPublishSources;
+        // The SDK's protobuf TrackSource.MICROPHONE is 2. An empty list is unrestricted.
+        return permissions?.canPublish === true && Array.isArray(sources) && (sources.length === 0 || sources.includes(2));
+    }
+
+    function participantControl(person, title, action, successMessage) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.disabled = busy;
+        button.textContent = title;
+        button.setAttribute('aria-label', `${title}: ${person.name || person.identity}`);
+        button.addEventListener('click', () => run(async () => {
+            await api(action, { identity: person.identity });
+            message(successMessage);
+        }));
+        return button;
+    }
+
     function render() {
         const connected = authenticatedRoomConnected();
         const local = room?.localParticipant;
@@ -20,7 +40,7 @@
         el('people-panel').hidden = !connected;
         const mic = el('microphone');
         mic.hidden = !connected;
-        mic.disabled = busy || !local?.permissions?.canPublish;
+        mic.disabled = busy || !maySpeak(local);
         mic.textContent = local?.isMicrophoneEnabled ? 'خاموش‌کردن میکروفون' : 'روشن‌کردن میکروفون';
         el('enable-audio').hidden = !connected || room.canPlaybackAudio;
         if (moderator) {
@@ -35,17 +55,18 @@
         for (const person of [local, ...room.remoteParticipants.values()]) {
             const li = document.createElement('li');
             const title = person.name || person.identity;
-            li.textContent = title + (person === local ? ' (شما)' : '') + (person.permissions?.canPublish ? ' · نوبت صدا' : '');
-            if (moderator && !person.permissions?.canPublish) {
-                const button = document.createElement('button');
-                button.type = 'button';
-                button.disabled = busy;
-                button.textContent = 'دادن نوبت';
-                button.addEventListener('click', () => run(async () => {
-                    await api('floor', { identity: person.identity });
-                    message('نوبت صدا تغییر کرد. گوینده باید خودش میکروفون را روشن کند.');
-                }));
-                li.append(button);
+            const allowed = maySpeak(person);
+            li.textContent = title + (person === local ? ' (شما)' : '') + (allowed ? ' · نوبت صدا' : '');
+            const student = /^student-[1-9]\d{0,17}$/.test(person.identity);
+            if (moderator && (!allowed || student)) {
+                const controls = document.createElement('div');
+                controls.className = 'participant-controls';
+                if (!allowed) controls.append(participantControl(person, 'دادن نوبت صدا', 'give-mic', 'نوبت صدا داده شد. گوینده باید خودش میکروفون را روشن کند.'));
+                if (student) {
+                    controls.append(participantControl(person, 'قطع میکروفون', 'cut-mic', 'مجوز میکروفون این دانش‌آموز قطع شد.'));
+                    controls.append(participantControl(person, 'قطع تصویر', 'cut-video', 'مجوز تصویر این دانش‌آموز بسته شد.'));
+                }
+                li.append(controls);
             }
             people.append(li);
         }
@@ -106,16 +127,23 @@
         // Try within the click gesture; keep an explicit playback button if blocked.
         active.startAudio().catch(() => {});
         for (const event of [lk.RoomEvent.ParticipantConnected, lk.RoomEvent.ParticipantDisconnected, lk.RoomEvent.TrackMuted,
-            lk.RoomEvent.TrackUnmuted, lk.RoomEvent.AudioPlaybackStatusChanged, lk.RoomEvent.ConnectionStateChanged]) {
+            lk.RoomEvent.TrackUnmuted, lk.RoomEvent.LocalTrackPublished, lk.RoomEvent.LocalTrackUnpublished,
+            lk.RoomEvent.AudioPlaybackStatusChanged, lk.RoomEvent.ConnectionStateChanged]) {
             active.on(event, render);
         }
         active.on(lk.RoomEvent.TrackSubscribed, (track) => {
             if (active === room && track.kind === lk.Track.Kind.Audio) el('audio-tracks').append(track.attach());
         });
         active.on(lk.RoomEvent.TrackUnsubscribed, (track) => track.detach().forEach((node) => node.remove()));
-        active.on(lk.RoomEvent.ParticipantPermissionsChanged, (_before, person) => {
-            if (person === active.localParticipant && !person.permissions?.canPublish) {
-                person.setMicrophoneEnabled(false).catch(() => {});
+        active.on(lk.RoomEvent.ParticipantPermissionsChanged, (before, person) => {
+            if (active !== room) return;
+            if (person === active.localParticipant) {
+                const allowed = maySpeak(person);
+                if (!allowed) person.setMicrophoneEnabled(false).catch(() => {});
+                if (!moderator && before && maySpeak({ permissions: before }) !== allowed) {
+                    message(allowed ? 'اجازهٔ میکروفون داری. برای صحبت، خودت آن را روشن کن.'
+                        : 'نوبت میکروفون گرفته شد. هنوز می‌توانی صدای کلاس را بشنوی.');
+                }
             }
             render();
         });
@@ -125,7 +153,7 @@
         try {
             const ticket = await api(moderator ? 'open' : 'join');
             await active.connect(ticket.url, ticket.token);
-            message(moderator ? 'وارد شدی. از فهرست حاضران یک گوینده انتخاب کن.' : 'وارد شدی. اجازهٔ میکروفون را دبیر می‌دهد.');
+            message(moderator ? 'وارد شدی. از فهرست حاضران نوبت صدا بده یا مجوز هر دانش‌آموز را قطع کن.' : 'وارد شدی. اجازهٔ میکروفون را دبیر می‌دهد.');
         } catch (error) {
             await active.disconnect();
             disconnected(active);
@@ -135,7 +163,7 @@
 
     el('microphone').addEventListener('click', () => run(async () => {
         const local = room?.localParticipant;
-        if (!local?.permissions?.canPublish) return;
+        if (!maySpeak(local)) return;
         try {
             await local.setMicrophoneEnabled(!local.isMicrophoneEnabled);
             message(local.isMicrophoneEnabled ? 'میکروفون روشن است.' : 'میکروفون خاموش است.');
@@ -153,7 +181,7 @@
     }));
     if (moderator) {
         el('clear-floor').addEventListener('click', () => run(async () => {
-            await api('floor', {identity: null});
+            await api('cut-all-mics');
             message('نوبت میکروفون از همه گرفته شد.');
         }));
         el('close').addEventListener('click', () => {

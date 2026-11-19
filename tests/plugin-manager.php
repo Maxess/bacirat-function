@@ -48,6 +48,7 @@ try {
     $slug = 'school-classroom';
     $table = mpm_data_table($slug);
     $package = __DIR__ . '/../artifacts/school-classroom-plugin-v0.2.0.zip';
+    $upgrade = __DIR__ . '/../artifacts/school-classroom-plugin-v0.2.1.zip';
     mpm_link_menus($root, $dir);
     $menus = static fn() => [file_get_contents($root . '/other-settings.php'), file_get_contents($root . '/includes/header.php')];
     $managerMenus = $menus();
@@ -88,7 +89,7 @@ try {
         expect(!mpm_row($db, $slug) && !mpm_table_exists($db, $table), 'rejected before creating files or tables');
     }
 
-    mpm_install($db, $dir, $package);
+    expect(!mpm_install($db, $dir, $package), 'new install is not an upgrade');
     denied(fn()=>mpm_install($db, $dir, $package));
     $row = mpm_row($db, $slug); $path = mpm_path($dir, $row);
     expect($row['state'] === 'disabled' && is_file($path . '/index.php'), 'install disabled and private');
@@ -100,15 +101,44 @@ try {
     submit($db, $site, 'settings', ['settings' => ['class_id'=>'22', 'signal_url'=>'wss://media.example.ir', 'api_key'=>str_repeat('y',24), 'api_secret'=>$secret]]);
     $stored = $db->query("SELECT settings FROM `$table`")->fetchColumn();
     expect(!str_contains($stored, $secret) && mpm_settings($db, $dir, $row)['api_secret'] === $secret, 'encrypted settings round-trip');
+    $oldRow = $row;
+    $previous = mpm_settings($db, $dir, $row);
+    [$newManifest, $newRaw] = mpm_read_package($upgrade);
+    $staging = $path . '/release-' . hash('sha256', $newRaw);
     submit($db, $site, 'enable');
-    foreach (['student','teacher','admin'] as $role) expect(isset(mpm_menu_items($db, $dir, $role)[$slug]), 'active shown in every menu');
+    denied(fn()=>mpm_install($db, $dir, $upgrade));
+    expect(mpm_row($db, $slug)['version'] === '0.2.0' && !file_exists($staging), 'active version cannot be replaced');
+    submit($db, $site, 'disable');
+    mpm_query($db, "UPDATE `$table` SET runtime='pending-cleanup' WHERE id=1");
+    denied(fn()=>mpm_install($db, $dir, $upgrade));
+    expect(!file_exists($staging) && mpm_owned_row($db, $row)['runtime'] === 'pending-cleanup', 'do not upgrade over unconfirmed remote cleanup');
+    mpm_query($db, "UPDATE `$table` SET runtime=NULL WHERE id=1");
+    $altered = $work . '/altered-upgrade.zip'; copy($upgrade, $altered);
+    $zip = new ZipArchive(); expect($zip->open($altered) === true, 'inspect upgrade fixture');
+    $zip->addFromString('media.php', 'not reviewed'); $zip->close();
+    denied(fn()=>mpm_install($db, $dir, $altered));
+    expect(mpm_manifest_for($dir, $row)['version'] === '0.2.0' && !file_exists($staging), 'tampered upgrade does not disturb previous files');
+    mkdir($staging); file_put_contents($staging . '/plugin.json', 'partial write');
+    expect(mpm_release_dir($dir, $row) === $path, 'incomplete staging is not served');
+    expect(mpm_install($db, $dir, $upgrade), 'checked upgrade reuses the same installation');
+    $row = mpm_row($db, $slug);
+    expect($row['state'] === 'disabled' && $row['version'] === $newManifest['version'] && $row['owner'] === $oldRow['owner'], 'upgrade only switches release pointer');
+    expect(mpm_release_dir($dir, $row) === $staging && mpm_manifest_for($dir, $row) === $newManifest, 'staged release verified after retry');
+    expect($db->query("SELECT settings FROM `$table`")->fetchColumn() === $stored && mpm_settings($db, $dir, $row) === $previous, 'upgrade keeps settings ciphertext and contents byte-for-byte');
+    expect($menus() === $managerMenus && $normal() === $before, 'upgrade does not edit host panels or school records');
+    denied(fn()=>mpm_install($db, $dir, $upgrade));
+    denied(fn()=>mpm_install($db, $dir, $package));
+    denied(fn()=>mpm_dispatch($db, $site, $slug, 'page'));
+    http_response_code(200);
+    submit($db, $site, 'enable');
+    foreach (['student','teacher','admin'] as $role) expect(isset(mpm_menu_items($db, $dir, $role)[$slug]), 'upgraded release shown in every menu');
     $_SESSION = ['student_id' => 1];
     ob_start(); mpm_dispatch($db, $site, $slug, 'page'); $body = ob_get_clean();
     expect(str_contains($body, 'id="classroom"') && str_contains($body, 'route=api') && !str_contains($body, $secret), 'managed classroom renders without a config file or credential leak');
     expect(!isset($_SESSION['school_classroom_csrf']), 'managed session leaves no classroom-specific state');
     $old = $_GET ?? []; $_GET['name'] = 'assets/classroom.css';
     ob_start(); mpm_dispatch($db, $site, $slug, 'asset'); $asset = ob_get_clean(); $_GET = $old;
-    expect($asset === file_get_contents($path . '/assets/classroom.css'), 'managed asset routed');
+    expect($asset === file_get_contents($staging . '/assets/classroom.css') && str_contains($asset, '.participant-controls'), 'new release serves its own assets');
     ob_start(); mpm_admin_page($db, $site, 'fixture', ''); $ui = ob_get_clean();
     expect(!str_contains($ui, $secret), 'manager never echoes the saved secret');
     denied(fn()=>submit($db, $site, 'remove'));
@@ -130,7 +160,7 @@ try {
     expect(file_get_contents($work . '/outside.txt') === 'do not delete', 'unlink without following symlink');
     foreach (['student','teacher','admin'] as $role) expect(mpm_menu_items($db, $dir, $role) === [], 'removed from every panel');
     denied(fn()=>mpm_dispatch($db, $site, $slug, 'asset'));
-    mpm_install($db, $dir, $package);
+    mpm_install($db, $dir, $upgrade);
     expect(mpm_settings($db, $dir, mpm_row($db, $slug)) === [], 'reinstall does not restore deleted data');
     submit($db, $site, 'remove', ['confirm_delete'=>'yes']);
     if ($dsn !== 'sqlite::memory:') {
@@ -142,7 +172,7 @@ try {
         expect(!mpm_table_exists($db, $table) && !mpm_row($db, $slug) && !file_exists(mpm_path($dir, $attempt)), 'aborted install recoverable despite partially applied DDL');
         foreach (['classes', 'students', 'admins', 'settings', MPM_REGISTRY, MPM_SITE] as $fixtureTable) $db->exec("DROP TABLE `$fixtureTable`");
     }
-    echo strtoupper($db->getAttribute(PDO::ATTR_DRIVER_NAME)) . " PASS plugin admin gate, reviewed ZIP only, real dispatch, hide/disable, complete owned file+data+menu uninstall, unchanged site, clean reinstall\n";
+    echo strtoupper($db->getAttribute(PDO::ATTR_DRIVER_NAME)) . " PASS plugin admin gate, reviewed ZIP only, verified state-preserving upgrade, real dispatch, hide/disable, complete uninstall, unchanged site, clean reinstall\n";
 } finally {
     mpm_remove_tree($work);
 }

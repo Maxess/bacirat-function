@@ -13,6 +13,8 @@ final class ClassroomError extends RuntimeException
     }
 }
 
+require_once __DIR__ . '/media.php';
+
 function cl_headers(): void
 {
     header('Cache-Control: no-store, private');
@@ -339,34 +341,8 @@ function cl_managed_action(array $cfg, array $context, string $action, ?string $
     if ($room === null || ($action === 'join' && !cl_room_exists($room, $rpc))) {
         throw new ClassroomError(409, 'دبیر هنوز کلاس را شروع نکرده یا کلاس پایان یافته است.');
     }
-    if ($action === 'floor') {
-        cl_transfer_floor($room, $target, static fn($method, $data) => $rpc($method, $room, $data));
+    if (in_array($action, CL_MEDIA_ACTIONS, true)) {
+        cl_control_media($room, $action, $target, static fn($method, $data) => $rpc($method, $room, $data));
     }
     return $room;
-}
-
-function cl_transfer_floor(string $room, ?string $target, callable $rpc): void
-{
-    $peers = $rpc('ListParticipants', ['room' => $room])['participants'] ?? [];
-    $positions = [];
-    foreach ($peers as $peer) {
-        if (!empty($peer['identity'])) {
-            $positions[$peer['identity']] = $peer['permission'] ?? null;
-        }
-    }
-    if ($target !== null && !array_key_exists($target, $positions)) {
-        throw new ClassroomError(409, 'این شرکت‌کننده اکنون در کلاس نیست.');
-    }
-    $permission = ['canSubscribe' => true, 'canPublish' => false, 'canPublishData' => false];
-    // No grant is sent if a previous publisher cannot be revoked.
-    foreach ($positions as $name => $current) {
-        if ($name !== $target && (!is_array($current) || ($current['canPublish'] ?? false) !== false)) {
-            $rpc('UpdateParticipant', ['room' => $room, 'identity' => $name, 'permission' => $permission]);
-        }
-    }
-    if ($target !== null) {
-        $permission['canPublish'] = true;
-        $permission['canPublishSources'] = ['MICROPHONE'];
-        $rpc('UpdateParticipant', ['room' => $room, 'identity' => $target, 'permission' => $permission]);
-    }
 }

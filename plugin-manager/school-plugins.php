@@ -2,11 +2,15 @@
 declare(strict_types=1);
 
 // Standalone mtagbot plugin host. Upload this one file beside other-settings.php.
+const MPM_VERSION = '0.1.2';
 const MPM_REGISTRY = 'mtg_plugin_registry';
 const MPM_SITE = 'mtg_plugin_site';
 const MPM_MAX_ZIP = 2 * 1024 * 1024;
 const MPM_CATALOG = [
-    'school-classroom' => ['0.2.0' => '67f080645d4dce5b709183556b0dd7297c0784388942b2dd00c6157d8a5a117b'],
+    'school-classroom' => [
+        '0.2.0' => '67f080645d4dce5b709183556b0dd7297c0784388942b2dd00c6157d8a5a117b',
+        '0.2.1' => '0cb2f12254559d3b92c925abb3e9244328a3caf9c3386325c8f7d11b0c8c7ea6',
+    ],
 ];
 
 final class MpmNotice extends RuntimeException {}
@@ -284,11 +288,66 @@ function mpm_read_package(string $path): array
     }
 }
 
-function mpm_install(PDO $db, string $dir, string $zip): void
+function mpm_write_package(string $path, string $raw, array $files): void
+{
+    if (!@mkdir($path, 0700)) throw new MpmNotice('ساخت پوشهٔ افزونه ممکن نشد.');
+    mpm_new_file($path . '/plugin.json', $raw);
+    if (!@mkdir($path . '/assets', 0700)) throw new MpmNotice('ساخت پوشهٔ فایل‌های افزونه ممکن نشد.');
+    foreach ($files as $name => $data) mpm_new_file($path . '/' . $name, $data);
+}
+
+function mpm_release_dir(string $dir, array $row): string
+{
+    $base = mpm_path($dir, $row);
+    $sha = $row['manifest_sha'];
+    if (!preg_match('/^[0-9a-f]{64}$/D', $sha) || !is_dir($base) || is_link($base)) {
+        throw new MpmNotice('مسیر نسخهٔ افزونه معتبر نیست.');
+    }
+    $release = $base . '/release-' . $sha;
+    if (is_link($release) || (file_exists($release) && !is_dir($release))) {
+        throw new MpmNotice('مسیر نسخهٔ افزونه معتبر نیست.');
+    }
+    return is_dir($release) ? $release : $base; // Installations from older managers have a flat layout.
+}
+
+function mpm_upgrade(PDO $db, string $dir, array $row, array $manifest, string $raw, array $files): void
+{
+    if (version_compare($manifest['version'], $row['version'], '<=')) {
+        throw new MpmNotice('برای به‌روزرسانی، ZIP نسخهٔ جدیدتر را انتخاب کن.');
+    }
+    if ($row['state'] !== 'disabled' || mpm_owned_row($db, $row)['runtime'] !== null) {
+        throw new MpmNotice('برای به‌روزرسانی ابتدا اتاق را ببند و افزونه را غیرفعال کن.');
+    }
+    $previous = mpm_manifest_for($dir, $row);
+    if ($manifest['format'] !== $previous['format'] || $manifest['settings'] !== $previous['settings']) {
+        throw new MpmNotice('ساختار تنظیمات نسخهٔ جدید با نصب فعلی سازگار نیست؛ تنظیمات تغییر نکرد.');
+    }
+    $sha = hash('sha256', $raw);
+    $staged = mpm_path($dir, $row) . '/release-' . $sha;
+    // A retry may find an interrupted write of this exact reviewed release; never replace active files.
+    mpm_remove_tree($staged);
+    try {
+        mpm_write_package($staged, $raw, $files);
+    } catch (Throwable $error) {
+        mpm_remove_tree($staged);
+        throw $error;
+    }
+    // Switch the pointer only after the files are written. Keep staged files on an uncertain SQL result.
+    // Neither the owner nor the settings table/AEAD binding changes. Uninstall removes the entire owner root.
+    $update = mpm_query($db, 'UPDATE ' . MPM_REGISTRY . " SET version=?,manifest_sha=? WHERE slug=? AND owner=? AND manifest_sha=? AND state='disabled'",
+        [$manifest['version'], $sha, $row['slug'], $row['owner'], $row['manifest_sha']]);
+    if ($update->rowCount() !== 1) throw new MpmNotice('به‌روزرسانی ثبت نشد؛ دوباره صفحه را باز کن.');
+}
+
+// True for an in-place upgrade; false for a new disabled installation.
+function mpm_install(PDO $db, string $dir, string $zip): bool
 {
     [$manifest, $raw, $files] = mpm_read_package($zip);
     $slug = $manifest['id'];
-    if (mpm_row($db, $slug)) throw new MpmNotice('این افزونه قبلاً نصب شده است.');
+    if ($installed = mpm_row($db, $slug)) {
+        mpm_upgrade($db, $dir, $installed, $manifest, $raw, $files);
+        return true;
+    }
     if ($slug === 'school-classroom' && (is_dir(__DIR__ . '/online-classroom')
         || str_contains((string)@file_get_contents(__DIR__ . '/includes/header.php'), 'href="online-classroom/'))) {
         throw new MpmNotice('نسخهٔ دستی کلاس آنلاین پیدا شد. اول آن را طبق راهنما جمع کن؛ مدیر فایل‌های نصب دستی را حذف نمی‌کند.');
@@ -301,10 +360,7 @@ function mpm_install(PDO $db, string $dir, string $zip): void
     mpm_query($db, 'INSERT INTO ' . MPM_REGISTRY . ' (slug,version,manifest_sha,owner,state,installed_at) VALUES (?,?,?,?,?,?)',
         [$slug, $manifest['version'], hash('sha256', $raw), $owner, 'installing', gmdate('c')]);
     try {
-        if (!@mkdir($path, 0700)) throw new MpmNotice('ساخت پوشهٔ افزونه ممکن نشد.');
-        mpm_new_file($path . '/plugin.json', $raw);
-        if (!@mkdir($path . '/assets', 0700)) throw new MpmNotice('ساخت پوشهٔ فایل‌های افزونه ممکن نشد.');
-        foreach ($files as $name => $data) mpm_new_file($path . '/' . $name, $data);
+        mpm_write_package($path, $raw, $files);
         // Ownership in the table definition survives interruption between CREATE and INSERT.
         // No SQL from ZIP and no IF NOT EXISTS: a matching name alone is never ownership.
         $options = $db->getAttribute(PDO::ATTR_DRIVER_NAME) === 'mysql' ? " ENGINE=InnoDB COMMENT='mtag-plugin:$owner'" : '';
@@ -319,12 +375,13 @@ function mpm_install(PDO $db, string $dir, string $zip): void
         }
         throw $error;
     }
+    return false;
 }
 
 function mpm_manifest_for(string $dir, array $row): array
 {
-    $path = mpm_path($dir, $row);
-    $raw = !is_link($path) ? @file_get_contents($path . '/plugin.json', false, null, 0, 16385) : false;
+    $path = mpm_release_dir($dir, $row);
+    $raw = @file_get_contents($path . '/plugin.json', false, null, 0, 16385);
     if ($raw === false || !hash_equals($row['manifest_sha'], hash('sha256', $raw))) throw new MpmNotice('فهرست افزونه روی هاست موجود یا معتبر نیست.');
     $m = mpm_manifest($raw);
     if ($m['id'] !== $row['slug'] || $m['version'] !== $row['version']) throw new MpmNotice('نسخهٔ نصب‌شده با رجیستری یکسان نیست.');
@@ -334,7 +391,7 @@ function mpm_manifest_for(string $dir, array $row): array
 function mpm_verified_file(string $dir, array $row, array $manifest, string $name): string
 {
     if (!isset($manifest['files'][$name])) throw new MpmNotice('این مسیر متعلق به بسته نیست.');
-    $base = mpm_path($dir, $row);
+    $base = mpm_release_dir($dir, $row);
     $file = $base . '/' . $name;
     $real = realpath($file);
     if (!$real || !mpm_under($real, $base) || is_link($file) || !hash_equals($manifest['files'][$name], hash_file('sha256', $real) ?: '')) {
@@ -589,8 +646,8 @@ function mpm_call(PDO $db, array $site, string $dir, array $row, array $manifest
     $table = mpm_data_table($row['slug']);
     $GLOBALS['MTAG_PLUGIN_CONTEXT'] = [
         'pdo' => $db, 'base' => 'school-plugins.php?plugin=' . rawurlencode($row['slug']),
-        // Bind the page/API token to this install without leaving plugin data in site sessions.
-        'csrf' => hash_hmac('sha256', $row['owner'] . ':' . session_id(), mpm_key($dir)),
+        // A pre-upgrade page must reload before calling a new version's API.
+        'csrf' => hash_hmac('sha256', $row['owner'] . ':' . $row['manifest_sha'] . ':' . session_id(), mpm_key($dir)),
         'read_runtime' => static fn(): ?string => mpm_owned_row($db, $row)['runtime'],
         'write_runtime' => static function (?string $state) use ($db, $row, $table): void {
             mpm_query($db, "UPDATE `$table` SET runtime=? WHERE id=1 AND owner=?", [$state, $row['owner']]);
@@ -661,7 +718,7 @@ function mpm_post(PDO $db, ?array $site, string $origin, string $csrf): string
             if (($upload['error'] ?? -1) !== UPLOAD_ERR_OK || !is_string($temp) || !is_uploaded_file($temp)) {
                 throw new MpmNotice('ZIP دریافت نشد؛ محدودیت آپلود PHP را بررسی کن.');
             }
-            mpm_install($db, $dir, $temp);
+            if (mpm_install($db, $dir, $temp)) return 'به‌روزرسانی شد؛ تنظیمات حفظ شدند. افزونه فعلاً غیرفعال است.';
             return 'نصب شد و هنوز غیرفعال است. تنظیمات را ذخیره و سپس فعال کن.';
         }
         $slug = $_POST['slug'] ?? null;
@@ -703,7 +760,7 @@ function mpm_view_start(): void
     header('Referrer-Policy: same-origin');
     header('Content-Type: text/html; charset=UTF-8');
     header("Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
-    echo '<!doctype html><html lang="fa" dir="rtl"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>مدیر افزونه‌ها</title><style>body{font-family:system-ui,sans-serif;line-height:1.65;max-width:54rem;margin:2rem auto;padding:0 1rem}section{border:1px solid #888;border-radius:8px;margin-block:1rem;padding:1rem}label{display:block;margin:.5rem 0}button,input,select{font:inherit;max-width:100%}input[dir=ltr]{width:min(24rem,95%)}form{margin:.5rem 0}small{display:block}.danger{border-top:1px solid #888;padding-top:.6rem}</style><main><h1>افزونه‌ها</h1>';
+    echo '<!doctype html><html lang="fa" dir="rtl"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>مدیر افزونه‌ها</title><style>body{font-family:system-ui,sans-serif;line-height:1.65;max-width:54rem;margin:2rem auto;padding:0 1rem}section{border:1px solid #888;border-radius:8px;margin-block:1rem;padding:1rem}label{display:block;margin:.5rem 0}button,input,select{font:inherit;max-width:100%}input[dir=ltr]{width:min(24rem,95%)}form{margin:.5rem 0}small{display:block}.danger{border-top:1px solid #888;padding-top:.6rem}</style><main><h1>افزونه‌ها</h1><small>نسخهٔ مدیر <bdi>' . MPM_VERSION . '</bdi></small>';
 }
 
 function mpm_hidden(string $csrf, string $action, string $slug = ''): void
@@ -727,9 +784,9 @@ function mpm_admin_page(PDO $db, ?array $site, string $csrf, string $notice): vo
         echo '</p><label><input required type="checkbox" name="confirm_test" value="yes"> این هاست و پایگاه داده آزمایشی‌اند.</label><button>راه‌اندازی مدیر افزونه‌ها</button></form></section></main></html>';
         return;
     }
-    echo '<section><h2>نصب از ZIP</h2><form method="post" action="school-plugins.php" enctype="multipart/form-data">';
+    echo '<section><h2>نصب یا به‌روزرسانی از ZIP</h2><form method="post" action="school-plugins.php" enctype="multipart/form-data">';
     mpm_hidden($csrf, 'install');
-    echo '<label>بستهٔ تأییدشده (حداکثر ۲ مگابایت) <input type="file" name="package" accept=".zip,application/zip" required></label><button>نصب افزونه</button></form></section>';
+    echo '<label>بستهٔ تأییدشده (حداکثر ۲ مگابایت) <input type="file" name="package" accept=".zip,application/zip" required></label><button>نصب یا به‌روزرسانی</button></form></section>';
     $dir = mpm_private_dir($site['private_dir']);
     $rows = mpm_query($db, 'SELECT * FROM ' . MPM_REGISTRY . ' ORDER BY slug')->fetchAll(PDO::FETCH_ASSOC);
     $labels = ['enabled' => 'فعال', 'disabled' => 'غیرفعال', 'installing' => 'نصب ناتمام', 'removing' => 'حذف در انتظار تکمیل'];

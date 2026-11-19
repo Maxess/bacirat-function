@@ -8,5 +8,5 @@ button { font: inherit; padding: .4rem .75rem; cursor: pointer; }
 button:disabled { cursor: not-allowed; }
 #people { padding-inline-start: 1.5rem; }
 #people li { margin-block: .5rem; }
-#people button { margin-inline-start: .75rem; }
+.participant-controls { display: flex; flex-wrap: wrap; gap: .4rem; margin-block-start: .25rem; }
 #status { min-block-size: 2em; }
