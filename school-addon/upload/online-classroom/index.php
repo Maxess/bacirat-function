@@ -11,7 +11,7 @@ try {
     $pdo = cl_load_site($cfg);
     $class = cl_class($pdo, $cfg);
     $actor = cl_actor($pdo, $_SESSION, $class);
-    $csrf = $_SESSION['school_classroom_csrf'] ??= bin2hex(random_bytes(32));
+    $csrf = cl_csrf(true);
     session_write_close();
     $connect = $cfg['api_url'] . ' ' . $cfg['signal_url'];
 } catch (ClassroomError $error) {
@@ -30,7 +30,7 @@ function cl_html(string $value): string {
     return htmlspecialchars($value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
 }
 $roles = ['student' => 'دانش‌آموز', 'teacher' => 'دبیر', 'admin' => 'مدیر'];
-$panel = ['student' => '../student-panel.php', 'teacher' => '../teacher-panel.php', 'admin' => '../index.php?view=dashboard'];
+$panel = ['student' => 'student-panel.php', 'teacher' => 'teacher-panel.php', 'admin' => 'index.php?view=dashboard'];
 ?>
 <!doctype html>
 <html lang="fa" dir="rtl">
@@ -38,10 +38,10 @@ $panel = ['student' => '../student-panel.php', 'teacher' => '../teacher-panel.ph
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>کلاس آنلاین مدرسه</title>
-    <link rel="stylesheet" href="assets/classroom.css">
+    <link rel="stylesheet" href="<?= cl_html(cl_asset('classroom.css')) ?>">
     <?php if ($actor !== null): ?>
-    <script defer src="assets/livekit-client.umd.js"></script>
-    <script defer src="assets/classroom.js"></script>
+    <script defer src="<?= cl_html(cl_asset('livekit-client.umd.js')) ?>"></script>
+    <script defer src="<?= cl_html(cl_asset('classroom.js')) ?>"></script>
     <?php endif; ?>
 </head>
 <body>
@@ -52,10 +52,10 @@ $panel = ['student' => '../student-panel.php', 'teacher' => '../teacher-panel.ph
     </header>
     <?php if ($actor === null): ?>
         <p role="alert"><?= cl_html((string)$errorMessage) ?></p>
-        <nav><a href="../index.php?view=login">ورود دانش‌آموز</a> · <a href="../admin-login.php?tab=teacher">ورود دبیر یا مدیر</a></nav>
+        <nav><a href="<?= cl_html(cl_site_href('index.php?view=login')) ?>">ورود دانش‌آموز</a> · <a href="<?= cl_html(cl_site_href('admin-login.php?tab=teacher')) ?>">ورود دبیر یا مدیر</a></nav>
     <?php else: ?>
         <p><?= cl_html($actor['name']) ?> · <?= cl_html($roles[$actor['role']]) ?> · <?= cl_html($class['year']) ?></p>
-        <section id="classroom" data-csrf="<?= cl_html($csrf) ?>" data-moderator="<?= $actor['moderator'] ? 'yes' : 'no' ?>">
+        <section id="classroom" data-api="<?= cl_html(cl_api_href()) ?>" data-csrf="<?= cl_html($csrf) ?>" data-moderator="<?= $actor['moderator'] ? 'yes' : 'no' ?>">
             <p id="status" role="status" aria-live="polite">برای شروع یا ورود دکمهٔ زیر را بزن.</p>
             <div class="actions" aria-label="کنترل‌های کلاس">
                 <?php if ($actor['moderator']): ?>
@@ -75,7 +75,7 @@ $panel = ['student' => '../student-panel.php', 'teacher' => '../teacher-panel.ph
             </section>
             <div id="audio-tracks" aria-hidden="true"></div>
         </section>
-        <p><a href="<?= cl_html($panel[$actor['role']]) ?>">بازگشت به پنل</a></p>
+        <p><a href="<?= cl_html(cl_site_href($panel[$actor['role']])) ?>">بازگشت به پنل</a></p>
     <?php endif; ?>
 </main>
 </body>

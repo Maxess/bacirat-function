@@ -31,18 +31,40 @@ function cl_origin(string $value, string $scheme): string
     return strtolower($value);
 }
 
+function cl_manager_context(): ?array
+{
+    $context = $GLOBALS['MTAG_PLUGIN_CONTEXT'] ?? null;
+    return is_array($context) ? $context : null;
+}
+
+function cl_csrf(bool $create = false): ?string
+{
+    if ($context = cl_manager_context()) return $context['csrf'];
+    if ($create) $_SESSION['school_classroom_csrf'] ??= bin2hex(random_bytes(32));
+    return $_SESSION['school_classroom_csrf'] ?? null;
+}
+
+function cl_asset(string $name): string
+{
+    $context = cl_manager_context();
+    return $context ? $context['base'] . '&route=asset&name=' . rawurlencode('assets/' . $name) : 'assets/' . $name;
+}
+
+function cl_api_href(): string
+{
+    $context = cl_manager_context();
+    return $context ? $context['base'] . '&route=api' : 'api.php';
+}
+
+function cl_site_href(string $page): string
+{
+    return (cl_manager_context() ? '' : '../') . $page;
+}
+
 function cl_config(): array
 {
-    $path = getenv('SCHOOL_CLASSROOM_CONFIG') ?: dirname(__DIR__, 2) . '/school-classroom.local.php';
-    if (!is_file($path) || !is_readable($path)) {
-        throw new ClassroomError(503, 'پایلوت هنوز روی این هاست تنظیم نشده است.');
-    }
-    $real = realpath($path);
-    $public = !empty($_SERVER['DOCUMENT_ROOT']) ? realpath($_SERVER['DOCUMENT_ROOT']) : false;
-    if (!$real || ($public && str_starts_with($real, rtrim($public, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR))) {
-        throw new ClassroomError(503, 'فایل تنظیمات باید خارج از پوشهٔ عمومی سایت باشد.');
-    }
-    $cfg = require $real;
+    $context = cl_manager_context();
+    $cfg = $context ? $context['config'] : cl_legacy_config();
     if (!is_array($cfg) || ($cfg['enabled'] ?? null) !== true) {
         throw new ClassroomError(503, 'پایلوت در تنظیمات این هاست فعال نیست.');
     }
@@ -54,7 +76,7 @@ function cl_config(): array
         throw new ClassroomError(403, 'این افزونه فقط روی دامنهٔ HTTPS آزمایشیِ تنظیم‌شده فعال است.');
     }
     if (!is_int($cfg['class_id'] ?? null) || $cfg['class_id'] < 1
-        || !is_string($cfg['expected_test_database'] ?? null) || $cfg['expected_test_database'] === ''
+        || (!$context && (!is_string($cfg['expected_test_database'] ?? null) || $cfg['expected_test_database'] === ''))
         || !preg_match('/^[a-z0-9][a-z0-9-]{2,39}$/D', (string)($cfg['room_prefix'] ?? ''))
         || !preg_match('/^[A-Za-z0-9_-]{12,64}$/D', (string)($cfg['api_key'] ?? ''))
         || !preg_match('/^[A-Za-z0-9_-]{32,128}$/D', (string)($cfg['api_secret'] ?? ''))) {
@@ -63,8 +85,23 @@ function cl_config(): array
     return $cfg;
 }
 
+function cl_legacy_config(): mixed
+{
+    $path = getenv('SCHOOL_CLASSROOM_CONFIG') ?: dirname(__DIR__, 2) . '/school-classroom.local.php';
+    if (!is_file($path) || !is_readable($path)) {
+        throw new ClassroomError(503, 'پایلوت هنوز روی این هاست تنظیم نشده است.');
+    }
+    $real = realpath($path);
+    $public = !empty($_SERVER['DOCUMENT_ROOT']) ? realpath($_SERVER['DOCUMENT_ROOT']) : false;
+    if (!$real || ($public && str_starts_with($real, rtrim($public, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR))) {
+        throw new ClassroomError(503, 'فایل تنظیمات باید خارج از پوشهٔ عمومی سایت باشد.');
+    }
+    return require $real;
+}
+
 function cl_load_site(array $cfg): PDO
 {
+    if ($context = cl_manager_context()) return $context['pdo'];
     $root = dirname(__DIR__);
     $functions = $root . '/includes/functions.php';
     $dbFile = $root . '/config/database.php';
@@ -258,6 +295,54 @@ function cl_room_lock(PDO $pdo, string $room, callable $work): mixed
     } finally {
         cl_query($pdo, 'SELECT RELEASE_LOCK(?)', [$key]);
     }
+}
+
+function cl_create_room(string $room, callable $rpc): void
+{
+    $rpc('CreateRoom', $room, ['name' => $room, 'maxParticipants' => 4, 'emptyTimeout' => 300, 'departureTimeout' => 20]);
+}
+
+function cl_room_exists(string $room, callable $rpc): bool
+{
+    $rooms = $rpc('ListRooms', $room, ['names' => [$room]])['rooms'] ?? [];
+    return in_array($room, array_column($rooms, 'name'), true);
+}
+
+function cl_managed_action(array $cfg, array $context, string $action, ?string $target, callable $rpc): ?string
+{
+    // The caller holds the per-install MySQL lock or the manager's exclusive lifecycle lock.
+    $room = ($context['read_runtime'])();
+    $write = $context['write_runtime'];
+    $prefix = $cfg['room_prefix'];
+    if ($room !== null && !preg_match('/^' . preg_quote($prefix, '/') . '-[a-f0-9]{24}$/D', $room)) {
+        throw new ClassroomError(503, 'شناسهٔ اتاق این نصب معتبر نیست.');
+    }
+    if ($action === 'open') {
+        if ($room !== null && cl_room_exists($room, $rpc)) return $room;
+        // Never reopen a previous room name: previously issued listener tickets cannot enter a new lesson.
+        $room = $prefix . '-' . bin2hex(random_bytes(12));
+        $write($room); // Record ownership before the network operation (its reply might be lost).
+        cl_create_room($room, $rpc);
+        return $room;
+    }
+    if ($action === 'close') {
+        if ($room !== null) {
+            try {
+                $rpc('DeleteRoom', $room, ['room' => $room]);
+            } catch (ClassroomError $error) {
+                if ($error->status !== 409) throw $error; // RoomService's not_found: already closed.
+            }
+            $write(null);
+        }
+        return null;
+    }
+    if ($room === null || ($action === 'join' && !cl_room_exists($room, $rpc))) {
+        throw new ClassroomError(409, 'دبیر هنوز کلاس را شروع نکرده یا کلاس پایان یافته است.');
+    }
+    if ($action === 'floor') {
+        cl_transfer_floor($room, $target, static fn($method, $data) => $rpc($method, $room, $data));
+    }
+    return $room;
 }
 
 function cl_transfer_floor(string $room, ?string $target, callable $rpc): void

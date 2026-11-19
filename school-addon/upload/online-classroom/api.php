@@ -26,7 +26,7 @@ try {
         throw new ClassroomError(400, 'درخواست قابل خواندن نیست.');
     }
     $pdo = cl_load_site($cfg);
-    $csrf = $_SESSION['school_classroom_csrf'] ?? null;
+    $csrf = cl_csrf();
     if (!is_string($csrf) || !hash_equals($csrf, (string)($_SERVER['HTTP_X_CLASSROOM_CSRF'] ?? ''))) {
         throw new ClassroomError(403, 'نشست صفحه منقضی شده؛ صفحهٔ کلاس را دوباره باز کن.');
     }
@@ -34,8 +34,6 @@ try {
     session_write_close();
     $class = cl_class($pdo, $cfg);
     $actor = cl_actor($pdo, $session, $class);
-    $room = $class['room'];
-    $rpc = static fn(string $method, array $data): array => cl_rpc($cfg, $room, $method, $data);
     $action = $body['action'];
     if (!in_array($action, ['join', 'open', 'close', 'floor'], true)) {
         throw new ClassroomError(400, 'عملیات شناخته نشد.');
@@ -43,23 +41,22 @@ try {
     if ($action !== 'join' && !$actor['moderator']) {
         throw new ClassroomError(403, 'این عملیات فقط برای دبیر یا مدیر مجاز است.');
     }
-    if ($action === 'open') {
-        cl_room_lock($pdo, $room, static fn() => $rpc('CreateRoom', [
-            'name' => $room, 'maxParticipants' => 4, 'emptyTimeout' => 300, 'departureTimeout' => 20,
-        ]));
+    $target = $body['identity'] ?? null;
+    if ($action === 'floor' && $target !== null && (!is_string($target) || !preg_match('/^(student|teacher|admin)-[1-9]\d{0,17}$/D', $target))) {
+        throw new ClassroomError(400, 'شناسهٔ شرکت‌کننده معتبر نیست.');
+    }
+    $rpc = static fn(string $method, string $room, array $data): array => cl_rpc($cfg, $room, $method, $data);
+    $room = $class['room'];
+    if ($context = cl_manager_context()) {
+        $room = cl_room_lock($pdo, $cfg['room_prefix'], static fn() => cl_managed_action($cfg, $context, $action, $target, $rpc));
+    } elseif ($action === 'open') {
+        cl_room_lock($pdo, $room, static fn() => cl_create_room($room, $rpc));
     } elseif ($action === 'close') {
-        cl_room_lock($pdo, $room, static fn() => $rpc('DeleteRoom', ['room' => $room]));
+        cl_room_lock($pdo, $room, static fn() => $rpc('DeleteRoom', $room, ['room' => $room]));
     } elseif ($action === 'floor') {
-        $target = $body['identity'] ?? null;
-        if ($target !== null && (!is_string($target) || !preg_match('/^(student|teacher|admin)-[1-9]\d{0,17}$/D', $target))) {
-            throw new ClassroomError(400, 'شناسهٔ شرکت‌کننده معتبر نیست.');
-        }
-        cl_room_lock($pdo, $room, static fn() => cl_transfer_floor($room, $target, $rpc));
-    } else {
-        $rooms = $rpc('ListRooms', ['names' => [$room]])['rooms'] ?? [];
-        if (!in_array($room, array_column($rooms, 'name'), true)) {
-            throw new ClassroomError(409, 'دبیر هنوز کلاس را شروع نکرده یا کلاس پایان یافته است.');
-        }
+        cl_room_lock($pdo, $room, static fn() => cl_transfer_floor($room, $target, static fn($method, $data) => $rpc($method, $room, $data)));
+    } elseif (!cl_room_exists($room, $rpc)) {
+        throw new ClassroomError(409, 'دبیر هنوز کلاس را شروع نکرده یا کلاس پایان یافته است.');
     }
     $response = ['ok' => true];
     if ($action === 'join' || $action === 'open') {

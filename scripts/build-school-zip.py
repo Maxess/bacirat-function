@@ -42,6 +42,8 @@ def main():
     parser.add_argument('--sdk-tgz', type=Path)
     parser.add_argument('--output', type=Path, default=ROOT / 'artifacts' / RELEASE)
     args = parser.parse_args()
+    if (ROOT / 'plugin-manager' / 'school-plugins.php').is_file():
+        parser.error('Manual v0.1.0 is archived at 885bd8f4754a74edbb3e496a0da9cddb19aef468; use build-managed-school.py in this revision')
     if args.sdk_tgz:
         sdk = args.sdk_tgz.read_bytes()
     else:

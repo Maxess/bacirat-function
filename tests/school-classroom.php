@@ -62,3 +62,40 @@ cl_transfer_floor($class['room'],null,$rpc);
 check(count($updates)===1 && !$updates[0]['permission']['canPublish'], 'cut floor');
 check(cl_service_grant('UpdateParticipant', $class['room']) === ['roomAdmin'=>true,'room'=>$class['room']], 'admin RPC cannot escape current room');
 echo "PASS school membership, no invalid/ambiguous roles, JWT grants, microphone handoff\n";
+
+// A removed/closed room name must not be reused, and cleanup must not target another install.
+$state = null;
+$history = [];
+$rooms = [];
+$ctx = [
+    'read_runtime' => static function () use (&$state): ?string { return $state; },
+    'write_runtime' => static function (?string $value) use (&$state): void { $state = $value; },
+];
+$mock = static function (string $method, string $room, array $data) use (&$rooms, &$history, &$state): array {
+    $history[] = [$method, $room];
+    if ($method === 'CreateRoom') {
+        check($state === $room && $data['maxParticipants'] === 4, 'journal room before network send');
+        $rooms[$room] = ['name' => $room];
+    } elseif ($method === 'DeleteRoom') {
+        if (!isset($rooms[$room])) throw new ClassroomError(409, 'not found');
+        unset($rooms[$room]);
+    } elseif ($method === 'ListRooms') {
+        return ['rooms' => isset($rooms[$room]) ? [$rooms[$room]] : []];
+    }
+    return [];
+};
+blocked(fn()=>cl_managed_action($cfg, $ctx, 'join', null, $mock),409);
+$first = cl_managed_action($cfg, $ctx, 'open', null, $mock);
+check(cl_managed_action($cfg, $ctx, 'open', null, $mock) === $first, 'reuse only a still-active lesson');
+check(cl_managed_action($cfg, $ctx, 'join', null, $mock) === $first, 'join current lesson only');
+$rooms['another-install'] = ['name' => 'another-install'];
+$fail = static fn() => throw new ClassroomError(502, 'VPS offline');
+blocked(fn()=>cl_managed_action($cfg, $ctx, 'close', null, $fail),502);
+check($state === $first, 'retain runtime for a cleanup retry');
+cl_managed_action($cfg, $ctx, 'close', null, $mock);
+check($state === null && !isset($rooms[$first]) && isset($rooms['another-install']), 'close only own room');
+check(cl_managed_action($cfg, $ctx, 'open', null, $mock) !== $first, 'new lesson gets a new room, not stale listener tickets');
+$state = 'another-install'; $calls = count($history);
+blocked(fn()=>cl_managed_action($cfg, $ctx, 'close', null, $mock),503);
+check(count($history) === $calls, 'bad runtime never sent to VPS');
+echo "PASS managed room journal, exact cleanup, outage retry, fresh room after close\n";

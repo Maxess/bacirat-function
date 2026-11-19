@@ -52,7 +52,7 @@
     }
 
     async function api(action, data = {}) {
-        const response = await fetch('api.php', {
+        const response = await fetch(root.dataset.api || 'api.php', {
             method: 'POST', credentials: 'same-origin', cache: 'no-store',
             headers: {'Content-Type': 'application/json', 'X-Classroom-CSRF': root.dataset.csrf},
             body: JSON.stringify({action, ...data}),
