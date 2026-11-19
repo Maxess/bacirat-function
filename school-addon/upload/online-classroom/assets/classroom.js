@@ -11,11 +11,38 @@
 
     function message(value) { el('status').textContent = value; }
     function authenticatedRoomConnected() { return room?.state === lk.ConnectionState.Connected; }
+    function microphoneFeedback(value = '') {
+        const feedback = el('mic-feedback');
+        feedback.textContent = value;
+        feedback.hidden = value === '';
+    }
     function maySpeak(person) {
         const permissions = person?.permissions;
         const sources = permissions?.canPublishSources;
         // The SDK's protobuf TrackSource.MICROPHONE is 2. An empty list is unrestricted.
         return permissions?.canPublish === true && Array.isArray(sources) && (sources.length === 0 || sources.includes(2));
+    }
+
+    // Only show fixed diagnostic codes. SDK error messages may contain signaling details.
+    function microphoneFailure(local, enabling, error) {
+        const name = error?.name;
+        if (error && error === local.lastMicrophoneError) {
+            if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
+                return 'مرورگر اجازهٔ استفاده از میکروفون را نداد. (MIC-ACCESS)';
+            }
+            return 'مرورگر نتوانست میکروفون دستگاه را راه‌اندازی کند. (MIC-CAPTURE)';
+        }
+        if (name === 'NegotiationError' || name === 'OperationError') {
+            return 'مرورگر و سرور نتوانستند مسیر ارسال صدا را برقرار کنند. (MIC-RTC)';
+        }
+        if (!authenticatedRoomConnected() || name === 'ConnectionError' || name === 'SignalReconnectError' ||
+            (name === 'PublishTrackError' && error.status === 408)) {
+            return 'درخواست میکروفون به‌دلیل اختلال اتصال کامل نشد. (MIC-CONNECTION)';
+        }
+        if (enabling && (!maySpeak(local) || (name === 'PublishTrackError' && error.status === 403))) {
+            return 'اجازهٔ ارسال صدا در کلاس تأیید نشد؛ از دبیر نوبت بگیر. (MIC-GRANT)';
+        }
+        return enabling ? 'میکروفون برای ارسال صدا فعال نشد. (MIC-PUBLISH)' : 'خاموش‌کردن میکروفون کامل نشد. (MIC-MUTE)';
     }
 
     function participantControl(person, title, action, successMessage) {
@@ -33,14 +60,16 @@
 
     function render() {
         const connected = authenticatedRoomConnected();
+        const state = room?.state;
+        const reconnecting = state === lk.ConnectionState.Reconnecting || state === lk.ConnectionState.SignalReconnecting;
         const local = room?.localParticipant;
         enter.hidden = !!room;
         enter.disabled = busy;
         el('leave').hidden = !room;
         el('people-panel').hidden = !connected;
         const mic = el('microphone');
-        mic.hidden = !connected;
-        mic.disabled = busy || !maySpeak(local);
+        mic.hidden = !connected && !reconnecting;
+        mic.disabled = busy || !connected || !maySpeak(local);
         mic.textContent = local?.isMicrophoneEnabled ? 'خاموش‌کردن میکروفون' : 'روشن‌کردن میکروفون';
         el('enable-audio').hidden = !connected || room.canPlaybackAudio;
         if (moderator) {
@@ -117,7 +146,11 @@
     enter.addEventListener('click', () => run(async () => {
         if (room) return;
         if (!window.isSecureContext) throw new PublicError('برای کلاس به HTTPS معتبر نیاز است.');
+        microphoneFeedback();
         const active = new lk.Room({
+            // Use separate send/receive peer connections for the audio-only pilot. The
+            // SDK's single-PC path can fail renegotiation on the first mic publication.
+            singlePeerConnection: false,
             audioCaptureDefaults: {channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true},
             publishDefaults: {audioPreset: {maxBitrate: 24000}, dtx: true, red: false, forceStereo: false},
         });
@@ -140,16 +173,26 @@
             if (person === active.localParticipant) {
                 const allowed = maySpeak(person);
                 if (!allowed) person.setMicrophoneEnabled(false).catch(() => {});
-                if (!moderator && before && maySpeak({ permissions: before }) !== allowed) {
+                if (!moderator && before && authenticatedRoomConnected() && maySpeak({ permissions: before }) !== allowed) {
                     message(allowed ? 'اجازهٔ میکروفون داری. برای صحبت، خودت آن را روشن کن.'
                         : 'نوبت میکروفون گرفته شد. هنوز می‌توانی صدای کلاس را بشنوی.');
                 }
             }
             render();
         });
-        active.on(lk.RoomEvent.Reconnecting, () => message('اتصال ناپایدار است… اگر قطع شد، دوباره وارد شو.'));
-        active.on(lk.RoomEvent.Reconnected, () => { message('اتصال برقرار شد.'); render(); });
-        active.on(lk.RoomEvent.Disconnected, () => disconnected(active));
+        const retrying = () => {
+            if (active === room) message('در حال اتصال دوباره… اگر قطع شد، دوباره وارد شو.');
+        };
+        active.on(lk.RoomEvent.SignalReconnecting, retrying);
+        active.on(lk.RoomEvent.Reconnecting, retrying);
+        active.on(lk.RoomEvent.Reconnected, () => {
+            if (active === room) { message('اتصال دوباره برقرار شد.'); render(); }
+        });
+        active.on(lk.RoomEvent.Disconnected, (reason) => {
+            const label = Number.isInteger(reason) ? lk.DisconnectReason?.[reason] : undefined;
+            if (label === 'CLIENT_INITIATED') disconnected(active);
+            else disconnected(active, `ارتباط با کلاس قطع شد. برای برگشت، دوباره وارد شو. (${label || 'ROOM-DISCONNECTED'})`);
+        });
         try {
             const ticket = await api(moderator ? 'open' : 'join');
             await active.connect(ticket.url, ticket.token);
@@ -162,16 +205,26 @@
     }));
 
     el('microphone').addEventListener('click', () => run(async () => {
-        const local = room?.localParticipant;
-        if (!maySpeak(local)) return;
+        const active = room;
+        const local = active?.localParticipant;
+        if (!authenticatedRoomConnected() || !maySpeak(local)) return;
+        microphoneFeedback();
+        const enabling = !local.isMicrophoneEnabled;
         try {
-            await local.setMicrophoneEnabled(!local.isMicrophoneEnabled);
-            message(local.isMicrophoneEnabled ? 'میکروفون روشن است.' : 'میکروفون خاموش است.');
-        } catch (_) {
-            throw new PublicError('میکروفون روشن نشد؛ اجازهٔ مرورگر، دستگاه و نوبت صدا را بررسی کن.');
+            await local.setMicrophoneEnabled(enabling);
+            if (local.isMicrophoneEnabled !== enabling) microphoneFeedback(microphoneFailure(local, enabling));
+            else if (active === room && authenticatedRoomConnected() && maySpeak(local)) {
+                message(enabling ? 'میکروفون برای ارسال صدا روشن است.' : 'میکروفون خاموش است.');
+            }
+        } catch (error) {
+            microphoneFeedback(microphoneFailure(local, enabling, error));
         }
     }));
-    el('enable-audio').addEventListener('click', () => run(() => room?.startAudio()));
+    el('enable-audio').addEventListener('click', () => run(async () => {
+        try { await room?.startAudio(); } catch (_) {
+            throw new PublicError('پخش صدا در دستگاه شنونده فعال نشد. (AUDIO-PLAYBACK)');
+        }
+    }));
     el('leave').addEventListener('click', () => run(async () => {
         const active = room;
         if (active) {

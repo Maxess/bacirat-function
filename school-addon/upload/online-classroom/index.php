@@ -57,6 +57,7 @@ $panel = ['student' => 'student-panel.php', 'teacher' => 'teacher-panel.php', 'a
         <p><?= cl_html($actor['name']) ?> · <?= cl_html($roles[$actor['role']]) ?> · <?= cl_html($class['year']) ?></p>
         <section id="classroom" data-api="<?= cl_html(cl_api_href()) ?>" data-csrf="<?= cl_html($csrf) ?>" data-moderator="<?= $actor['moderator'] ? 'yes' : 'no' ?>">
             <p id="status" role="status" aria-live="polite">برای شروع یا ورود دکمهٔ زیر را بزن.</p>
+            <p id="mic-feedback" role="status" hidden></p>
             <div class="actions" aria-label="کنترل‌های کلاس">
                 <?php if ($actor['moderator']): ?>
                 <button type="button" id="open">شروع و ورود</button>

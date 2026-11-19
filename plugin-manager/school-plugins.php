@@ -2,7 +2,7 @@
 declare(strict_types=1);
 
 // Standalone mtagbot plugin host. Upload this one file beside other-settings.php.
-const MPM_VERSION = '0.1.2';
+const MPM_VERSION = '0.1.3';
 const MPM_REGISTRY = 'mtg_plugin_registry';
 const MPM_SITE = 'mtg_plugin_site';
 const MPM_MAX_ZIP = 2 * 1024 * 1024;
@@ -10,6 +10,7 @@ const MPM_CATALOG = [
     'school-classroom' => [
         '0.2.0' => '67f080645d4dce5b709183556b0dd7297c0784388942b2dd00c6157d8a5a117b',
         '0.2.1' => '0cb2f12254559d3b92c925abb3e9244328a3caf9c3386325c8f7d11b0c8c7ea6',
+        '0.2.2' => 'ac0eff553b77293722b3c594dac867c7ed1135b16e3c27d5a776a6d013f75931',
     ],
 ];
 

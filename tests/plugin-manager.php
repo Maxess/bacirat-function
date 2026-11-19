@@ -48,7 +48,8 @@ try {
     $slug = 'school-classroom';
     $table = mpm_data_table($slug);
     $package = __DIR__ . '/../artifacts/school-classroom-plugin-v0.2.0.zip';
-    $upgrade = __DIR__ . '/../artifacts/school-classroom-plugin-v0.2.1.zip';
+    $intermediate = __DIR__ . '/../artifacts/school-classroom-plugin-v0.2.1.zip';
+    $upgrade = __DIR__ . '/../artifacts/school-classroom-plugin-v0.2.2.zip';
     mpm_link_menus($root, $dir);
     $menus = static fn() => [file_get_contents($root . '/other-settings.php'), file_get_contents($root . '/includes/header.php')];
     $managerMenus = $menus();
@@ -120,6 +121,10 @@ try {
     expect(mpm_manifest_for($dir, $row)['version'] === '0.2.0' && !file_exists($staging), 'tampered upgrade does not disturb previous files');
     mkdir($staging); file_put_contents($staging . '/plugin.json', 'partial write');
     expect(mpm_release_dir($dir, $row) === $path, 'incomplete staging is not served');
+    expect(mpm_install($db, $dir, $intermediate), 'previous archive is still approved for in-place upgrade');
+    $prior = mpm_row($db, $slug);
+    $priorRelease = mpm_release_dir($dir, $prior);
+    expect($prior['version'] === '0.2.1' && $priorRelease !== $path && is_dir($priorRelease), 'upgrade starts from release-specific layout');
     expect(mpm_install($db, $dir, $upgrade), 'checked upgrade reuses the same installation');
     $row = mpm_row($db, $slug);
     expect($row['state'] === 'disabled' && $row['version'] === $newManifest['version'] && $row['owner'] === $oldRow['owner'], 'upgrade only switches release pointer');
@@ -134,7 +139,7 @@ try {
     foreach (['student','teacher','admin'] as $role) expect(isset(mpm_menu_items($db, $dir, $role)[$slug]), 'upgraded release shown in every menu');
     $_SESSION = ['student_id' => 1];
     ob_start(); mpm_dispatch($db, $site, $slug, 'page'); $body = ob_get_clean();
-    expect(str_contains($body, 'id="classroom"') && str_contains($body, 'route=api') && !str_contains($body, $secret), 'managed classroom renders without a config file or credential leak');
+    expect(str_contains($body, 'id="classroom"') && str_contains($body, 'id="mic-feedback"') && str_contains($body, 'route=api') && !str_contains($body, $secret), 'current classroom renders without a config file or credential leak');
     expect(!isset($_SESSION['school_classroom_csrf']), 'managed session leaves no classroom-specific state');
     $old = $_GET ?? []; $_GET['name'] = 'assets/classroom.css';
     ob_start(); mpm_dispatch($db, $site, $slug, 'asset'); $asset = ob_get_clean(); $_GET = $old;

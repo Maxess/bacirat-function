@@ -13,8 +13,8 @@ HOST = ROOT / 'plugin-manager'
 SRC = ROOT / 'school-addon/upload/online-classroom'
 LEGACY = ARTIFACTS / 'school-classroom-pilot-v0.1.0.zip'
 LEGACY_SHA = 'bebc35a02f57346880373a034ee493b757a8017a12812a133ab957358d9de161'
-VERSION = '0.2.1'
-MANAGER_VERSION = '0.1.2'
+VERSION = '0.2.2'
+MANAGER_VERSION = '0.1.3'
 
 
 def write_zip(path, entries):
