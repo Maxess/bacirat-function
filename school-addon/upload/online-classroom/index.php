@@ -8,7 +8,7 @@ header('Content-Type: text/html; charset=UTF-8');
 $actor = $errorMessage = $class = $reports = null;
 $classes = $slots = [];
 $connect = $year = '';
-$rubika = $linked = false;
+$autoSlot = 0;
 $now = time();
 try {
     $cfg = cl_config();
@@ -23,18 +23,18 @@ try {
         $actor = cl_school_user($s->db, $_SESSION ?? [], $year);
         $classes = array_filter(cl_classes($s->db, $year), static fn($c) => cl_access_class($s->db, $c, $actor));
         if (isset($_GET['class'])) $class = $classes[cl_id($_GET['class'])] ?? throw new ClassroomError(403, 'این کلاس برای حساب تو در دسترس نیست.');
-        elseif (!isset($_GET['view']) && $actor['role'] === 'student' && count($classes) === 1) {
+        elseif (!isset($_GET['view']) && count($classes) === 1) {
             // Use the real class URL as the canonical address of the waiting page.
             header('Location: ' . cl_href(['class'=>array_key_first($classes)]), true, 303);
             return;
         }
         if ($class !== null && cl_is_staff($actor)) {
             $slots = cl_today_slots($s->db, $class, $actor, $now);
-            $slots = array_filter($slots, static fn($slot) => ($s->get('lesson', cl_lesson_id($class, $slot['period'], cl_day($now)->format('Y-m-d')))['phase'] ?? null) !== 'finished');
-        }
-        if ($class === null && $classes && $actor['role'] === 'student' && ($bot = cl_bot_token($s, $cfg, 'rubika'))) {
-            $rubika = true;
-            $linked = ($s->get('rubika-link', (string)$actor['id'])['tag'] ?? null) === cl_rubika_tag($bot);
+            $slots = array_filter($slots, static function ($slot) use ($s, $class, $now, $year) {
+                $teacher = cl_school_account($s->db, 'teacher', $slot['teacher'], $year);
+                return $teacher && $teacher['year'] === $year && ($s->get('lesson', cl_lesson_id($class, $slot['period'], cl_day($now)->format('Y-m-d')))['phase'] ?? null) !== 'finished';
+            });
+            if (count($slots) === 1) $autoSlot = array_key_first($slots);
         }
     }
     if ($class !== null) $connect = $cfg['api_url'] . ' ' . $cfg['signal_url'];
@@ -56,7 +56,7 @@ $actorLabel = match ($actor['office'] ?? $actor['role'] ?? '') {
 $panel = match ($actor['office'] ?? $actor['role'] ?? '') {
     'student'=>'student-panel.php', 'teacher'=>'teacher-panel.php', 'deputy'=>'deputy-panel.php', 'admin'=>'index.php?view=dashboard', default=>'index.php?view=login',
 };
-$pageTitle = $reports !== null ? 'حضور و غیاب کلاس مجازی' : ($class === null ? 'کلاس‌های آنلاین' : $class['name']);
+$pageTitle = $reports !== null ? 'حضور و غیاب کلاس مجازی' : ($class === null ? 'کلاس مجازی' : $class['name']);
 ?>
 <!doctype html>
 <html lang="fa" dir="rtl">
@@ -69,14 +69,14 @@ $pageTitle = $reports !== null ? 'حضور و غیاب کلاس مجازی' : ($
     <script defer src="<?= cl_html(cl_asset('livekit-client.umd.js')) ?>"></script>
     <script defer src="<?= cl_html(cl_asset('board.js')) ?>"></script>
     <?php endif; ?>
-    <?php if (($class !== null || $rubika) && $errorMessage === null): ?><script defer src="<?= cl_html(cl_asset('classroom.js')) ?>"></script><?php endif; ?>
+    <?php if ($class !== null && $errorMessage === null): ?><script defer src="<?= cl_html(cl_asset('classroom.js')) ?>"></script><?php endif; ?>
 </head>
 <body>
 <main class="school-main">
     <header class="banner">
         <nav aria-label="مسیرهای مدرسه">
             <a href="<?= cl_html(cl_site_href($panel)) ?>">بازگشت به پنل</a>
-            <?php if ($actor): ?><a href="<?= cl_html(cl_href(['view'=>'classes'])) ?>">کلاس‌های آنلاین</a><?php endif; ?>
+            <?php if ($actor): ?><a href="<?= cl_html(cl_href(['view'=>'classes'])) ?>">کلاس مجازی</a><?php endif; ?>
             <?php if ($staff): ?><a href="<?= cl_html(cl_href(['view'=>'reports'])) ?>">حضور و غیاب کلاس مجازی</a><?php endif; ?>
         </nav>
         <p class="eyebrow">مدرسه · یادگیری آنلاین</p>
@@ -95,18 +95,9 @@ $pageTitle = $reports !== null ? 'حضور و غیاب کلاس مجازی' : ($
             <?php foreach ($classes as $c): ?><a class="class-link" href="<?= cl_html(cl_href(['class'=>$c['id']])) ?>"><strong><?= cl_html($c['name']) ?></strong><small><?= $staff ? 'برنامه و اتاق کلاس' : 'ورود به اتاق انتظار' ?></small></a><?php endforeach; ?>
             </div>
         </section>
-        <?php if ($rubika): ?>
-        <section id="rubika" class="card" data-api="<?= cl_html(cl_href(['route'=>'api'])) ?>" data-csrf="<?= cl_html(cl_context()['csrf']) ?>">
-            <h2>دریافت حضور از ربات روبیکا</h2>
-            <p>کد ۱۰ دقیقه‌ای بگیر و فقط به ولی خود بده تا آن را در گفت‌وگوی خصوصی با ربات اختصاصی معرفی‌شده از طرف مدرسه بفرستد.</p>
-            <p role="status" id="rubika-note"><?= $linked ? 'یک گفت‌وگوی خصوصی برای دریافت اعلان متصل است.' : 'گفت‌وگویی متصل نیست.' ?></p>
-            <div class="actions"><button type="button" id="rubika-pair">دریافت کد یک‌بارمصرف</button><button type="button" class="secondary" id="rubika-unlink">قطع اتصال روبیکا</button></div>
-            <output id="rubika-code" dir="ltr"></output>
-        </section>
-        <?php endif; ?>
     <?php else: ?>
         <section id="classroom" data-api="<?= cl_html(cl_href(['route'=>'api'])) ?>" data-csrf="<?= cl_html(cl_context()['csrf']) ?>"
-          data-class="<?= $class['id'] ?>" data-moderator="<?= $staff ? 'yes' : 'no' ?>"
+          data-class="<?= $class['id'] ?>" data-auto-slot="<?= $autoSlot ?>" data-moderator="<?= $staff ? 'yes' : 'no' ?>"
           data-content="<?= cl_html(cl_href(['route'=>'content','class'=>$class['id']])) ?>"
           data-pdf="<?= cl_html(cl_asset('pdf.min.mjs')) ?>" data-pdf-worker="<?= cl_html(cl_asset('pdf.worker.min.mjs')) ?>"
           data-pdf-data="<?= cl_html(cl_href(['route'=>'pdf']) . '&name=') ?>">
@@ -127,8 +118,8 @@ $pageTitle = $reports !== null ? 'حضور و غیاب کلاس مجازی' : ($
             <p id="notice" role="status" class="notice" hidden></p>
             <section class="card waiting" id="waiting">
                 <span aria-hidden="true" class="waiting-icon">◷</span>
-                <h2 id="wait-title"><?= $staff ? 'در انتظار شروع زنگ' : 'در انتظار ورود دبیر' ?></h2>
-                <p id="wait-message"><?= $staff ? 'زنگِ امروز را انتخاب کن و شروع زنگ را بزن.' : 'شما وارد اتاق انتظار شده‌اید. نیازی به اقدامی نیست؛ لطفاً تا ورود دبیر منتظر بمانید.' ?></p>
+                <h2 id="wait-title"><?= $staff ? 'در انتظار شروع زنگ' : 'در انتظار ورود دبیر یا مسئول مدرسه' ?></h2>
+                <p id="wait-message"><?= $staff ? 'اگر چند زنگ مجاز داری، زنگ موردنظر را از برنامهٔ امروز انتخاب کن.' : 'شما وارد اتاق انتظار شده‌اید. نیازی به اقدامی نیست؛ لطفاً تا ورود دبیر، مدیر یا ناظم منتظر بمانید.' ?></p>
                 <p class="meta">زمان انتظار در حضور کلاس حساب نمی‌شود.</p>
                 <?php if (!$staff): ?><button type="button" id="join" hidden>بازگشت به اتاق انتظار</button><?php endif; ?>
             </section>

@@ -21,23 +21,6 @@
         }
     }
 
-    const pair = el('rubika');
-    if (pair) {
-        async function link(action) {
-            el('rubika-pair').disabled = el('rubika-unlink').disabled = true;
-            try {
-                const result = await request(pair, action);
-                el('rubika-code').textContent = result.command || '';
-                el('rubika-note').textContent = result.command ? 'این دستور را حداکثر تا ۱۰ دقیقه در گفت‌وگوی خصوصی با ربات بفرستید.' : 'اتصال روبیکا حذف شد.';
-            } catch (err) {
-                el('rubika-note').textContent = err instanceof PublicError ? err.message : 'اتصال با سایت برقرار نشد.';
-            } finally {
-                el('rubika-pair').disabled = el('rubika-unlink').disabled = false;
-            }
-        }
-        el('rubika-pair').addEventListener('click', () => link('rubika-pair'));
-        el('rubika-unlink').addEventListener('click', () => { if (window.confirm('دریافت اعلان روبیکا قطع شود؟')) link('rubika-unlink'); });
-    }
     const root = el('classroom');
     if (!root) return;
     const lk = window.LivekitClient;
@@ -46,7 +29,7 @@
     const api = (action, data = {}, options) => request(root, action, {class: roomClass, ...data}, options);
     const student = (id) => /^student-[1-9]\d{0,17}$/.test(id);
     let active = null, connecting = false, busy = false, polling = false, needsRefresh = false, permanent = false, stopped = false;
-    let wanted = !staff, state = {phase:'idle', watch:null}, chatCursor = 0, seconds = {}, admitted = false;
+    let wanted = true, autoSlot = Number(root.dataset.autoSlot) || 0, state = {phase:'idle', ready:null}, chatCursor = 0, seconds = {}, admitted = false;
     let pollTimer, flow = 0, retryAt = 0, attempts = 0;
     let peopleKey = '', peopleTimers = new Map();
 
@@ -182,7 +165,7 @@
             const currentSlot = state.slot || 0;
             if (currentSlot && Array.from(slot.options).some(o => Number(o.value) === currentSlot)) slot.value = String(currentSlot);
             slot.disabled = !!currentSlot || busy;
-            el('open').disabled = busy || !!active || connecting || !state.watch || permanent || phase === 'closing'
+            el('open').disabled = busy || !!active || connecting || state.ready === null || permanent || phase === 'closing'
                 || phase === 'reserved' || (!currentSlot && !slot.value) || (phase === 'paused' && !state.resumable);
             el('open').textContent = phase === 'paused' ? 'ادامهٔ زنگ' : currentSlot ? 'پیوستن به زنگ' : 'شروع زنگ';
             el('close').hidden = !state.lesson || phase === 'reserved';
@@ -190,13 +173,14 @@
             el('clear-floor').disabled = !live || busy;
         } else el('join').hidden = wanted || permanent;
         el('wait-title').textContent = phase === 'paused' ? 'کلاس موقتاً متوقف است' : phase === 'closing' ? 'کلاس در حال پایان است'
-            : connectingNow ? 'در حال تأیید ورود…' : staff ? 'در انتظار شروع زنگ' : 'در انتظار ورود دبیر';
+            : connectingNow ? 'در حال تأیید ورود…' : staff ? 'در انتظار شروع زنگ' : 'در انتظار ورود دبیر یا مسئول مدرسه';
         el('wait-message').textContent = permanent ? 'برای دسترسی دوباره صفحه را از پنل مدرسه باز کنید.'
             : phase === 'reserved' ? 'زنگ فعلی برای این حساب مجاز نیست. پس از پایان زنگ می‌توانی جلسهٔ خودت را شروع کنی.'
-            : state.watch === false ? 'ارتباط با ناظر رسانه هنوز برقرار نیست. تا تأیید اتصال، دسترسی کلاس بسته است.'
-            : phase === 'paused' ? 'تا بازگشت دبیر یا ناظر مجاز منتظر بمانید؛ شمارش حضور متوقف است.'
-            : staff ? 'زنگِ برنامهٔ امروز را انتخاب کن. کلاس فقط بعد از تأیید اتصال شروع می‌شود.'
-            : 'شما وارد اتاق انتظار شده‌اید. نیازی به اقدامی نیست؛ لطفاً تا ورود دبیر منتظر بمانید.';
+            : state.ready === false ? 'ارتباط با سرور رسانه برقرار نیست. دسترسی موقتاً بسته است.'
+            : state.callbackMissing ? 'رویداد اتصال از LiveKit تأیید نشده است. مدیر مدرسه نشانی وب‌هوک در تنظیمات افزونه را بررسی کند.'
+            : phase === 'paused' ? 'تا بازگشت دبیر یا مسئول مجاز منتظر بمانید؛ شمارش حضور متوقف است.'
+            : staff ? (el('slot').options.length > 1 ? 'اگر چند زنگ مجاز وجود دارد، زنگ موردنظر را انتخاب کن.' : 'زنگ مجاز دیگری برای امروز در برنامهٔ این کلاس نیست.')
+            : 'شما وارد اتاق انتظار شده‌اید. نیازی به اقدامی نیست؛ لطفاً تا ورود دبیر، مدیر یا ناظم منتظر بمانید.';
         const local = active?.room.localParticipant;
         el('microphone').disabled = !live || busy || !maySpeak(local);
         el('microphone').textContent = local?.isMicrophoneEnabled ? 'خاموش‌کردن میکروفون' : 'روشن‌کردن میکروفون';
@@ -257,7 +241,7 @@
         let link = null;
         try {
             const ticket = await getTicket();
-            if (pending !== flow || !wanted || stopped || permanent || ticket.preparing) { await room.disconnect(); return; }
+            if (pending !== flow || !wanted || stopped || permanent) { await room.disconnect(); return; }
             link = {room, lesson:ticket.lesson, epoch:ticket.epoch};
             active = link;
             flow++; // Ignore status requests made before this transport was installed.
@@ -331,21 +315,25 @@
             if (captured !== flow || stopped) return;
             const prior = state;
             state = result;
-            if (active && (active.epoch !== state.epoch || active.lesson !== state.lesson || !result.watch
+            if (active && (active.epoch !== state.epoch || active.lesson !== state.lesson || !result.ready
                 || !['live', ...(staff ? ['starting'] : [])].includes(state.phase))) release(active);
-            if (staff && prior.lesson && state.phase === 'idle') wanted = false; // Closing a lesson never starts the next one.
+            if (staff && prior.lesson && state.phase === 'idle') wanted = false;
+            if (state.lesson || state.phase === 'reserved') autoSlot = 0; // Closing a lesson never starts the next one.
             if (active && local.sid && scope().sid === local.sid && connected() && result.admitted === true) {
                 admitted = true; seconds = result.seconds || {};
                 render(); pushChat(result.chat);
                 board.sync(result.board, scope());
                 needsRefresh ||= !!(result.chatMore || result.board?.more);
             } else clearActivity();
-            if (!active && !connecting && wanted && state.watch && Date.now() >= retryAt) {
+            if (!active && !connecting && wanted && state.ready && Date.now() >= retryAt) {
                 if (state.joinable) {
                     const info = {lesson:state.lesson,epoch:state.epoch};
                     enter(() => api('ticket',info));
-                } else if (staff && state.resumable && state.slot) {
+                } else if (staff && state.resumable && state.slot && !state.callbackMissing) {
                     const slot = state.slot;
+                    enter(() => api('open',{slot}));
+                } else if (staff && state.phase === 'idle' && autoSlot) {
+                    const slot = autoSlot; autoSlot = 0;
                     enter(() => api('open',{slot}));
                 }
             }
@@ -353,7 +341,7 @@
             if (captured !== flow || stopped) return;
             release(active, true);
             clearActivity();
-            state = {...state, watch:false, phase:state.lesson ? 'paused' : 'idle', resumable:false};
+            state = {...state, ready:false, phase:state.lesson ? 'paused' : 'idle', resumable:false};
             permanent = error instanceof PublicError && [401,403,404].includes(error.status);
             if (permanent) wanted = false;
             note(error instanceof PublicError ? error.message : 'ارتباط با سایت قطع است؛ تا بازگشت اتصال، کلاس در انتظار می‌ماند.');
@@ -400,10 +388,11 @@
     if (staff) {
         el('slot').addEventListener('change', render);
         el('open').addEventListener('click', () => run(async () => {
-            if (state.phase === 'closing' || !state.watch || permanent) return;
+            if (state.phase === 'closing' || state.ready === null || permanent) return;
             const slot = state.slot || Number(el('slot').value);
             if (!slot) return;
             wanted = true;
+            autoSlot = 0;
             retryAt = 0;
             await enter(() => api('open',{slot}), true);
         }));
@@ -420,7 +409,7 @@
                 release(active,true);
                 await response;
                 for (const option of Array.from(el('slot').options)) if (Number(option.value) === slot) option.remove();
-                state = {phase:'idle', watch:state.watch};
+                state = {phase:'idle', ready:state.ready};
                 note('زنگ پایان یافت؛ گزارش حضور در پنل ثبت شد.'); refresh();
             });
         });

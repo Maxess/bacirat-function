@@ -16,15 +16,15 @@ class Element {
     querySelectorAll(tag) { return this.children.flatMap(child => [...(child.tag === tag ? [child] : []), ...child.querySelectorAll(tag)]); }
     async click() { if (!this.disabled && !this.hidden) await this.handlers.click(); }
 }
-function fixture(staff) {
+function fixture(staff, autoSlot = 0) {
     const elements = Object.fromEntries(['classroom','status','lecture-title','notice','mic-feedback','people','live-panel','waiting','wait-title','wait-message',
         'audio-tracks','chat-log','chat-form','chat-text','leave','microphone','enable-audio', ...(staff ? ['slot','open','close','clear-floor'] : ['join'])].map(id => [id,new Element(id)]));
-    elements.classroom.dataset = { moderator:staff?'yes':'no',api:'/fixture',csrf:'session',class:'22' };
+    elements.classroom.dataset = { moderator:staff?'yes':'no',api:'/fixture',csrf:'session',class:'22',autoSlot:String(autoSlot) };
     if (staff) elements.slot.options = [{value:'11', remove(){ elements.slot.options=[]; }}];
     const requests=[], scheduled=new Map(), boards=[];
     let timerSeq=0, lastRoom;
     const id=staff?'teacher-1':'student-1';
-    const srv={phase:'idle',lesson:'lesson-11',epoch:'epoch-A',watch:true,seconds:{'student-1':9,'student-2':21}};
+    const srv={phase:'idle',lesson:'lesson-11',epoch:'epoch-A',ready:true, staffCanJoin:false,seconds:{'student-1':9,'student-2':21}};
     const person = (identity) => ({identity, name:identity, sid:`PA_${identity}`, permissions:listener, micCalls:[], isMicrophoneEnabled:false,
         async setMicrophoneEnabled(value) {
             this.micCalls.push(value);
@@ -58,11 +58,10 @@ function fixture(staff) {
             let reply={ok:true};
             if(input.action==='status'){
                 const phased = srv.phase==='idle' ? {phase:'idle'} : {phase:srv.phase,slot:11, lesson:srv.lesson,epoch:srv.epoch,resumable:srv.resumable,subject:'ریاضی',period:'زنگ یک'};
-                reply={...reply,watch:srv.watch,...phased,joinable:srv.phase==='live'||(staff&&srv.phase==='starting'&&srv.ready)};
+                reply={...reply,ready:srv.ready,...phased,joinable:srv.phase==='live'||(staff&&srv.phase==='starting'&&srv.staffCanJoin)};
                 if(input.sid && srv.phase==='live' && input.epoch===srv.epoch) Object.assign(reply,{admitted:true,seconds:srv.seconds,chat:[],board:{rev:1}});
-            } else if(input.action==='open' && srv.phase!=='live') {
-                srv.phase='starting'; reply.preparing=true;
             } else if(input.action==='open'||input.action==='ticket') {
+                if (input.action === 'open' && srv.phase !== 'live') srv.phase = 'starting';
                 Object.assign(reply,{url:'wss://media.example.test',token:'opaque',lesson:srv.lesson,epoch:srv.epoch});
             } else if(input.action==='give-mic') change(input.identity,mic);
             else if(input.action==='cut-mic') change(input.identity,listener);
@@ -104,7 +103,7 @@ test('assigned moderator starts selected period, has independent mic and video c
     assert.equal(f.requests.find(r=>r.action==='open').slot,11);
     await f.time();
     assert.equal(f.requests.some(r=>r.action==='ticket'),false);
-    f.srv.ready=true; await f.time();
+    f.srv.staffCanJoin=true; await f.time();
     assert.deepEqual(f.room.localParticipant.micCalls,[]);
     f.srv.phase='live'; await f.time();
     const [give]=f.controls('student-1');
@@ -124,4 +123,18 @@ test('microphone access failure is shown without exposing browser diagnostics',a
     await f.elements.microphone.click();
     assert.match(f.elements['mic-feedback'].textContent,/MIC-ACCESS/);
     assert.doesNotMatch(f.elements['mic-feedback'].textContent,/sensitive-device-detail/);
+});
+
+
+test('on entry staff auto-opens the unmistakable bell, and never auto-opens the next one', async()=>{
+    const f=fixture(true, 11);
+    await f.time(); await f.time();
+    assert.equal(f.requests.filter(r=>r.action==='open').length,1);
+    assert.equal(f.requests.find(r=>r.action==='open').slot,11);
+    f.srv.staffCanJoin=true;
+    await f.time(); await f.time();
+    f.srv.phase='live'; await f.time();
+    assert.equal(f.elements['live-panel'].hidden,false);
+    f.srv.phase='idle'; await f.time(); await f.time();
+    assert.equal(f.requests.filter(r=>r.action==='open').length,1);
 });

@@ -15,7 +15,6 @@ try {
     $class = cl_class_for($s->db, cl_classes($s->db, $year), cl_id($_GET['class'] ?? null), $actor);
     [$doc, $file] = cl_class_lock($s, $cfg, $class['id'], static function () use ($s, $class, $actor) {
         $now = time();
-        if (!cl_watch_ready($s, $now)) throw new ClassroomError(409, '');
         $live = cl_check_live(cl_active($s, $class['id']), $actor, $_GET, $now);
         $key = $_GET['doc'] ?? null;
         $state = cl_activity($s, $live['id']);

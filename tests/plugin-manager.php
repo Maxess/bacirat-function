@@ -62,14 +62,10 @@ try {
     $intermediate = __DIR__ . '/../artifacts/school-classroom-plugin-v0.2.2.zip';
     $upgrade = __DIR__ . '/../artifacts/school-classroom-plugin-v0.2.3.zip';
     $scheduled = __DIR__ . '/../artifacts/school-classroom-plugin-v0.3.0.zip';
-    mpm_link_menus($root, $dir);
+    $native = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.0.zip';
     $menus = static fn() => [file_get_contents($root . '/other-settings.php'), file_get_contents($root . '/includes/header.php')];
-    $managerMenus = $menus();
-    expect(str_contains($managerMenus[0], 'href="plugins/school-plugins.php"') && substr_count($managerMenus[1], "'/plugins/school-plugins.php'") === 6, 'new gateway is used in all menu hooks');
-    expect(file_get_contents($dir . '/menu-before-other-settings.php') === $other && file_get_contents($dir . '/menu-before-header.php') === $header, 'menu backups');
-    mpm_link_menus($root, $dir);
-    expect($menus() === $managerMenus, 'idempotent menu setup');
-    denied(fn()=>mpm_templates($other, '<a href="student-panel.php">only one anchor</a>'));
+    $managerMenus = [$other, $header];
+    expect($menus() === $managerMenus, 'initialization does not rewrite the host');
 
     $_SESSION = ['admin_id' => 1]; expect(mpm_is_manager($db), 'super admin authorized');
     $_SESSION = ['admin_id' => 2]; expect(!mpm_is_manager($db), 'regular admin cannot install PHP');
@@ -77,7 +73,7 @@ try {
     $_SESSION = ['admin_id' => 1];
     foreach (['https://not-the-test-school.example', 'null'] as $badOrigin) {
         $_SERVER['HTTP_ORIGIN'] = $badOrigin;
-        denied(fn()=>submit($db, $site, 'menus'));
+        denied(fn()=>submit($db, $site, 'enable'));
         expect(http_response_code() === 403, 'invalid Origin remains blocked despite a valid form token');
     }
     $_SERVER['HTTP_ORIGIN'] = $site['origin'];
@@ -85,17 +81,6 @@ try {
     denied(fn()=>mpm_post($db, $site, $site['origin'], 'fixture-form-token'));
     expect(http_response_code() === 403, 'same-origin form still needs a valid token');
     http_response_code(200);
-    $legacyMenus = str_replace('plugins/school-plugins.php', 'school-plugins.php', $managerMenus);
-    file_put_contents($root . '/other-settings.php', $legacyMenus[0]);
-    $editedHeader = str_replace("mpm_navigation('student')", "mpm_navigation('custom')", $legacyMenus[1]);
-    file_put_contents($root . '/includes/header.php', $editedHeader);
-    denied(fn()=>submit($db, $site, 'menus'));
-    expect($menus() === [$legacyMenus[0], $editedHeader], 'never overwrite customized or only partially checked hooks');
-    file_put_contents($root . '/includes/header.php', $legacyMenus[1]);
-    submit($db, $site, 'menus');
-    submit($db, $site, 'menus');
-    expect($menus() === $managerMenus && file_get_contents($dir . '/menu-before-header.php') === $header, 'old hooks are repaired in place and original backups kept');
-
     $db->exec("CREATE TABLE `$table` (id INT PRIMARY KEY, owner TEXT,settings TEXT); INSERT INTO `$table` VALUES(1,'unrelated','keep');");
     denied(fn()=>mpm_install($db, $dir, $package));
     expect($db->query("SELECT settings FROM `$table`")->fetchColumn() === 'keep' && !mpm_row($db, $slug), 'never take or drop an existing table');
@@ -128,7 +113,7 @@ try {
     http_response_code(200);
     denied(fn()=>submit($db, $site, 'enable'));
     $secret = str_repeat('x', 64);
-    submit($db, $site, 'settings', ['settings' => ['class_id'=>'22', 'signal_url'=>'wss://media.example.ir', 'api_key'=>str_repeat('y',24), 'api_secret'=>$secret]]);
+    mpm_save_settings($db, $dir, $row, mpm_manifest_for($dir, $row), ['class_id'=>'22', 'signal_url'=>'wss://media.example.ir', 'api_key'=>str_repeat('y',24), 'api_secret'=>$secret]);
     $stored = $db->query("SELECT settings FROM `$table`")->fetchColumn();
     expect(!str_contains($stored, $secret) && mpm_settings($db, $dir, $row)['api_secret'] === $secret, 'encrypted settings round-trip');
     $oldRow = $row;
@@ -187,25 +172,7 @@ try {
     denied(fn()=>mpm_install($db, $dir, $package));
     denied(fn()=>mpm_dispatch($db, $site, $slug, 'page'));
     http_response_code(200);
-    submit($db, $site, 'enable');
-    foreach (['student','teacher','admin'] as $role) expect(isset(mpm_menu_items($db, $dir, $role)[$slug]), 'upgraded release shown in every menu');
-    $_SESSION = ['student_id' => 1];
-    ob_start(); mpm_dispatch($db, $site, $slug, 'page'); $body = ob_get_clean();
-    expect(str_contains($body, 'id="classroom"') && str_contains($body, 'id="mic-feedback"') && str_contains($body, 'route=api') && !str_contains($body, $secret), 'current classroom renders without a config file or credential leak');
-    expect(str_contains($body, 'href="../student-panel.php"') && str_contains($body, 'data-api="school-plugins.php?plugin='), 'school back link and same-gateway API resolve from plugins/');
-    expect(!isset($_SESSION['school_classroom_csrf']), 'managed session leaves no classroom-specific state');
-    $old = $_GET ?? []; $_GET['name'] = 'assets/classroom.css';
-    ob_start(); mpm_dispatch($db, $site, $slug, 'asset'); $asset = ob_get_clean(); $_GET = $old;
-    expect($asset === file_get_contents($staging . '/assets/classroom.css') && str_contains($asset, '.participant-controls'), 'new release serves its own assets');
-    ob_start(); mpm_admin_page($db, $site, 'fixture', ''); $ui = ob_get_clean();
-    expect(!str_contains($ui, $secret) && str_contains($ui, 'href="../other-settings.php"'), 'manager keeps root settings link without exposing the secret');
-    denied(fn()=>submit($db, $site, 'remove'));
-    expect(is_file($path . '/index.php') && mpm_table_exists($db, $table), 'explicit delete confirmation');
-
-    submit($db, $site, 'disable');
-    expect(mpm_menu_items($db, $dir, 'student') === [] && mpm_table_exists($db, $table) && is_dir($path), 'disable only hides');
-    submit($db, $site, 'enable');
-    submit($db, $site, 'disable');
+    denied(fn()=>submit($db, $site, 'enable')); // Older version needs the native upgrade.
     $store = mpm_store_table($row);
     $db->exec("CREATE TABLE `$store` (bucket VARCHAR(80),item VARCHAR(100),payload TEXT)");
     denied(fn()=>mpm_install($db, $dir, $scheduled));
@@ -215,17 +182,48 @@ try {
     $row = mpm_row($db, $slug);
     expect($row['version'] === '0.3.0' && mpm_check_store($db, $row) === $store && mpm_settings($db, $dir, $row) === $previous, 'new data store, legacy API keys and owner preserved');
     expect($db->query("SELECT settings FROM `$table`")->fetchColumn() === $stored, 'no decryption/re-entry or rewrite at upgrade');
+    denied(fn()=>submit($db, $site, 'enable'));
+    mpm_write_settings($db,$dir,$row,$previous + ['max_participants'=>4,'notify_bale'=>true,'notify_rubika'=>true,'rubika_token'=>'LegacySyntheticOnly']);
+    foreach (['reports','rubika-link','outbox','notify-pending','meta'] as $bucket) {
+        mpm_query($db, "INSERT INTO `$store` (bucket,item,payload) VALUES (?,?,?)", [$bucket,$bucket==='meta'?'watch':'sample','{}']);
+    }
+    expect(mpm_install($db, $dir, $native), 'installed native update');
+    $row = mpm_row($db, $slug);
+    expect($row['version'] === '0.4.0' && $row['owner'] === $oldRow['owner'] && mpm_check_store($db,$row)===$store, 'retains owner and attendance data');
+    expect(mpm_settings($db,$dir,$row) === ['signal_url'=>$previous['signal_url'],'api_key'=>$previous['api_key'],'api_secret'=>$secret,'max_participants'=>4], 'retains only compatible media configuration; legacy bot options are not enabled');
+    expect($db->query("SELECT bucket FROM `$store` WHERE bucket<>'!owner'")->fetchAll(PDO::FETCH_COLUMN) === ['reports'], 'cleans retired watch/pairing/queued data only');
     submit($db, $site, 'enable');
-    expect(isset(mpm_menu_items($db, $dir, 'teacher', 'report_menus')[$slug]) && mpm_menu_items($db, $dir, 'student', 'report_menus') === [], 'report link only in staff menus');
-    // A real HTTP request exercises 0.3.0 dispatch separately from the already-loaded 0.2.3 PHP code in this fixture.
-    mpm_query($db, "INSERT INTO `$store` (bucket,item,payload) VALUES ('reports','sample','{}')", []);
+    foreach (['student','teacher','admin','deputy'] as $role) expect(isset(mpm_menu_items($db, $dir, $role)[$slug]), 'upgraded release shown in every menu');
+    $_SESSION = ['student_id' => 1];
+    $_GET = ['class'=>22];
+    ob_start(); mpm_dispatch($db, $site, $slug, 'page'); $body = ob_get_clean();
+    expect(str_contains($body, 'id="classroom"') && str_contains($body, 'id="mic-feedback"') && str_contains($body, 'route=api') && !str_contains($body, $secret), 'current classroom renders without a config file or credential leak');
+    expect(str_contains($body, 'href="../student-panel.php"') && str_contains($body, 'data-api="school-plugins.php?plugin='), 'school back link and same-gateway API resolve from plugins/');
+    expect(!isset($_SESSION['school_classroom_csrf']), 'managed session leaves no classroom-specific state');
+    $old = $_GET ?? []; $_GET['name'] = 'assets/classroom.css';
+    ob_start(); mpm_dispatch($db, $site, $slug, 'asset'); $asset = ob_get_clean(); $_GET = $old;
+    expect($asset === file_get_contents(mpm_release_dir($dir, $row) . '/assets/classroom.css') && str_contains($asset, '.participant-controls'), 'new release serves its own assets');
+    ob_start(); mpm_render_settings($db, $site, 'fixture', ''); $ui = ob_get_clean();
+    expect(!str_contains($ui, $secret) && str_contains($ui, 'action="other-settings.php?tab=plugins"') && !str_contains($ui, '<!doctype'), 'native form fragment, no second page or plaintext secret');
+    denied(fn()=>submit($db, $site, 'remove'));
+    expect(is_file($path . '/index.php') && mpm_table_exists($db, $table), 'explicit delete confirmation');
+
     submit($db, $site, 'disable');
+    expect(mpm_menu_items($db, $dir, 'student') === [] && mpm_table_exists($db, $table) && is_dir($path), 'disable keeps reports and hides classroom');
     expect($db->query("SELECT payload FROM `$store` WHERE bucket='reports'")->fetchColumn() === '{}', 'disable preserves attendance store');
-    submit($db, $site, 'enable');
+
     mpm_query($db, "UPDATE `$store` SET payload='unowned' WHERE bucket='!owner'");
     denied(fn()=>submit($db, $site, 'remove', ['confirm_delete'=>'yes']));
     expect(is_dir($path) && mpm_table_exists($db, $store), 'refuse to purge unowned attendance store');
     mpm_query($db, "UPDATE `$store` SET payload=? WHERE bucket='!owner'", [$row['owner']]);
+    $manifestFile = mpm_release_dir($dir,$row) . '/plugin.json';
+    $validManifest = file_get_contents($manifestFile);
+    mpm_query($db, "UPDATE `$table` SET runtime='scheduled-v2' WHERE id=1");
+    file_put_contents($manifestFile, '{}');
+    denied(fn()=>submit($db, $site, 'remove', ['confirm_delete'=>'yes']));
+    expect(is_dir($path) && mpm_owned_row($db,$row)['runtime']==='scheduled-v2', 'failed media cleanup keeps owned runtime records for retry');
+    file_put_contents($manifestFile, $validManifest);
+    mpm_query($db, "UPDATE `$table` SET runtime=NULL WHERE id=1");
     // If a table at the expected name is no longer ours, block routes but do not touch it.
     mpm_query($db, "UPDATE `$table` SET owner='not-ours' WHERE id=1");
     denied(fn()=>submit($db, $site, 'remove', ['confirm_delete'=>'yes']));
@@ -240,7 +238,7 @@ try {
     expect(file_get_contents($work . '/outside.txt') === 'do not delete', 'unlink without following symlink');
     foreach (['student','teacher','admin'] as $role) expect(mpm_menu_items($db, $dir, $role) === [], 'removed from every panel');
     denied(fn()=>mpm_dispatch($db, $site, $slug, 'asset'));
-    mpm_install($db, $dir, $upgrade);
+    mpm_install($db, $dir, $native);
     expect(mpm_settings($db, $dir, mpm_row($db, $slug)) === [], 'reinstall does not restore deleted data');
     submit($db, $site, 'remove', ['confirm_delete'=>'yes']);
     if ($dsn !== 'sqlite::memory:') {
@@ -252,7 +250,7 @@ try {
         expect(!mpm_table_exists($db, $table) && !mpm_row($db, $slug) && !file_exists(mpm_path($dir, $attempt)), 'aborted install recoverable despite partially applied DDL');
         foreach (['classes', 'students', 'admins', 'settings', 'academic_years', MPM_REGISTRY, MPM_SITE] as $fixtureTable) $db->exec("DROP TABLE `$fixtureTable`");
     }
-    echo strtoupper($db->getAttribute(PDO::ATTR_DRIVER_NAME)) . " PASS nested gateway, protected per-plugin directories, old layout migration, reviewed ZIP only, state-preserving upgrade, real dispatch and scoped purge\n";
+    echo strtoupper($db->getAttribute(PDO::ATTR_DRIVER_NAME)) . " PASS native gateway, private files, guarded migration, settings fragment, active menu state and scoped purge\n";
 } finally {
     mpm_remove_tree($work);
 }

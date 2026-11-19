@@ -4,13 +4,14 @@ require_once __DIR__ . '/school.php';
 require_once __DIR__ . '/store.php';
 
 const CL_SAMPLE_TTL = 11;
+const CL_SAMPLE_INTERVAL = 3;
 const CL_PULSE_TTL = 12;
 const CL_START_SECONDS = 32;
 const CL_MAX_LESSON_SECONDS = 7200;
 
 function cl_room_class(array $cfg, string $room): int
 {
-    return preg_match('/^' . preg_quote($cfg['room_prefix'], '/') . '-v3-c([1-9][0-9]{0,9})-[a-f0-9]{24}$/D', $room, $m) ? cl_id($m[1]) : 0;
+    return preg_match('/^' . preg_quote($cfg['room_prefix'], '/') . '-v[34]-c([1-9][0-9]{0,9})-[a-f0-9]{24}$/D', $room, $m) ? cl_id($m[1]) : 0;
 }
 
 function cl_class_lock(ClassroomStore $s, array $cfg, int $id, callable $work): mixed
@@ -44,12 +45,6 @@ function cl_match_transport(array $lesson, array $input): bool
 function cl_can_lesson(array $lesson, array $actor): bool
 {
     return !cl_is_staff($actor) || cl_assigned($actor, $lesson['year'], $lesson['teacher']);
-}
-
-function cl_watch_ready(ClassroomStore $s, int $now): bool
-{
-    $seen = $s->get('meta', 'watch');
-    return $seen && ($seen['at'] ?? 0) >= $now - CL_SAMPLE_TTL;
 }
 
 function cl_has_staff(array $lesson, int $now): bool
@@ -106,8 +101,7 @@ function cl_touch(ClassroomStore $s, array $lesson, array $actor, array $input, 
 
 function cl_open_lesson(ClassroomStore $s, array $ctx, array $cfg, array $class, array $actor, array $input, int $now, callable $rpc): array
 {
-    if (!cl_is_staff($actor)) throw new ClassroomError(403, 'شروع کلاس فقط برای دبیر یا ناظر مجاز است.');
-    if (!cl_watch_ready($s, $now)) throw new ClassroomError(503, 'پایش امن حضور رسانه فعال نیست؛ سرویس ناظر را روی VPS بررسی کن. (WATCH-OFFLINE)');
+    if (!cl_is_staff($actor)) throw new ClassroomError(403, 'شروع کلاس فقط برای دبیر یا مسئول مجاز است.');
     $slotId = cl_id($input['slot'] ?? null);
     $slot = $slotId ? cl_get_slot($s->db, $class, $slotId, $now) : null;
     if (!$slot || !cl_assigned($actor, $class['year'], $slot['teacher'])) {
@@ -130,13 +124,15 @@ function cl_open_lesson(ClassroomStore $s, array $ctx, array $cfg, array $class,
         'slot'=>$slotId,'period'=>$slot['period'],'subject'=>$slot['subject'],'teacher'=>$slot['teacher'],'teacher_name'=>$assigned['name'],
         'created'=>$now,'deadline'=>$now + CL_MAX_LESSON_SECONDS,'active_seconds'=>0,'started'=>null,
         'roster'=>cl_roster($s->db, $class),'seconds'=>[], 'pulses'=>[], 'seen'=>[], 'staff'=>[], 'sample'=>0];
-    $lesson['room'] = $cfg['room_prefix'] . '-v3-c' . $class['id'] . '-' . bin2hex(random_bytes(12));
+    $lesson['room'] = $cfg['room_prefix'] . '-v4-c' . $class['id'] . '-' . bin2hex(random_bytes(12));
     $lesson['phase'] = 'starting';
     $lesson['transport_at'] = $now;
     $lesson['seen'] = $lesson['staff'] = $lesson['pulses'] = [];
     $lesson['sample'] = 0;
-    // Record ownership before CreateRoom; even an uncertain network reply is cleaned up by the watcher.
-    ($ctx['write_runtime'])('scheduled-v1');
+    $lesson['last_attempt'] = 0;
+    $lesson['event_received'] = false;
+    // Record this generation before asking the SFU; a failed reply must not orphan it.
+    ($ctx['write_runtime'])('scheduled-v2');
     $s->tx(static function () use ($s, $class, $lesson, $id) {
         $s->put('lesson', $id, $lesson);
         $s->put('active', (string)$class['id'], ['id'=>$id]);
@@ -168,7 +164,7 @@ function cl_leave_lesson(ClassroomStore $s, array $lesson, array $actor, array $
 
 function cl_starting(array $lesson, int $now): bool
 {
-    return $lesson['phase'] === 'starting' && $lesson['sample'] >= $now - CL_SAMPLE_TTL
+    return $lesson['phase'] === 'starting' && $lesson['room'] !== null
         && $now < min($lesson['transport_at'] + CL_START_SECONDS, $lesson['deadline'])
         && $lesson['date'] === cl_day($now)->format('Y-m-d');
 }
@@ -182,7 +178,7 @@ function cl_ticket(array $cfg, ?array $lesson, array $actor, array $input, int $
 {
     if (!$lesson || !cl_can_lesson($lesson, $actor) || !cl_match_transport($lesson, $input)
         || !cl_joinable($lesson, $actor, $now)) {
-        throw new ClassroomError(409, 'در انتظار اتصال دبیر یا ناظر مجاز هستیم.');
+        throw new ClassroomError(409, 'در انتظار اتصال دبیر یا مسئول مجاز هستیم.');
     }
     return ['url'=>$cfg['signal_url'], 'token'=>cl_join_ticket($cfg, $lesson['room'], $actor), 'lesson'=>$lesson['id'], 'epoch'=>cl_epoch($lesson)];
 }
@@ -216,91 +212,95 @@ function cl_observe(array $lesson, array $observed, array $staff, int $at, int $
     return $lesson;
 }
 
-function cl_watch_auth(array $cfg, string $raw, mixed $sig, mixed $body, int $now): array
+/** Sample the existing LiveKit service from the school request; never trust a browser's participant list. */
+function cl_room_presence(array $lesson, int $now, callable $rpc): array
 {
-    $wanted = hash_hmac('sha256', "school-classroom-watch-v1\n" . $cfg['site_origin'] . "\n" . $raw, $cfg['api_secret']);
-    if (!is_string($sig) || !hash_equals($wanted, $sig) || !is_array($body) || ($body['watch_version'] ?? null) !== 2 || ($body['prefix'] ?? '') !== $cfg['room_prefix']
-        || !is_int($body['at'] ?? null) || abs($now - $body['at']) > 10) {
-        throw new ClassroomError(403, 'درخواست سرویس ناظر معتبر نیست.');
+    $room = $lesson['room'];
+    $participants = $rpc('ListParticipants', $room, ['room'=>$room])['participants'] ?? [];
+    if (!is_array($participants) || !array_is_list($participants) || count($participants) > 60) throw cl_media_bad_reply();
+    $people = [];
+    foreach ($participants as $p) {
+        if (!is_array($p)) throw cl_media_bad_reply();
+        if (!in_array($p['state'] ?? null, ['ACTIVE', 2], true)) continue;
+        $id = $p['identity'] ?? null;
+        $sid = $p['sid'] ?? null;
+        if (!cl_media_identity($id) || !cl_sid($sid) || isset($people[$id])) throw cl_media_bad_reply();
+        if (!str_starts_with($id, 'student-')) {
+            // Snapshots may lag behind a disconnected or replaced teacher. Only a matching active SID can supervise.
+            $pulse = $lesson['pulses'][$id] ?? null;
+            if (!$pulse || $pulse['sid'] !== $sid || $pulse['at'] < $now - CL_PULSE_TTL) continue;
+            try { $real = $rpc('UpdateParticipant', $room, ['room'=>$room,'identity'=>$id]); }
+            catch (ClassroomError $error) { if ($error->status === 409) continue; throw $error; }
+            if (($real['sid'] ?? null) !== $sid || ($real['identity'] ?? null) !== $id || !in_array($real['state'] ?? null, ['ACTIVE',2], true)) continue;
+        }
+        $people[$id] = $sid;
     }
-    $rooms = $body['rooms'] ?? null;
-    if (!is_array($rooms) || count($rooms) > 80) throw new ClassroomError(400, 'فهرست اتاق‌های ناظر معتبر نیست.');
-    foreach ($rooms as $room=>$people) {
-        if (!is_string($room) || !cl_room_class($cfg, $room) || !is_array($people) || count($people) > 60) throw new ClassroomError(400, 'وضعیت اتاق معتبر نیست.');
-        foreach ($people as $id=>$sid) if (!cl_media_identity($id) || !cl_sid($sid)) throw new ClassroomError(400, 'وضعیت اتصال معتبر نیست.');
-    }
-    return $rooms;
+    return $people;
 }
 
-function cl_watch_tick(ClassroomStore $s, array $cfg, array $rooms, int $at, int $now): array
+function cl_retire_transport(ClassroomStore $s, array $cfg, array $lesson, int $now, callable $rpc, bool $gone = false): ?array
 {
-    return cl_room_lock($s->db, $cfg['room_prefix'] . ':watch', static function () use ($s, $cfg, $rooms, $at, $now) {
-        $last = $s->get('meta', 'watch');
-        if (($last['at'] ?? 0) >= $at) throw new ClassroomError(409, 'نمونهٔ تکراری پایش.');
-        try { $year = cl_current_year($s->db); }
-        catch (ClassroomError $ignored) { $year = ''; } // Close old room access if the school removes its default year.
-        $classes = $year === '' ? [] : cl_classes($s->db, $year);
-        $byClass = [];
-        foreach ($rooms as $room=>$people) $byClass[cl_room_class($cfg, $room)][$room] = $people;
-        foreach ($s->rows('active', 1000) as $classId=>$unused) $byClass[(int)$classId] ??= [];
-        $drops = $permit = [];
-        foreach ($byClass as $id=>$observations) {
-            $remove = cl_class_lock($s, $cfg, $id, static function () use ($s, $cfg, $classes, $id, $observations, $at, $now, &$permit) {
-                $lesson = cl_active($s, $id);
-                $room = $lesson['room'] ?? null;
-                if (!$lesson) return array_keys($observations);
-                if ($room !== null && cl_room_class($cfg, $room) !== $id) throw new LogicException('Invalid owned room record');
-                $unowned = array_diff(array_keys($observations), [$room]);
-                if ($at < $lesson['transport_at']) return $unowned; // Snapshot predates the CreateRoom operation.
-                $present = $room !== null && array_key_exists($room, $observations);
-                $class = $classes[$id] ?? null;
-                $slot = $class ? cl_get_slot($s->db, $class, $lesson['slot'], $now) : null;
-                if (!$slot || $slot['teacher'] !== $lesson['teacher'] || $slot['subject'] !== $lesson['subject']
-                    || cl_period_key($slot['period']) !== cl_period_key($lesson['period']) || $lesson['year'] !== $class['year']
-                    || $lesson['date'] !== cl_day($now)->format('Y-m-d') || $now >= $lesson['deadline']) cl_pause($lesson, 'closing');
-                if ($lesson['phase'] === 'live' && $at - $lesson['sample'] > CL_SAMPLE_TTL) cl_pause($lesson);
-                if ($lesson['phase'] === 'starting' && $now >= $lesson['transport_at'] + CL_START_SECONDS) cl_pause($lesson);
-                if (in_array($lesson['phase'], ['paused','closing'], true)) {
-                    if ($present) {
-                        $s->put('lesson', $lesson['id'], $lesson);
-                        return [...$unowned, $room];
-                    }
-                    if ($lesson['phase'] === 'closing') cl_finish_lesson($s, $cfg, $lesson, $now);
-                    elseif ($lesson['room'] !== null) {
-                        $lesson['room'] = null;
-                        $s->put('lesson', $lesson['id'], $lesson);
-                    }
-                    return $unowned;
-                }
-                if (!$present && $lesson['phase'] === 'live') {
-                    cl_pause($lesson);
-                    $lesson['room'] = null;
-                } elseif ($present) {
-                    $observed = $observations[$room];
-                    $students = $staff = [];
-                    foreach ($observed as $identity=>$sid) {
-                        [$role, $pk] = explode('-', $identity, 2);
-                        if ($role === 'student') { $students[] = (int)$pk; continue; }
-                        $account = cl_school_account($s->db, $role, cl_id($pk), $lesson['year']);
-                        if ($account && cl_assigned($account, $lesson['year'], $lesson['teacher'])) $staff[$identity] = true;
-                    }
-                    $roster = cl_roster($s->db, $class, $students);
-                    if (count($observed) !== count($staff) + count($roster)) {
-                        cl_pause($lesson); // A disabled/moved account cannot keep a previously issued connection.
-                    } else {
-                        $lesson['roster'] += $roster; // Students enrolled mid-lesson appear once if admitted.
-                        $lesson = cl_observe($lesson, $observed, $staff, $at, $now);
-                    }
-                }
-                $s->put('lesson', $lesson['id'], $lesson);
-                if ($present && (cl_lesson_live($lesson, $now) || cl_starting($lesson, $now))) $permit[$room] = $lesson['phase'];
-                return $lesson['phase'] === 'paused' && $present ? [...$unowned, $room] : $unowned;
-            });
-            array_push($drops, ...$remove);
-        }
-        $s->put('meta', 'watch', ['at'=>$at]);
-        return ['drop'=>$drops, 'permit'=>(object)$permit];
-    });
+    $lesson['last_attempt'] = $now;
+    $s->put('lesson', $lesson['id'], $lesson); // Keep access closed even if the RPC is not reachable.
+    if ($lesson['room'] !== null && !$gone) {
+        if (cl_room_class($cfg, $lesson['room']) !== $lesson['class_id']) throw new LogicException('Invalid owned room record');
+        cl_delete_room($lesson['room'], $rpc);
+    }
+    if ($lesson['phase'] === 'closing') {
+        cl_finish_lesson($s, $cfg, $lesson, $now);
+        return null;
+    }
+    $lesson['room'] = null;
+    $s->put('lesson', $lesson['id'], $lesson);
+    return $lesson;
+}
+
+// Called under the per-class lock. A single sample serves all polling tabs in that room.
+function cl_reconcile(ClassroomStore $s, array $cfg, ?array $class, array $lesson, int $now, callable $rpc): ?array
+{
+    $slot = null;
+    if ($class && $class['year'] === $lesson['year'] && $lesson['date'] === cl_day($now)->format('Y-m-d') && $now < $lesson['deadline']) {
+        $slot = cl_get_slot($s->db, $class, $lesson['slot'], $now);
+    }
+    if (!$slot || $slot['teacher'] !== $lesson['teacher'] || $slot['subject'] !== $lesson['subject']
+        || cl_period_key($slot['period']) !== cl_period_key($lesson['period'])) cl_pause($lesson, 'closing');
+    if ($lesson['phase'] === 'live' && !cl_lesson_live($lesson, $now)) cl_pause($lesson);
+    if ($lesson['phase'] === 'starting' && !cl_starting($lesson, $now)) cl_pause($lesson);
+    if ($now - ($lesson['last_attempt'] ?? 0) < CL_SAMPLE_INTERVAL) {
+        $s->put('lesson', $lesson['id'], $lesson);
+        return $lesson;
+    }
+    if ($lesson['phase'] === 'closing' || ($lesson['phase'] === 'paused' && $lesson['room'] !== null)) {
+        return cl_retire_transport($s, $cfg, $lesson, $now, $rpc);
+    }
+    if ($lesson['room'] === null) return $lesson;
+    if (empty($lesson['event_received'])) return $lesson;
+    if (cl_room_class($cfg, $lesson['room']) !== $lesson['class_id']) throw new LogicException('Invalid owned room record');
+    $lesson['last_attempt'] = $now;
+    try { $observed = cl_room_presence($lesson, $now, $rpc); }
+    catch (ClassroomError $error) {
+        cl_pause($lesson);
+        // A definitive absent room retires immediately; other errors are retried by the next page request.
+        if ($error->status === 409) return cl_retire_transport($s, $cfg, $lesson, $now, $rpc, true);
+        $s->put('lesson', $lesson['id'], $lesson);
+        throw $error;
+    }
+    $students = $staff = [];
+    foreach ($observed as $identity=>$sid) {
+        [$role, $pk] = explode('-', $identity, 2);
+        if ($role === 'student') { $students[] = (int)$pk; continue; }
+        $account = cl_school_account($s->db, $role, cl_id($pk), $lesson['year']);
+        if ($account && cl_assigned($account, $lesson['year'], $lesson['teacher'])) $staff[$identity] = true;
+    }
+    $roster = cl_roster($s->db, $class, $students);
+    if (count($observed) !== count($staff) + count($roster)) cl_pause($lesson);
+    else {
+        $lesson['roster'] += $roster;
+        $lesson = cl_observe($lesson, $observed, $staff, $now, $now);
+    }
+    if ($lesson['phase'] === 'paused') return cl_retire_transport($s, $cfg, $lesson, $now, $rpc);
+    $s->put('lesson', $lesson['id'], $lesson);
+    return $lesson;
 }
 
 function cl_finish_lesson(ClassroomStore $s, array $cfg, array $lesson, int $now): void
@@ -311,7 +311,7 @@ function cl_finish_lesson(ClassroomStore $s, array $cfg, array $lesson, int $now
         if ($lesson['started'] === null) {
             $s->delete('lesson', $id);
         } else {
-            foreach (['sample','transport_at','room','pulses','seen','staff','deadline'] as $key) unset($lesson[$key]);
+            foreach (['sample','transport_at','room','pulses','seen','staff','deadline','last_attempt','event_received'] as $key) unset($lesson[$key]);
             $lesson['phase'] = 'finished';
             $lesson['ended'] = $now;
             $s->put('lesson', $id, $lesson);
@@ -319,8 +319,8 @@ function cl_finish_lesson(ClassroomStore $s, array $cfg, array $lesson, int $now
             $entry = array_intersect_key($lesson, array_flip(['id','class_id','class_name','year','date','period','subject','teacher_name','active_seconds']));
             $s->put('reports', $key, $entry);
             $s->put('reports:teacher-' . $lesson['teacher'], $key, $entry);
-            $providers = array_values(array_filter(['bale','rubika','telegram'], static fn($p) => ($cfg['notify_' . $p] ?? false) === true));
-            if ($providers && $lesson['active_seconds'] > 0) $s->put('notify-pending', $id, ['providers'=>$providers]);
+            $providers = array_values(array_filter(['bale','rubika','telegram'], static fn($p) => ($cfg['notify_school_' . $p] ?? false) === true));
+            if ($providers && $lesson['active_seconds'] > 0) $s->put('host-pending', $id, ['providers'=>$providers]);
         }
         cl_clear_activity($s, $id);
     });
@@ -329,12 +329,6 @@ function cl_finish_lesson(ClassroomStore $s, array $cfg, array $lesson, int $now
 
 function cl_close_lesson(ClassroomStore $s, array $cfg, array $lesson, int $now, callable $rpc): void
 {
-    $room = $lesson['room'];
     cl_pause($lesson, 'closing');
-    $s->put('lesson', $lesson['id'], $lesson);
-    if ($room !== null) {
-        if (cl_room_class($cfg, $room) !== $lesson['class_id']) throw new LogicException('Invalid owned room record');
-        cl_delete_room($room, $rpc);
-    }
-    cl_finish_lesson($s, $cfg, $lesson, $now);
+    cl_retire_transport($s, $cfg, $lesson, $now, $rpc);
 }

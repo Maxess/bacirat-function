@@ -1,6 +1,6 @@
 <?php
 declare(strict_types=1);
-require __DIR__ . '/../school-addon/upload/online-classroom/activity.php';
+require __DIR__ . '/../school-addon/upload/online-classroom/events.php';
 require __DIR__ . '/../school-addon/upload/online-classroom/reports.php';
 
 function must(bool $ok, string $why): void { if (!$ok) throw new RuntimeException($why); }
@@ -40,7 +40,7 @@ foreach ([
 $s = new ClassroomStore($db, $table);
 $cfg = ['room_prefix'=>'test-' . str_repeat('a', 20),'site_origin'=>'https://school.example.test','signal_url'=>'wss://media.example.test',
     'api_key'=>str_repeat('a',24),'api_secret'=>str_repeat('b',64),'max_participants'=>4,
-    'notify_bale'=>true,'notify_telegram'=>true,'notify_rubika'=>true,'rubika_token'=>str_repeat('c',24)];
+    'notify_school_bale'=>true,'notify_school_telegram'=>true,'notify_school_rubika'=>true];
 $t = (new DateTimeImmutable('2026-11-18 08:30:00', new DateTimeZone('Asia/Tehran')))->getTimestamp();
 $year = cl_current_year($db);
 must($year === '1405/1406', 'active master year normalized');
@@ -69,60 +69,75 @@ $db->exec("INSERT INTO class_schedules VALUES (91,2,'هفتم1','1405/1406','چ�
 must(!cl_get_slot($db,$first,11,$t) && !cl_get_slot($db,$first,91,$t) && array_keys(cl_today_slots($db,$first,$deputy,$t)) === [13], 'conflicting rows for the same bell are rejected');
 $db->exec('DELETE FROM class_schedules WHERE id=91');
 
-$runtime = null; $sfus = [];
+$runtime = null; $sfus = []; $snapshots = []; $outage = false;
 $ctx = ['write_runtime'=>static function ($value) use (&$runtime) { $runtime = $value; }];
-$rpc = static function ($method,$room,$payload) use (&$runtime,&$sfus,$s,$cfg): array {
+$rpc = static function ($method,$room,$payload) use (&$runtime,&$sfus,&$snapshots,&$outage,$s,$cfg): array {
     if ($method === 'CreateRoom') {
-        must($runtime === 'scheduled-v1' && cl_active($s,cl_room_class($cfg,$room))['room'] === $room, 'room journal before request');
+        must($runtime === 'scheduled-v2' && cl_active($s,cl_room_class($cfg,$room))['room'] === $room, 'room journal before request');
         must($payload['maxParticipants']===4, 'pilot cap retained');
-        $sfus[$room]=true;
+        $sfus[$room]=[];
     } elseif ($method === 'DeleteRoom') { unset($sfus[$room]); }
+    elseif ($method === 'ListParticipants') {
+        if ($outage) throw new ClassroomError(502, 'simulated RPC failure');
+        if (!isset($sfus[$room])) throw new ClassroomError(409, 'gone');
+        return ['participants'=>array_values($snapshots[$room] ?? $sfus[$room])];
+    } elseif ($method === 'UpdateParticipant') {
+        return $sfus[$room][$payload['identity']] ?? throw new ClassroomError(409, 'gone');
+    }
     return [];
 };
 $open = fn($actor,$slot,$n,$class=null) => cl_open_lesson($s,$ctx,$cfg,$class??$first,$actor,['slot'=>$slot],$n,$rpc);
-$tick = fn($rooms,$n) => cl_watch_tick($s,$cfg,$rooms,$n,$n)['drop'];
 $bind = fn($l,$sid) => ['lesson'=>$l['id'],'epoch'=>cl_epoch($l),'sid'=>$sid];
 $pulse = function ($c,$actor,$sid,$n) use ($s,$bind) { $l=cl_active($s,$c); cl_touch($s,$l,$actor,$bind($l,$sid),$n); };
-denied(503,fn()=>$open($teacher,11,$t));
-$raw = json_encode(['watch_version'=>2,'at'=>$t,'prefix'=>$cfg['room_prefix'],'rooms'=>[]]);
-$mac = hash_hmac('sha256', "school-classroom-watch-v1\n{$cfg['site_origin']}\n" . $raw, $cfg['api_secret']);
-must(cl_watch_auth($cfg,$raw,$mac,json_decode($raw,true),$t) === [], 'signed machine body and exact site');
-denied(403,fn()=>cl_watch_auth($cfg,$raw.' ',$mac,json_decode($raw,true),$t));
-denied(403,fn()=>cl_watch_auth($cfg,$raw,$mac,json_decode($raw,true),$t+11));
-$tick([],$t);
-denied(409,fn()=>$tick([],$t));
+$wire = function (string $room, array $participants) use (&$sfus): void {
+    $sfus[$room] = [];
+    foreach ($participants as $id=>$sid) $sfus[$room][$id] = ['sid'=>$sid,'identity'=>$id,'state'=>'ACTIVE'];
+};
+$sample = fn($c,$n,$class)=> cl_reconcile($s,$cfg,$class,cl_active($s,$c),$n,$rpc);
+$event = fn($kind,$room,$n,$who=null,$sid=null)=>cl_event_apply($s,$cfg,['event'=>$kind,'room'=>['name'=>$room], 'participant'=>['identity'=>$who,'sid'=>$sid]],$n,$rpc);
+$sign = static function (string $raw, int $exp, string $iss) use ($cfg): string {
+    $token = cl_b64url('{"alg":"HS256","typ":"JWT"}') . '.' . cl_b64url(json_encode(['iss'=>$iss,'exp'=>$exp,'sha256'=>base64_encode(hash('sha256',$raw,true))]));
+    return $token . '.' . cl_b64url(hash_hmac('sha256',$token,$cfg['api_secret'],true));
+};
 denied(403,fn()=>$open($student,11,$t));
 denied(403,fn()=>$open($teacher,14,$t));
 denied(403,fn()=>$open($other,11,$t));
 $a=$open($teacher,11,$t);
 $b=$open($other,12,$t,$classes[20]);
 $r=$a['room']; $r2=$b['room'];
-must($a['phase']==='starting' && $r!==$r2 && !$a['started'], 'independent transports arrive in waiting');
+must($a['phase']==='starting' && $r!==$r2 && !$a['started'], 'staff enters before pupils');
 denied(409,fn()=>cl_ticket($cfg,$a,$student,$bind($a,'PA_Student'),$t));
 denied(409,fn()=>cl_check_live($a,$teacher,$bind($a,'PA_Teacher'),$t));
-denied(409,fn()=>cl_ticket($cfg,$a,$teacher,$bind($a,'PA_Teacher'),$t));
+$ticket = cl_ticket($cfg,$a,$teacher,$bind($a,'PA_Teacher'),$t);
+must($ticket['epoch'] === cl_epoch($a), 'staff ticket before media is live; no independent watcher');
+$raw = json_encode(['event'=>'room_started','room'=>['name'=>$r]]);
+$jwt = $sign($raw,$t+300,$cfg['api_key']);
+must(cl_event_verify($cfg,$raw,$jwt,$t)['room']['name']===$r, 'native signed LiveKit event');
+denied(403,fn()=>cl_event_verify($cfg,$raw.' ',$jwt,$t));
+denied(403,fn()=>cl_event_verify($cfg,$raw,$jwt,$t+301));
+denied(403,fn()=>cl_event_verify($cfg,$raw,$sign($raw,$t+300,'unrelated'),$t));
 $teacherWire=['teacher-1'=>'PA_Teacher'];
 $studentWire=['student-1'=>'PA_Student'];
 $managerWire=['admin-3'=>'PA_Manager'];
 $otherWire=['teacher-2'=>'PA_Other'];
-$rooms=fn($aa,$bb=null) => [$r=>$aa,$r2=>$bb??[]];
-$pulse(10,$student,'PA_Student',$t+3);
-$policy = cl_watch_tick($s,$cfg,$rooms($studentWire),$t+3,$t+3);
-$a = cl_active($s,10);
-must($a['phase']==='starting' && $policy['permit']->$r === 'starting', 'only staff admission before confirmed supervision');
-$ticket = cl_ticket($cfg,$a,$teacher,$bind($a,'PA_Teacher'),$t+3);
-must($ticket['epoch'] === cl_epoch($a), 'staff ticket after observer confirms starting generation');
+$wire($r,$teacherWire);
+$pulse(10,$teacher,'PA_Teacher',$t+3);
+$a = $sample(10,$t+3,$first);
+must($a['phase']==='starting', 'no student tickets without the LiveKit callback');
 denied(409,fn()=>cl_ticket($cfg,$a,$student,$bind($a,'PA_Student'),$t+3));
-$pulse(10,$teacher,'PA_Teacher',$t+6);
-$pulse(20,$other,'PA_Other',$t+6);
-$tick($rooms($teacherWire,$otherWire),$t+6);
-$a=cl_active($s,10); must($a['phase']==='live' && $a['active_seconds']===0, 'real moderator, no time counted in wait');
+cl_event_apply($s,$cfg,cl_event_verify($cfg,$raw,$jwt,$t+4),$t+4,$rpc);
+$event('room_started',$r2,$t+4);
+$wire($r2,$otherWire); $pulse(20,$other,'PA_Other',$t+6);
+$sample(20,$t+6,$classes[20]);
+$a = $sample(10,$t+6,$first);
+must($a['phase']==='live' && $a['active_seconds']===0, 'verified staff and no time counted in wait');
 cl_ticket($cfg,$a,$student,$bind($a,'PA_Student'),$t+6);
 denied(409,fn()=>cl_check_live($a,$student,$bind($a,'PA_Fake'),$t+6));
 denied(409,fn()=>cl_check_live($a,$other,$bind($a,'PA_Teacher'),$t+6));
 $pulse(10,$student,'PA_Student',$t+8);
 $pulse(10,$manager,'PA_Manager',$t+8);
-$tick($rooms($teacherWire+$studentWire+$managerWire,$otherWire),$t+9);
+$wire($r,$teacherWire+$studentWire+$managerWire);
+$sample(10,$t+9,$first);
 $active=cl_active($s,10);
 cl_check_live($active,$student,$bind($active,'PA_Student'),$t+9);
 cl_chat($s,$active,$student,'<b>متن است</b>',$t+9);
@@ -144,33 +159,32 @@ cl_board_action($s,$active,['board'=>3],'board-clear');
 must(cl_activity_sync($s,$active,$student,['board'=>3,'ink'=>1])['board']['cursor']===0, 'erase only drawing layer');
 
 $pulse(10,$student,'PA_Student',$t+11);
-$tick($rooms($studentWire+$managerWire,$otherWire),$t+12);
+$wire($r,$studentWire+$managerWire);
+$event('participant_left',$r,$t+11,'teacher-1','PA_Teacher');
+$a=$sample(10,$t+12,$first);
+must($a['active_seconds']===6 && $a['seconds']['student-1']===3 && $a['phase']==='live', 'second authorized staff keeps room open');
+$wire($r,$studentWire);
+$event('participant_left',$r,$t+15,'admin-3','PA_Manager');
 $a=cl_active($s,10);
-must($a['active_seconds']===6 && $a['seconds']['student-1']===3 && $a['phase']==='live', 'second authorized moderator keeps room open');
-$pulse(20,$other,'PA_Other',$t+14);
-must($tick($rooms($studentWire,$otherWire),$t+15) === [$r], 'no browser event needed to order server-side disconnection after last staff drops');
-$a=cl_active($s,10);
-must($a['phase']==='paused' && $a['active_seconds']===6 && cl_active($s,20)['phase']==='live', 'pause stops class and attendance and leaves the other classroom alone');
+must($a['room'] === null && !isset($sfus[$r]) && $a['phase']==='paused' && $a['active_seconds']===6
+    && cl_active($s,20)['phase']==='live' && isset($sfus[$r2]), 'signed leave closes only this room without any browser request or watcher');
 denied(409,fn()=>cl_check_live($a,$student,$bind($a,'PA_Student'),$t+15));
 denied(409,fn()=>cl_ticket($cfg,$a,$student,$bind($a,'PA_Student'),$t+15));
-denied(409,fn()=>$open($teacher,11,$t+15)); // Must confirm old transport is gone first.
-unset($sfus[$r]);
-$tick([$r2=>$otherWire],$t+18);
 $a2=$open($teacher,11,$t+19);
 $r3=$a2['room'];
 must($a2['id']===$a['id'] && $r3!==$r && $a2['seconds']['student-1']===3, 'resume same lesson and counters with a new media room');
 denied(409,fn()=>cl_ticket($cfg,$a2,$teacher,$bind($a,'PA_Teacher'),$t+19));
+$event('room_finished',$r,$t+20);
+$event('participant_joined',$r3,$t+20);
 $pulse(10,$teacher,'PA_NewTeacher',$t+20);
 $pulse(10,$student,'PA_NewStudent',$t+20);
-$newW=['teacher-1'=>'PA_NewTeacher','student-1'=>'PA_NewStudent'];
-$tick([$r3=>$newW,$r2=>$otherWire],$t+21);
-$tick([$r3=>$newW],$t+24);
+$wire($r3,['teacher-1'=>'PA_NewTeacher','student-1'=>'PA_NewStudent']);
+$sample(10,$t+21,$first);
+$sample(10,$t+24,$first);
 must(cl_active($s,10)['seconds']['student-1']===6, 'resumed interval counted once');
 $pulse(10,$teacher,'PA_NewTeacher',$t+40);
-$pulse(10,$student,'PA_NewStudent',$t+40);
-$policy = cl_watch_tick($s,$cfg,[$r3=>$newW],$t+41,$t+41);
-must($policy['drop']===[$r3] && !(array)$policy['permit']
-    && cl_active($s,10)['seconds']['student-1']===6, 'unsampled gap not attributed, expired transport revoked');
+$a3=$sample(10,$t+41,$first);
+must($a3['phase']==='paused' && !isset($sfus[$r3]) && $a3['seconds']['student-1']===6, 'unsampled gap not counted, expired transport revoked');
 $cl=cl_active($s,10);
 cl_close_lesson($s,$cfg,$cl,$t+42,$rpc);
 must(!cl_active($s,10) && !isset($sfus[$r3]) && $s->get('activity',$cl['id'])===null, 'close and purge activity');
@@ -185,32 +199,71 @@ $different = $open($other,13,$t+42);
 must($different['id'] !== $a['id'] && !$different['seconds'] && $different['active_seconds']===0, 'same room, different bell, independent attendance');
 
 $send=[];
-$mock = static function($p,$key,$method,$body) use (&$send): array {
-    if ($method==='getChat' && $p==='rubika') return ['chat'=>['chat_type'=>str_starts_with($body['chat_id'],'g')?'Group':'User','chat_id'=>$body['chat_id'],'user_id'=>'u1']];
-    if ($method==='getChat') return ['id'=>$body['chat_id'],'type'=>$body['chat_id']==='555'?'group':'private'];
-    if ($method==='sendMessage') { $send[]=[$p,$body['chat_id'],$body['text']]; return ['message_id'=>'m1']; }
-    return ['updates'=>[]];
+$host = static function (string $provider) use (&$send,$s): ?array {
+    if ($provider === 'rubika') return null; // No school bridge in the reviewed host.
+    return [
+        'revision'=>'synthetic-' . $provider,
+        'active'=>static fn()=>true,
+        'links'=>static fn($student)=>cl_query($s->db, "SELECT {$provider}_chat_id FROM {$provider}_bot_users WHERE student_id=?", [$student])->fetchAll(PDO::FETCH_COLUMN),
+        'private'=>static fn($chat)=>!str_starts_with($chat,'-') && $chat !== '555',
+        'send'=>static function ($student,$chat,$text) use ($provider,&$send): bool { $send[]=[$provider,$chat,$text]; return true; },
+    ];
 };
-$cmd=cl_own_rubika($s,$cfg,$student,'rubika-pair',$t+43)['command'];
-$update=['type'=>'NewMessage','chat_id'=>'gGroup','new_message'=>['sender_type'=>'User','sender_id'=>'u1','text'=>$cmd]];
-cl_rubika_update($s,$cfg,$cfg['rubika_token'],$update,$t+43,$mock);
-must(!$s->get('rubika-link','1'),'group cannot pair');
-$update['chat_id']='bPrivate';
-cl_rubika_update($s,$cfg,$cfg['rubika_token'],$update,$t+44,$mock);
-$update['chat_id']='bOther';
-cl_rubika_update($s,$cfg,$cfg['rubika_token'],$update,$t+45,$mock);
-must($s->get('rubika-link','1')['chat']==='bPrivate', 'short-lived private pairing consumed once');
-$tokens=['bale'=>'987:TestbaleXXXX','telegram'=>'456:TesttgXXXX','rubika'=>$cfg['rubika_token']];
-cl_expand_outbox($s,$tokens,$cl['id'],$s->get('notify-pending',$cl['id']),$t+46);
-foreach ($s->rows('outbox',20) as $key=>$item) cl_deliver_one($s,$key,$item,$tokens,$t+46,$mock);
-must(count($send)===4 && !$s->rows('outbox',20), 'dedup, send three platforms and absence, skip group and unrelated contacts');
+cl_expand_outbox($s,$cfg,$host,$cl['id'],$s->get('host-pending',$cl['id']),$t+46);
+$activation = [];
+foreach ($s->rows('host-outbox',20) as $key=>$item) cl_deliver_one($s,$cfg,$host,$key,$item,$t+46,$activation);
+must(count($send)===3 && !$s->rows('host-outbox',20), 'dedup, normal school accounts and absence, skip group/unavailable provider');
 $targets=array_column($send,1); sort($targets);
-must($targets===['111','333','444','bPrivate'] && $s->get('delivery',$cl['id'])['sent']===4, 'only private linked contacts');
+must($targets===['111','333','444'] && $s->get('delivery',$cl['id'])['sent']===3, 'only private linked contacts');
 foreach ($send as [$provider,$target,$text]) must(str_contains($text,'00:00:09') && str_contains($text,$target==='333'?'00:00:00':'00:00:06'), 'correct attendance message');
-cl_own_rubika($s,$cfg,$student,'rubika-unlink',$t+47);
-must(!$s->get('rubika-link','1'), 'student can unlink');
+
+// Simulated unlink, inactive provider, changed bot, and ambiguous send after the packet was queued.
+$makeNotice = static function (string $provider, string $chat, int $student) use ($s,$cl,$t) {
+    $item=['provider'=>$provider,'revision'=>'synthetic-' . $provider,'chat'=>$chat,'student'=>$student,'lesson'=>$cl['id'],'attempt'=>0];
+    $key=cl_outbox_key($item,$t+46);
+    $s->put('host-outbox',$key,$item);
+    return [$key,$item];
+};
+[$key,$item] = $makeNotice('bale','111',1);
+$db->exec("DELETE FROM bale_bot_users WHERE bale_chat_id='111'");
+cl_deliver_one($s,$cfg,$host,$key,$item,$t+46,$activation);
+must(count($send)===3, 'rechecks existing linked account after queueing');
+[$key,$item] = $makeNotice('telegram','444',1);
+$inactive = static fn($p)=>array_replace($host($p),['active'=>static fn()=>false]);
+$freshActivation = [];
+cl_deliver_one($s,$cfg,$inactive,$key,$item,$t+46,$freshActivation);
+must(count($send)===3, 'remote webhook not active for the site');
+[$key,$item] = $makeNotice('telegram','444',1);
+$changed = static fn($p)=>array_replace($host($p),['revision'=>'other-test-bot']);
+cl_deliver_one($s,$cfg,$changed,$key,$item,$t+46,$freshActivation);
+must(count($send)===3, 'queued notices cannot be redirected to another bot');
+[$key,$item] = $makeNotice('telegram','444',1);
+$ambiguous = static fn($p)=>array_replace($host($p),['send'=>static fn()=>throw new RuntimeException('simulated lost reply')]);
+$freshActivation = [];
+cl_deliver_one($s,$cfg,$ambiguous,$key,$item,$t+46,$freshActivation);
+must(!$s->get('host-outbox',$key) && $s->get('delivery',$cl['id'])['uncertain']===1, 'provider timeout does not duplicate a potentially delivered notice');
+
+// If webhooks are delayed, server-side samples may see a stale list but still check the current staff SID.
+$pulse(10,$other,'PA_Other2',$t+43); $r4 = $different['room'];
+$event('room_started',$r4,$t+43); $wire($r4,['teacher-2'=>'PA_Other2']);
+$sample(10,$t+45,$first);
+$snapshots[$r4] = $sfus[$r4]; $wire($r4,[]);
+$a4 = $sample(10,$t+48,$first);
+must($a4['phase']==='paused' && !isset($sfus[$r4]), 'lost last adult even if ListParticipants is stale and no callback has arrived');
+$different = $open($deputy,13,$t+49); $r5 = $different['room'];
+$event('room_started',$r5,$t+49);
+$pulse(10,$deputy,'PA_Deputy',$t+50); $wire($r5,['teacher-3'=>'PA_Deputy']);
+must($sample(10,$t+51,$first)['phase']==='live', 'existing school deputy starts the room');
+$outage = true;
+denied(502,fn()=>$sample(10,$t+54,$first));
+$a5 = cl_active($s,10);
+denied(409,fn()=>cl_ticket($cfg,$a5,$student,$bind($a5,'PA_Student'),$t+54));
+must($a5['phase']==='paused', 'failed RPC closes application access before attempting remote cleanup');
+$outage = false;
+$sample(10,$t+57,$first);
+must(!isset($sfus[$r5]), 'server retries the owned room cleanup');
 $db->exec('UPDATE academic_years SET is_default=CASE WHEN id=2 THEN 1 ELSE 0 END');
-$tick([],$t+48);
-must(!cl_active($s,20) && cl_report_detail($s,$teacher,$cl['id'])===$rpt, 'changing school year closes prior live rooms and preserves historical report');
+$sample(20,$t+60,null);
+must(!cl_active($s,20) && cl_report_detail($s,$teacher,$cl['id'])===$rpt, 'changing school year closes prior room and preserves report');
 if ($mysql) foreach ([$table,'academic_years','settings','classes','students','teachers','admins','class_schedules','bale_bot_users','telegram_bot_users'] as $name) $db->exec("DROP TABLE `$name`");
-echo "PASS calendar, access roles, staff lease, waiting/resume, pause-aware per-student accounting, board/chat and three opted-in bot transports\n";
+echo "PASS calendar, access roles, native events, trusted presence, waiting/resume, reports, board/chat and conditional school bot delivery\n";

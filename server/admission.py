@@ -18,25 +18,6 @@ from urllib.parse import parse_qs, urlsplit
 
 RTC_PATHS = frozenset(['/rtc', '/rtc/validate', '/rtc/v1', '/rtc/v1/validate'])
 TOKEN_PART = re.compile(r'[A-Za-z0-9_-]+\Z')
-SCHEDULED_ROOM = re.compile(r'test-[a-f0-9]{20}-v3-c[1-9][0-9]{0,9}-[a-f0-9]{24}\Z')
-PERMIT_FILE = Path('/run/school-classroom-watch/permit.json')
-
-
-def scheduled_permitted(room, claims, permit_file):
-    # SDK refresh JWTs are not school tickets, including refreshed listener JWTs.
-    issued = claims.get('iat')
-    if type(issued) is not int or claims['nbf'] != issued - 5 or claims['exp'] != issued + 35:
-        return False
-    with permit_file.open('rb') as file:
-        raw = file.read(16 * 1024 + 1)
-    if len(raw) > 16 * 1024:
-        return False
-    state = json.loads(raw)
-    until = state['until']
-    if type(until) not in (int, float) or not 0 < until - time.monotonic() <= 10:
-        return False
-    phase = state['rooms'].get(room)
-    return phase == 'live' or (phase == 'starting' and not claims['sub'].startswith('student-'))
 
 
 def decode(part):
@@ -45,7 +26,7 @@ def decode(part):
     return base64.urlsafe_b64decode(part + '=' * (-len(part) % 4))
 
 
-def listener_token(token, key, secret, now, permit_file=PERMIT_FILE):
+def listener_token(token, key, secret, now):
     try:
         if len(token) > 8192:
             return False
@@ -66,13 +47,12 @@ def listener_token(token, key, secret, now, permit_file=PERMIT_FILE):
             and grant.get('roomJoin') is True and grant.get('canSubscribe') is True
             and grant.get('canPublish') is False and grant.get('canPublishData') is False
             and not any(grant.get(k) for k in ('roomAdmin', 'roomCreate', 'roomList', 'roomRecord'))
-            and (not SCHEDULED_ROOM.fullmatch(grant['room']) or scheduled_permitted(grant['room'], claims, permit_file))
         )
-    except (OSError, AttributeError, KeyError, TypeError, ValueError):
+    except (AttributeError, KeyError, TypeError, ValueError):
         return False
 
 
-def admit(headers, config, now, permit_file=PERMIT_FILE):
+def admit(headers, config, now):
     # Caddy overwrites X-Forwarded-Uri in forward_auth; this service is loopback-only.
     try:
         uri = urlsplit(headers.get('X-Forwarded-Uri', ''))
@@ -88,12 +68,12 @@ def admit(headers, config, now, permit_file=PERMIT_FILE):
         if auth and tokens and auth[7:] != tokens[0]:
             return False
         token = auth[7:] if auth else (tokens[0] if tokens else '')
-        return listener_token(token, config['api_key'], config['api_secret'], now, permit_file)
+        return listener_token(token, config['api_key'], config['api_secret'], now)
     except (KeyError, TypeError, ValueError):
         return False
 
 
-def run(config, port=7883, permit_file=PERMIT_FILE):
+def run(config, port=7883):
     class Handler(BaseHTTPRequestHandler):
         timeout = 3
 
@@ -101,10 +81,7 @@ def run(config, port=7883, permit_file=PERMIT_FILE):
             pass  # Do not log bearer tokens or URL query strings.
 
         def do_GET(self):
-            if self.path == '/supervision-v2':  # Loopback capability check; not routed through Caddy.
-                code = 204
-            else:
-                code = 204 if self.path.split('?', 1)[0] == '/admit' and admit(self.headers, config, time.time(), permit_file) else 403
+            code = 204 if self.path.split('?', 1)[0] == '/admit' and admit(self.headers, config, time.time()) else 403
             self.send_response(code)
             self.send_header('Cache-Control', 'no-store')
             self.send_header('Content-Length', '0')
