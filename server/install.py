@@ -12,6 +12,7 @@ import re
 import secrets
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tarfile
@@ -25,6 +26,7 @@ NAME = 'school-classroom'
 APP = Path('/opt') / NAME
 CFG = Path('/etc') / NAME
 SYSTEMD = Path('/etc/systemd/system')
+PILOT_GATE_SHA256 = 'c31c1a220828d324b76c370eeb8a6e7d75d4bd09cacacb5acb5639432d350f23'
 SIGNAL_PATHS = '/rtc /rtc/validate /rtc/v1 /rtc/v1/validate'
 ROOM_METHODS = ['CreateRoom', 'DeleteRoom', 'ListRooms', 'ListParticipants', 'UpdateParticipant']
 
@@ -171,17 +173,21 @@ def extract_binary(package, destination):
     destination.chmod(0o755)
 
 
-def install(args):
+def require_systemd():
     if os.geteuid() != 0 or platform.system() != 'Linux' or platform.machine() != 'x86_64':
         raise ValueError('Run with sudo on Linux x86_64')
     if not Path('/run/systemd/system').is_dir():
         raise ValueError('A running systemd is required')
+
+
+def install(args):
+    require_systemd()
     origin = args.school_origin
     if args.media_host == origin[8:]:
         raise ValueError('Use a separate media hostname; the PHP site is not this VPS')
     sfu_unit = SYSTEMD / f'{NAME}-sfu.service'
     gate_unit = SYSTEMD / f'{NAME}-admission.service'
-    for path in (APP, CFG, sfu_unit, gate_unit):
+    for path in (APP, CFG, sfu_unit, gate_unit, SYSTEMD / f'{NAME}-watch.service'):
         if os.path.lexists(path):
             raise ValueError(f'Pilot already exists: {path}; no files were overwritten')
     addrs = {entry[4][0] for entry in socket.getaddrinfo(args.media_host, None, socket.AF_INET)}
@@ -221,14 +227,78 @@ def install(args):
     print('Next: configure firewall and import the Caddy site, then start both services per the guide.')
 
 
+def trusted(path, kind):
+    st = path.lstat()
+    if not kind(st.st_mode) or st.st_uid != 0 or st.st_mode & 0o022:
+        raise ValueError(f'Unexpected ownership or layout: {path}; leaving the media installation unchanged')
+
+
+def install_supervision(prefix, site_path):
+    """Extend an existing pilot in place, without changing network config, keys or the running SFU."""
+    require_systemd()
+    if not re.fullmatch(r'test-[a-f0-9]{20}', prefix) or not re.fullmatch(r'(?:/[A-Za-z0-9_-][A-Za-z0-9_.-]*)*', site_path):
+        raise ValueError('Use the exact test-… prefix from the plugin manager and an empty or /school-test site path')
+    source = Path(__file__).resolve().parent
+    for path in (APP, CFG, SYSTEMD):
+        trusted(path, stat.S_ISDIR)
+    gate = APP / 'admission.py'
+    settings = CFG / 'admission.json'
+    for path in (gate, settings, APP / 'livekit-server', SYSTEMD / f'{NAME}-admission.service', SYSTEMD / f'{NAME}-sfu.service'):
+        trusted(path, stat.S_ISREG)
+    try:
+        data = json.loads(settings.read_bytes())
+        school_origin(data['school_origin'])
+        if not re.fullmatch(r'[A-Za-z0-9_-]{12,64}', data['api_key']) or not re.fullmatch(r'[A-Za-z0-9_-]{32,128}', data['api_secret']):
+            raise ValueError('unexpected key format')
+    except (argparse.ArgumentTypeError, KeyError, TypeError, ValueError):
+        raise ValueError('Private pilot configuration is not valid; no settings replaced') from None
+    gate_new = (source / 'admission.py').read_bytes()
+    gate_old = gate.read_bytes()
+    if gate_old != gate_new and hashlib.sha256(gate_old).hexdigest() != PILOT_GATE_SHA256:
+        raise ValueError('Admission script does not match the audited pilot; do not overwrite it')
+    watch_new = (source / 'classroom-watch.py').read_text(encoding='utf-8')
+    entries = {
+        APP / 'classroom-watch.py': (watch_new, 0o644),
+        CFG / 'watch.env': (f'CLASSROOM_PREFIX={prefix}\nCLASSROOM_SITE_PATH={site_path}\n', 0o600),
+        SYSTEMD / f'{NAME}-watch.service': ((source / 'school-classroom-watch.service').read_text(encoding='utf-8'), 0o644),
+    }
+    if gate_old != gate_new:
+        entries[CFG / 'admission-pilot.py.bak'] = (gate_old.decode('utf-8'), 0o600)
+    for path, (text, _) in entries.items():
+        if os.path.lexists(path):
+            trusted(path, stat.S_ISREG)
+            if path.read_text(encoding='utf-8') != text:
+                raise ValueError(f'Managed file already exists with other content: {path}; no files were overwritten')
+    compile(gate_new, 'admission.py', 'exec')
+    compile(watch_new, 'classroom-watch.py', 'exec')
+    for path, (text, mode) in entries.items():
+        if not path.exists():
+            write_private(path, text, mode=mode)
+    if gate_old != gate_new:
+        with tempfile.TemporaryDirectory(prefix='.gate-', dir=APP) as tmp:
+            candidate = Path(tmp) / 'admission.py'
+            write_private(candidate, gate_new.decode('utf-8'), mode=0o644)
+            candidate.replace(gate)
+    subprocess.run(['systemctl', 'daemon-reload'], check=True)
+    print('supervision_prepared=yes; running services, LiveKit, Caddy, firewall and keys were not changed')
+    print('When no class is running: restart school-classroom-admission, then enable and start school-classroom-watch.')
+
+
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, epilog='Existing pilot: install.py supervise PREFIX [--site-path /school-test]')
     parser.add_argument('media_host', type=hostname)
     parser.add_argument('ipv4', type=public_ip)
     parser.add_argument('school_origin', type=school_origin)
     parser.add_argument('--archive', type=Path, help='verify and use the pinned local LiveKit archive instead of downloading')
     try:
-        install(parser.parse_args())
+        if sys.argv[1:2] == ['supervise']:
+            watch = argparse.ArgumentParser(description='Prepare supervision for an existing school-media pilot')
+            watch.add_argument('prefix')
+            watch.add_argument('--site-path', default='', help='empty for root, or /school-test for a subdirectory')
+            args = watch.parse_args(sys.argv[2:])
+            install_supervision(args.prefix, args.site_path)
+        else:
+            install(parser.parse_args())
     except (ValueError, OSError, tarfile.TarError) as error:
         sys.exit(f'School classroom setup: {error}')
     except subprocess.CalledProcessError as error:

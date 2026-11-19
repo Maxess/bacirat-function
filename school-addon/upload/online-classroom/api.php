@@ -1,77 +1,87 @@
 <?php
 declare(strict_types=1);
-require_once __DIR__ . '/core.php';
+require_once __DIR__ . '/activity.php';
+require_once __DIR__ . '/notifications.php';
 
-cl_headers();
-header('Content-Type: application/json; charset=UTF-8');
-
-try {
-    if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
-        header('Allow: POST');
-        throw new ClassroomError(405, 'فقط درخواست POST مجاز است.');
-    }
+cl_json_reply(static function (): array {
+    cl_require_post();
     $cfg = cl_config();
-    if (isset($_SERVER['HTTP_ORIGIN']) && $_SERVER['HTTP_ORIGIN'] !== $cfg['site_origin']) {
-        throw new ClassroomError(403, 'مبدأ درخواست معتبر نیست.');
+    $context = cl_context();
+    if ((isset($_SERVER['HTTP_ORIGIN']) && $_SERVER['HTTP_ORIGIN'] !== $cfg['site_origin'])
+        || !hash_equals($context['csrf'], (string)($_SERVER['HTTP_X_CLASSROOM_CSRF'] ?? ''))) {
+        throw new ClassroomError(403, 'نشست صفحه معتبر نیست؛ صفحه را دوباره باز کن.');
     }
-    if (strtolower(trim(explode(';', (string)($_SERVER['CONTENT_TYPE'] ?? ''))[0])) !== 'application/json') {
-        throw new ClassroomError(415, 'نوع درخواست پذیرفته نیست.');
-    }
-    $raw = file_get_contents('php://input', false, null, 0, 4097);
-    if ($raw === false || strlen($raw) > 4096) {
-        throw new ClassroomError(413, 'درخواست بیش از اندازه بزرگ است.');
-    }
-    $body = json_decode($raw, true);
-    if (!is_array($body) || !is_string($body['action'] ?? null)) {
-        throw new ClassroomError(400, 'درخواست قابل خواندن نیست.');
-    }
-    $pdo = cl_load_site($cfg);
-    $csrf = cl_csrf();
-    if (!is_string($csrf) || !hash_equals($csrf, (string)($_SERVER['HTTP_X_CLASSROOM_CSRF'] ?? ''))) {
-        throw new ClassroomError(403, 'نشست صفحه منقضی شده؛ صفحهٔ کلاس را دوباره باز کن.');
-    }
-    $session = $_SESSION;
-    session_write_close();
-    $class = cl_class($pdo, $cfg);
-    $actor = cl_actor($pdo, $session, $class);
-    $action = $body['action'];
-    $mediaControl = in_array($action, CL_MEDIA_ACTIONS, true);
-    if (!$mediaControl && !in_array($action, ['join', 'open', 'close'], true)) {
-        throw new ClassroomError(400, 'عملیات شناخته نشد.');
-    }
-    if ($action !== 'join' && !$actor['moderator']) {
-        throw new ClassroomError(403, 'این عملیات فقط برای دبیر یا مدیر مجاز است.');
-    }
-    $target = $mediaControl ? cl_media_target($action, $body['identity'] ?? null) : null;
+    $session = $_SESSION ?? [];
+    if (session_status() === PHP_SESSION_ACTIVE) session_write_close();
+    $isUpload = str_starts_with(strtolower((string)($_SERVER['CONTENT_TYPE'] ?? '')), 'multipart/form-data;');
+    $body = $isUpload ? ['action'=>'upload'] + $_POST : cl_json_body(32768)[1];
+    $action = is_array($body) ? ($body['action'] ?? null) : null;
+    if (!is_string($action)) throw new ClassroomError(400, 'عملیات شناخته نشد.');
+    $s = cl_store();
+    $year = cl_current_year($s->db);
+    $actor = cl_school_user($s->db, $session, $year);
+    if (in_array($action, ['rubika-pair','rubika-unlink'], true)) return cl_own_rubika($s, $cfg, $actor, $action, time());
+    $class = cl_class_for($s->db, cl_classes($s->db, $year), cl_id($body['class'] ?? null), $actor);
     $rpc = static fn(string $method, string $room, array $data): array => cl_rpc($cfg, $room, $method, $data);
-    $room = $class['room'];
-    if ($context = cl_manager_context()) {
-        $room = cl_room_lock($pdo, $cfg['room_prefix'], static fn() => cl_managed_action($cfg, $context, $action, $target, $rpc));
-    } elseif ($action === 'open') {
-        cl_room_lock($pdo, $room, static fn() => cl_create_room($room, $rpc));
-    } elseif ($action === 'close') {
-        cl_room_lock($pdo, $room, static fn() => $rpc('DeleteRoom', $room, ['room' => $room]));
-    } elseif ($mediaControl) {
-        cl_room_lock($pdo, $room, static fn() => cl_control_media($room, $action, $target, static fn($method, $data) => $rpc($method, $room, $data)));
-    } elseif (!cl_room_exists($room, $rpc)) {
-        throw new ClassroomError(409, 'دبیر هنوز کلاس را شروع نکرده یا کلاس پایان یافته است.');
-    }
-    $response = ['ok' => true];
-    if ($action === 'join' || $action === 'open') {
-        $response += ['url' => $cfg['signal_url'], 'token' => cl_join_ticket($cfg, $room, $actor)];
-    }
-    echo json_encode($response, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
-} catch (ClassroomError $error) {
-    if (session_status() === PHP_SESSION_ACTIVE) {
-        session_write_close();
-    }
-    http_response_code($error->status);
-    echo json_encode(['ok' => false, 'message' => $error->getMessage()], JSON_UNESCAPED_UNICODE);
-} catch (Throwable $error) {
-    if (session_status() === PHP_SESSION_ACTIVE) {
-        session_write_close();
-    }
-    http_response_code(503);
-    error_log('School classroom pilot: endpoint failed (' . get_class($error) . ')');
-    echo json_encode(['ok' => false, 'message' => 'تنظیمات هاست یا پایگاه دادهٔ آزمایشی را بررسی کن.'], JSON_UNESCAPED_UNICODE);
-}
+    return cl_class_lock($s, $cfg, $class['id'], static function () use ($s, $context, $cfg, $class, $actor, $body, $action, $rpc, $isUpload) {
+        $now = time();
+        $lesson = cl_active($s, $class['id']);
+        if ($lesson && ($lesson['year'] !== $class['year'] || !cl_can_lesson($lesson, $actor))) {
+            if ($action === 'status') return ['phase'=>'reserved','watch'=>cl_watch_ready($s, $now)];
+            throw new ClassroomError(403, 'این زنگ برای این حساب مجاز نیست.');
+        }
+        if ($action === 'status') {
+            $watch = cl_watch_ready($s, $now);
+            if (!$lesson) return ['phase'=>'idle', 'watch'=>$watch];
+            if ($watch && $lesson['date'] === cl_day($now)->format('Y-m-d') && $now < $lesson['deadline']) $lesson = cl_touch($s, $lesson, $actor, $body, $now);
+            $live = $watch && cl_lesson_live($lesson, $now);
+            $phase = $live ? 'live' : ($lesson['phase'] === 'live' ? 'paused' : $lesson['phase']);
+            $allowed = $live && cl_match_transport($lesson, $body) && cl_entered($lesson, $actor, $body['sid'] ?? null, $now);
+            $result = ['phase'=>$phase,'watch'=>$watch, 'lesson'=>$lesson['id'], 'epoch'=>cl_epoch($lesson),
+                'period'=>$lesson['period'], 'subject'=>$lesson['subject'], 'slot'=>$lesson['slot'], 'admitted'=>$allowed,
+                'joinable'=>$watch && cl_joinable($lesson, $actor, $now),
+                'resumable'=>$watch && $lesson['phase'] === 'paused' && $lesson['room'] === null];
+            if ($allowed) $result += ['seconds'=>$lesson['seconds']] + cl_activity_sync($s, $lesson, $actor, $body);
+            return $result;
+        }
+        if ($action === 'open') {
+            $lesson = cl_open_lesson($s, $context, $cfg, $class, $actor, $body, $now, $rpc);
+            return cl_joinable($lesson, $actor, $now)
+                ? cl_ticket($cfg, $lesson, $actor, ['lesson'=>$lesson['id'],'epoch'=>cl_epoch($lesson)], $now)
+                : ['preparing'=>true];
+        }
+        if ($action === 'ticket') {
+            if (!cl_watch_ready($s, $now)) throw new ClassroomError(409, 'کلاس در انتظار تأیید سرویس ناظر است.');
+            return cl_ticket($cfg, $lesson, $actor, $body, $now);
+        }
+        if ($action === 'leave') {
+            if ($lesson) cl_leave_lesson($s, $lesson, $actor, $body, $now);
+            return [];
+        }
+        if ($action === 'close') {
+            if (!cl_is_staff($actor)) throw new ClassroomError(403, 'پایان کلاس فقط برای دبیر یا ناظر مجاز است.');
+            if (!$lesson || ($body['lesson'] ?? null) !== $lesson['id']) throw new ClassroomError(409, 'این زنگ دیگر باز نیست.');
+            cl_close_lesson($s, $cfg, $lesson, $now, $rpc);
+            return [];
+        }
+        if (!cl_watch_ready($s, $now)) throw new ClassroomError(409, 'کلاس در انتظار تأیید سرویس ناظر است.');
+        $lesson = cl_check_live($lesson, $actor, $body, $now);
+        if ($action === 'chat') {
+            cl_chat($s, $lesson, $actor, $body['text'] ?? null, $now);
+            return [];
+        }
+        if (!cl_is_staff($actor)) throw new ClassroomError(403, 'این عملیات فقط برای دبیر یا ناظر مجاز است.');
+        if (in_array($action, CL_MEDIA_ACTIONS, true)) {
+            $target = cl_media_target($action, $body['identity'] ?? null);
+            if ($target !== null && !isset($lesson['seen'][$target])) throw new ClassroomError(409, 'ورود شرکت‌کننده هنوز تأیید نشده است.');
+            cl_control_media($lesson['room'], $action, $target, static fn($method, $data) => $rpc($method, $lesson['room'], $data));
+        } elseif ($action === 'upload' && $isUpload) {
+            cl_upload($s, $lesson, $body, $_FILES['file'] ?? []);
+        } elseif (in_array($action, ['board-page','board-clear','board-ink'], true)) {
+            cl_board_action($s, $lesson, $body, $action);
+        } else {
+            throw new ClassroomError(400, 'عملیات شناخته نشد.');
+        }
+        return [];
+    });
+});

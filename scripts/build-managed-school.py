@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Assemble the managed classroom ZIP and the one-time pilot manager bundle."""
 import argparse
+from io import BytesIO
 import hashlib
 import json
 from pathlib import Path
 import re
+import tarfile
+from urllib.request import urlopen
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -13,8 +16,11 @@ HOST = ROOT / 'plugin-manager'
 SRC = ROOT / 'school-addon/upload/online-classroom'
 LEGACY = ARTIFACTS / 'school-classroom-pilot-v0.1.0.zip'
 LEGACY_SHA = 'bebc35a02f57346880373a034ee493b757a8017a12812a133ab957358d9de161'
-VERSION = '0.2.3'
-MANAGER_VERSION = '0.1.4'
+VERSION = '0.3.0'
+MANAGER_VERSION = '0.1.5'
+PDF_VERSION = '6.5.438'
+PDF_SHA = 'be0f0fc35c7e0052b2e00303be1b9697970e615f1debdf14a0400da0516173bf61a970e7650aa7397a31c371c6f74ed61ce8352583af2e13fbe7a6e875d171a4'
+PDF_URL = f'https://registry.npmjs.org/pdfjs-dist/-/pdfjs-dist-{PDF_VERSION}.tgz'
 
 
 def write_zip(path, entries):
@@ -25,25 +31,58 @@ def write_zip(path, entries):
             archive.writestr(item, data, compress_type=ZIP_DEFLATED, compresslevel=9)
 
 
-def plugin_entries():
+def pdf_entries(archive_path):
+    if archive_path:
+        raw = archive_path.read_bytes()
+    else:
+        with urlopen(PDF_URL, timeout=30) as response:
+            raw = response.read(11 * 1024 * 1024)
+    if hashlib.sha512(raw).hexdigest() != PDF_SHA:
+        raise ValueError('PDF.js upstream archive does not match the reviewed SHA-512')
+    with tarfile.open(fileobj=BytesIO(raw), mode='r:gz') as tar:
+        members = {m.name[8:]: m for m in tar.getmembers() if m.isfile() and m.name.startswith('package/')}
+        def read(name):
+            with tar.extractfile(members[name]) as f:
+                return f.read()
+        files = {f'assets/{n}': read(f'legacy/build/{n}') for n in ('pdf.min.mjs','pdf.worker.min.mjs')}
+        files['assets/pdf.LICENSE.txt'] = read('LICENSE')
+        selected = {n: read(n) for n in members if re.fullmatch(
+            r'(?:cmaps|standard_fonts|iccs|wasm)/(?:[A-Za-z0-9_.-]+\.(?:bcmap|ttf|pfb|icc)|(?:jbig2|openjpeg|qcms_bg)\.wasm|(?:jbig2|openjpeg)_nowasm_fallback\.js|LICENSE[A-Z0-9_]*)', n)}
+        data = BytesIO()
+        write_zip(data, selected)
+        files['assets/pdf-resources.zip'] = data.getvalue()
+        return files
+
+
+def plugin_entries(pdf_archive):
     files = {name: (SRC / name).read_bytes() for name in (
-        'index.php', 'core.php', 'api.php', 'deactivate.php', 'media.php', 'assets/classroom.js', 'assets/classroom.css',
+        'index.php', 'core.php', 'api.php', 'deactivate.php', 'media.php', 'school.php', 'store.php', 'lesson.php',
+        'activity.php', 'content.php', 'watch.php', 'reports.php', 'notifications.php', 'job.php',
+        'assets/classroom.js', 'assets/classroom.css', 'assets/board.js',
     )}
     if hashlib.sha256(LEGACY.read_bytes()).hexdigest() != LEGACY_SHA:
         raise ValueError('Original reviewed SDK archive is not the published v0.1.0 ZIP')
     with ZipFile(LEGACY) as archive:
         for name in ('assets/livekit-client.umd.js', 'assets/livekit-client.LICENSE.txt'):
             files[name] = archive.read(f'upload/online-classroom/{name}')
+    files.update(pdf_entries(pdf_archive))
     manifest = {
         'format': 1, 'id': 'school-classroom', 'version': VERSION, 'title': 'کلاس آنلاین',
         'menus': {role: 'کلاس آنلاین' for role in ('student', 'teacher', 'admin')},
-        'routes': {'page': 'index.php', 'api': 'api.php'},
+        'report_menus': {role: 'حضور و غیاب کلاس مجازی' for role in ('teacher', 'admin')},
+        'routes': {'page': 'index.php', 'api': 'api.php', 'content': 'content.php', 'watch': 'watch.php', 'job': 'job.php'},
+        'store': True, 'pdf_resources': 'assets/pdf-resources.zip',
+        'preserve_settings_from': ['0.2.0', '0.2.1', '0.2.2', '0.2.3'],
         'hooks': {'deactivate': 'deactivate.php'},
         'settings': [
-            {'key': 'class_id', 'type': 'class', 'label': 'کلاس آزمایشی'},
             {'key': 'signal_url', 'type': 'wss', 'label': 'آدرس رسانه (wss://)'},
             {'key': 'api_key', 'type': 'token', 'label': 'شناسهٔ رسانه (API Key)', 'min': 12, 'max': 64},
             {'key': 'api_secret', 'type': 'secret', 'label': 'کلید خصوصی رسانه (API Secret)', 'min': 32, 'max': 128},
+            {'key': 'max_participants', 'type': 'integer', 'min': 4, 'max': 60, 'default': 4, 'label': 'سقف اتصال هر اتاق (برای پایلوت: ۴)'},
+            {'key': 'notify_bale', 'type': 'switch', 'label': 'ارسال حضور به گفت‌وگوهای خصوصی ربات بله'},
+            {'key': 'notify_telegram', 'type': 'switch', 'label': 'ارسال حضور به گفت‌وگوهای خصوصی ربات تلگرام'},
+            {'key': 'notify_rubika', 'type': 'switch', 'label': 'ارسال حضور به گفت‌وگوهای خصوصی ربات روبیکا'},
+            {'key': 'rubika_token', 'type': 'bot-secret', 'label': 'توکن اختیاری ربات اختصاصی روبیکا'},
         ],
         'files': {name: hashlib.sha256(content).hexdigest() for name, content in files.items()},
     }
@@ -55,8 +94,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output-dir', type=Path, default=ARTIFACTS)
     parser.add_argument('--approve-reviewed-manifest', action='store_true', help='replace the trusted manifest pin after reviewing the payload')
+    parser.add_argument('--pdf-archive', type=Path, help='use a local copy of the same pinned PDF.js npm archive')
     opts = parser.parse_args()
-    entries = plugin_entries()
+    entries = plugin_entries(opts.pdf_archive)
     expected = hashlib.sha256(entries['plugin.json']).hexdigest()
     manager = HOST / 'plugins/school-plugins.php'
     code = manager.read_text(encoding='utf-8')

@@ -2,6 +2,8 @@ import base64
 import hashlib
 import hmac
 import sys
+import tempfile
+import time
 import json
 import unittest
 from pathlib import Path
@@ -45,6 +47,32 @@ class AdmissionTests(unittest.TestCase):
         self.assertFalse(admit({**self.headers(token), 'Authorization': 'Bearer ' + self.token({'canPublish':True})}, self.config, self.now))
         self.assertFalse(admit({'X-Forwarded-Uri': '/rtc?access_token='+token+'&access_token='+token}, self.config, self.now))
         self.assertFalse(listener_token('x' + token, self.config['api_key'], self.config['api_secret'], self.now))
+
+    def test_scheduled_admission_requires_fresh_local_policy_and_school_ticket(self):
+        room = 'test-' + 'a'*20 + '-v3-c22-' + 'b'*24
+        fields = {'iat': self.now, 'nbf': self.now-5, 'exp': self.now+35}
+        pupil = self.token({'room': room}, **fields)
+        teacher = self.token({'room': room}, **fields, sub='teacher-1')
+        with tempfile.TemporaryDirectory() as temp:
+            permits = Path(temp) / 'permit.json'
+            def check(token):
+                return admit(self.headers(token), self.config, self.now, permits)
+            def write(phase, ttl=8):
+                permits.write_text(json.dumps({'until': time.monotonic()+ttl, 'rooms': {room: phase}}))
+            self.assertFalse(check(pupil))
+            write('starting')
+            self.assertFalse(check(pupil))
+            self.assertTrue(check(teacher))
+            write('live')
+            self.assertTrue(check(pupil))
+            self.assertFalse(check(self.token({'room': room})))  # Old/refresh listener token.
+            self.assertFalse(check(self.token({'room': room, 'canPublish': True}, **fields)))
+            self.assertFalse(check(self.token({'room': room[:-1]+'c'}, **fields)))  # Other generation.
+            write('live', ttl=-1)
+            self.assertFalse(check(pupil))
+            permits.write_text('malformed')
+            self.assertFalse(check(pupil))
+            self.assertTrue(check(self.token()))  # Unchanged pilot admissions.
 
 
 if __name__ == '__main__':

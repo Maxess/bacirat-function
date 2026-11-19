@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 
-// School-side adapter. No schema changes, shared hosting and same-origin session.
+// Shared HTTP, session, locking and media primitives for the managed installation.
 final class ClassroomError extends RuntimeException
 {
     public int $status;
@@ -18,7 +18,7 @@ require_once __DIR__ . '/media.php';
 function cl_headers(): void
 {
     header('Cache-Control: no-store, private');
-    header('Referrer-Policy: no-referrer');
+    header('Referrer-Policy: same-origin');
     header('X-Content-Type-Options: nosniff');
     header('Permissions-Policy: microphone=(self), camera=(), display-capture=()');
 }
@@ -39,94 +39,92 @@ function cl_manager_context(): ?array
     return is_array($context) ? $context : null;
 }
 
-function cl_csrf(bool $create = false): ?string
+function cl_context(): array
 {
-    if ($context = cl_manager_context()) return $context['csrf'];
-    if ($create) $_SESSION['school_classroom_csrf'] ??= bin2hex(random_bytes(32));
-    return $_SESSION['school_classroom_csrf'] ?? null;
+    $context = cl_manager_context();
+    if (!$context || !isset($context['store'])) throw new ClassroomError(503, 'مدیر افزونه‌ها را به نسخهٔ سازگار به‌روزرسانی کن.');
+    return $context;
+}
+
+function cl_href(array $params = []): string
+{
+    return cl_context()['base'] . ($params ? '&' . http_build_query($params, '', '&', PHP_QUERY_RFC3986) : '');
 }
 
 function cl_asset(string $name): string
 {
-    $context = cl_manager_context();
-    return $context ? $context['base'] . '&route=asset&name=' . rawurlencode('assets/' . $name) : 'assets/' . $name;
-}
-
-function cl_api_href(): string
-{
-    $context = cl_manager_context();
-    return $context ? $context['base'] . '&route=api' : 'api.php';
+    return cl_href(['route'=>'asset', 'name'=>'assets/' . $name]);
 }
 
 function cl_site_href(string $page): string
 {
-    $context = cl_manager_context();
-    return ($context ? ($context['site_base'] ?? '') : '../') . $page;
+    return cl_context()['site_base'] . $page;
+}
+
+function cl_html(string $value): string
+{
+    return htmlspecialchars($value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
 }
 
 function cl_config(): array
 {
-    $context = cl_manager_context();
-    $cfg = $context ? $context['config'] : cl_legacy_config();
-    if (!is_array($cfg) || ($cfg['enabled'] ?? null) !== true) {
-        throw new ClassroomError(503, 'پایلوت در تنظیمات این هاست فعال نیست.');
-    }
+    $cfg = cl_context()['config'];
     $cfg['site_origin'] = cl_origin((string)($cfg['site_origin'] ?? ''), 'https');
     $cfg['signal_url'] = cl_origin((string)($cfg['signal_url'] ?? ''), 'wss');
     $cfg['api_url'] = 'https://' . substr($cfg['signal_url'], 6);
     if (!in_array(strtolower((string)($_SERVER['HTTPS'] ?? '')), ['on', '1'], true)
         || 'https://' . strtolower((string)($_SERVER['HTTP_HOST'] ?? '')) !== $cfg['site_origin']) {
-        throw new ClassroomError(403, 'این افزونه فقط روی دامنهٔ HTTPS آزمایشیِ تنظیم‌شده فعال است.');
+        throw new ClassroomError(403, 'این افزونه فقط روی دامنهٔ HTTPS سایت تست فعال است.');
     }
-    if (!is_int($cfg['class_id'] ?? null) || $cfg['class_id'] < 1
-        || (!$context && (!is_string($cfg['expected_test_database'] ?? null) || $cfg['expected_test_database'] === ''))
-        || !preg_match('/^[a-z0-9][a-z0-9-]{2,39}$/D', (string)($cfg['room_prefix'] ?? ''))
+    if (($cfg['enabled'] ?? null) !== true || !preg_match('/^test-[a-f0-9]{20}$/D', (string)($cfg['room_prefix'] ?? ''))
         || !preg_match('/^[A-Za-z0-9_-]{12,64}$/D', (string)($cfg['api_key'] ?? ''))
         || !preg_match('/^[A-Za-z0-9_-]{32,128}$/D', (string)($cfg['api_secret'] ?? ''))) {
-        throw new ClassroomError(503, 'شناسهٔ کلاس، نام پایگاه تست، پیشوند اتاق یا کلیدهای رسانه تنظیم نشده‌اند.');
+        throw new ClassroomError(503, 'شناسه و کلیدهای رسانه در تنظیمات کلاس معتبر نیستند.');
     }
+    $cfg['max_participants'] = max(4, min(60, (int)($cfg['max_participants'] ?? 4)));
     return $cfg;
 }
 
-function cl_legacy_config(): mixed
+function cl_require_post(): void
 {
-    $path = getenv('SCHOOL_CLASSROOM_CONFIG') ?: dirname(__DIR__, 2) . '/school-classroom.local.php';
-    if (!is_file($path) || !is_readable($path)) {
-        throw new ClassroomError(503, 'پایلوت هنوز روی این هاست تنظیم نشده است.');
+    if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
+        header('Allow: POST');
+        throw new ClassroomError(405, 'فقط درخواست POST مجاز است.');
     }
-    $real = realpath($path);
-    $public = !empty($_SERVER['DOCUMENT_ROOT']) ? realpath($_SERVER['DOCUMENT_ROOT']) : false;
-    if (!$real || ($public && str_starts_with($real, rtrim($public, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR))) {
-        throw new ClassroomError(503, 'فایل تنظیمات باید خارج از پوشهٔ عمومی سایت باشد.');
-    }
-    return require $real;
 }
 
-function cl_load_site(array $cfg): PDO
+function cl_json_body(int $limit): array
 {
-    if ($context = cl_manager_context()) return $context['pdo'];
-    $root = dirname(__DIR__);
-    $functions = $root . '/includes/functions.php';
-    $dbFile = $root . '/config/database.php';
-    if (!is_file($functions) || !is_file($dbFile)) {
-        throw new ClassroomError(503, 'پوشهٔ online-classroom را کنار پوشه‌های includes و config سایت تست قرار بده.');
+    if (strtolower(trim(explode(';', (string)($_SERVER['CONTENT_TYPE'] ?? ''))[0])) !== 'application/json') {
+        throw new ClassroomError(415, 'نوع درخواست پذیرفته نیست.');
     }
-    // Reuse only the original session setup. Open MySQL explicitly to avoid the site's SQLite fallback.
-    require_once $functions;
-    $db = require $dbFile;
-    if (!is_array($db) || ($db['driver'] ?? 'mysql') !== 'mysql'
-        || ($db['database'] ?? null) !== $cfg['expected_test_database']) {
-        throw new ClassroomError(503, 'نام پایگاه واقعی سایت با نام پایگاه تست در تنظیم پایلوت یکسان نیست.');
+    $raw = file_get_contents('php://input', false, null, 0, $limit + 1);
+    if ($raw === false || strlen($raw) > $limit) throw new ClassroomError(413, 'درخواست بیش از اندازه بزرگ است.');
+    return [$raw, json_decode($raw, true, 24)];
+}
+
+function cl_json_reply(callable $work): void
+{
+    cl_headers();
+    header('Content-Type: application/json; charset=UTF-8');
+    try {
+        echo json_encode(['ok'=>true] + $work(), JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
+    } catch (ClassroomError $error) {
+        http_response_code($error->status);
+        echo json_encode(['ok'=>false,'message'=>$error->getMessage()], JSON_UNESCAPED_UNICODE);
+    } catch (Throwable $error) {
+        http_response_code(503);
+        error_log('School classroom: endpoint failed (' . get_class($error) . ')');
+        echo json_encode(['ok'=>false,'message'=>'ارتباط امن با سرویس کلاس موقتاً برقرار نیست.'], JSON_UNESCAPED_UNICODE);
+    } finally {
+        if (session_status() === PHP_SESSION_ACTIVE) session_write_close();
     }
-    $host = $db['host'] ?? '127.0.0.1';
-    $port = $db['port'] ?? 3306;
-    $name = $db['database'];
-    $charset = $db['charset'] ?? 'utf8mb4';
-    return new PDO("mysql:host={$host};port={$port};dbname={$name};charset={$charset}",
-        $db['username'] ?? '', $db['password'] ?? '', [
-            PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-            PDO::ATTR_EMULATE_PREPARES => false,
-        ]);
+}
+
+function cl_id(mixed $value): int
+{
+    if (!is_int($value) && !is_string($value)) return 0;
+    return filter_var($value, FILTER_VALIDATE_INT, ['options'=>['min_range'=>1, 'max_range'=>2147483647]]) ?: 0;
 }
 
 function cl_year(?string $text): string
@@ -143,12 +141,6 @@ function cl_year(?string $text): string
     return $m[1] . '/' . $m[2];
 }
 
-function cl_same_class(array $class, ?string $name, ?string $year): bool
-{
-    // Fail closed on missing or ambiguous identifiers; never match a student by display name.
-    return trim((string)$name) === trim($class['name']) && cl_year($year) === $class['year'];
-}
-
 function cl_query(PDO $pdo, string $sql, array $params): PDOStatement
 {
     $stmt = $pdo->prepare($sql);
@@ -156,29 +148,12 @@ function cl_query(PDO $pdo, string $sql, array $params): PDOStatement
     return $stmt;
 }
 
-function cl_class(PDO $pdo, array $cfg): array
-{
-    $class = cl_query($pdo, 'SELECT id, name, academic_year FROM classes WHERE id = ?', [$cfg['class_id']])->fetch(PDO::FETCH_ASSOC);
-    if (!$class || trim((string)$class['name']) === '' || ($year = cl_year($class['academic_year'])) === '') {
-        throw new ClassroomError(503, 'کلاس آزمایشی یا سال تحصیلیِ آن در جدول classes معتبر نیست.');
-    }
-    $duplicates = cl_query($pdo, 'SELECT academic_year FROM classes WHERE TRIM(name) = TRIM(?) AND id <> ?', [$class['name'], $cfg['class_id']]);
-    while ($row = $duplicates->fetch(PDO::FETCH_ASSOC)) {
-        if (cl_year($row['academic_year']) === $year) {
-            throw new ClassroomError(503, 'در آن سال دو کلاس همنام وجود دارد؛ تطبیق عضویت امن نیست.');
-        }
-    }
-    $class['year'] = $year;
-    $class['room'] = $cfg['room_prefix'] . '-c' . $cfg['class_id'] . '-' . str_replace('/', '-', $year);
-    return $class;
-}
-
 function cl_session_identity(array $session): array
 {
     $found = [];
     foreach (['student', 'teacher', 'admin'] as $role) {
-        $id = filter_var($session[$role . '_id'] ?? null, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]]);
-        if ($id !== false) {
+        $id = cl_id($session[$role . '_id'] ?? null);
+        if ($id) {
             $found[$role] = $id;
         }
     }
@@ -188,40 +163,6 @@ function cl_session_identity(array $session): array
     }
     $role = array_key_first($found);
     return [$role, $found[$role]];
-}
-
-function cl_actor(PDO $pdo, array $session, array $class): array
-{
-    [$role, $id] = cl_session_identity($session);
-    if ($role === 'student') {
-        $row = cl_query($pdo, 'SELECT first_name, last_name, class_name, academic_year, status FROM students WHERE id = ?', [$id])->fetch(PDO::FETCH_ASSOC);
-        $allowed = $row && $row['status'] === 'active' && cl_same_class($class, $row['class_name'], $row['academic_year']);
-        $name = ($row['first_name'] ?? '') . ' ' . ($row['last_name'] ?? '');
-    } elseif ($role === 'teacher') {
-        $row = cl_query($pdo, 'SELECT full_name, status FROM teachers WHERE id = ?', [$id])->fetch(PDO::FETCH_ASSOC);
-        $allowed = false;
-        if ($row && (int)$row['status'] === 1) {
-            $schedule = cl_query($pdo, 'SELECT class_name, academic_year FROM class_schedules WHERE teacher_id = ?', [$id]);
-            while ($entry = $schedule->fetch(PDO::FETCH_ASSOC)) {
-                if (cl_same_class($class, $entry['class_name'], $entry['academic_year'])) {
-                    $allowed = true;
-                    break;
-                }
-            }
-        }
-        $name = (string)($row['full_name'] ?? '');
-    } else {
-        $row = cl_query($pdo, 'SELECT name, role, permissions, status FROM admins WHERE id = ?', [$id])->fetch(PDO::FETCH_ASSOC);
-        $permissions = json_decode((string)($row['permissions'] ?? ''), true);
-        $allowed = $row && (int)$row['status'] === 1 && ($row['role'] === 'super_admin'
-            || (is_array($permissions) && (in_array('all', $permissions, true) || in_array('manage_classes', $permissions, true))));
-        $name = (string)($row['name'] ?? '');
-    }
-    if (!$allowed) {
-        throw new ClassroomError(403, 'این حساب برای کلاس آزمایشی مجوز ندارد. کلاس و سال تحصیلی یا برنامهٔ دبیر را بررسی کن.');
-    }
-    preg_match('/^.{1,60}/us', trim($name), $matches);
-    return ['identity' => $role . '-' . $id, 'name' => $matches[0] ?? $role, 'role' => $role, 'moderator' => $role !== 'student'];
 }
 
 function cl_b64url(string $value): string
@@ -246,7 +187,7 @@ function cl_join_ticket(array $cfg, string $room, array $actor): string
     return cl_jwt($cfg, [
         'roomJoin' => true, 'room' => $room, 'canSubscribe' => true,
         'canPublish' => false, 'canPublishData' => false,
-    ], 120, $actor);
+    ], 35, $actor);
 }
 
 function cl_service_grant(string $method, string $room): array
@@ -289,6 +230,7 @@ function cl_rpc(array $cfg, string $room, string $method, array $payload): array
 
 function cl_room_lock(PDO $pdo, string $room, callable $work): mixed
 {
+    if ($pdo->getAttribute(PDO::ATTR_DRIVER_NAME) === 'sqlite') return $work(); // Local fixtures only.
     $key = 'classroom:' . substr(hash('sha256', $room), 0, 48);
     if ((int)cl_query($pdo, 'SELECT GET_LOCK(?, 2)', [$key])->fetchColumn() !== 1) {
         throw new ClassroomError(409, 'کلاس در حال تغییر است؛ لحظه‌ای بعد دوباره امتحان کن.');
@@ -300,50 +242,16 @@ function cl_room_lock(PDO $pdo, string $room, callable $work): mixed
     }
 }
 
-function cl_create_room(string $room, callable $rpc): void
+function cl_create_room(string $room, int $max, callable $rpc): void
 {
-    $rpc('CreateRoom', $room, ['name' => $room, 'maxParticipants' => 4, 'emptyTimeout' => 300, 'departureTimeout' => 20]);
+    $rpc('CreateRoom', $room, ['name'=>$room,'maxParticipants'=>$max,'emptyTimeout'=>60,'departureTimeout'=>20]);
 }
 
-function cl_room_exists(string $room, callable $rpc): bool
+function cl_delete_room(string $room, callable $rpc): void
 {
-    $rooms = $rpc('ListRooms', $room, ['names' => [$room]])['rooms'] ?? [];
-    return in_array($room, array_column($rooms, 'name'), true);
-}
-
-function cl_managed_action(array $cfg, array $context, string $action, ?string $target, callable $rpc): ?string
-{
-    // The caller holds the per-install MySQL lock or the manager's exclusive lifecycle lock.
-    $room = ($context['read_runtime'])();
-    $write = $context['write_runtime'];
-    $prefix = $cfg['room_prefix'];
-    if ($room !== null && !preg_match('/^' . preg_quote($prefix, '/') . '-[a-f0-9]{24}$/D', $room)) {
-        throw new ClassroomError(503, 'شناسهٔ اتاق این نصب معتبر نیست.');
+    try {
+        $rpc('DeleteRoom', $room, ['room'=>$room]);
+    } catch (ClassroomError $error) {
+        if ($error->status !== 409) throw $error; // Twirp not_found means already closed.
     }
-    if ($action === 'open') {
-        if ($room !== null && cl_room_exists($room, $rpc)) return $room;
-        // Never reopen a previous room name: previously issued listener tickets cannot enter a new lesson.
-        $room = $prefix . '-' . bin2hex(random_bytes(12));
-        $write($room); // Record ownership before the network operation (its reply might be lost).
-        cl_create_room($room, $rpc);
-        return $room;
-    }
-    if ($action === 'close') {
-        if ($room !== null) {
-            try {
-                $rpc('DeleteRoom', $room, ['room' => $room]);
-            } catch (ClassroomError $error) {
-                if ($error->status !== 409) throw $error; // RoomService's not_found: already closed.
-            }
-            $write(null);
-        }
-        return null;
-    }
-    if ($room === null || ($action === 'join' && !cl_room_exists($room, $rpc))) {
-        throw new ClassroomError(409, 'دبیر هنوز کلاس را شروع نکرده یا کلاس پایان یافته است.');
-    }
-    if (in_array($action, CL_MEDIA_ACTIONS, true)) {
-        cl_control_media($room, $action, $target, static fn($method, $data) => $rpc($method, $room, $data));
-    }
-    return $room;
 }

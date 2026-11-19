@@ -46,6 +46,8 @@ try {
       CREATE TABLE students(id INT PRIMARY KEY,first_name TEXT,last_name TEXT,class_name TEXT,academic_year TEXT,status TEXT);
       CREATE TABLE admins(id INT PRIMARY KEY,name TEXT,role TEXT,permissions TEXT,status INT);
       CREATE TABLE settings(key_name TEXT,key_value TEXT);
+      CREATE TABLE academic_years(id INT PRIMARY KEY, year_name VARCHAR(30), is_default INT,status INT);
+      INSERT INTO academic_years VALUES(1,'1404/1405',1,1);
       INSERT INTO classes VALUES(22,'۸ الف','1404/1405');
       INSERT INTO students VALUES(1,'آزمایشی','اول','۸ الف','1404/1405','active');
       INSERT INTO admins VALUES(1,'مدیر کل','super_admin','[]',1),(2,'مدیر','admin','[]',1);
@@ -59,6 +61,7 @@ try {
     $package = __DIR__ . '/../artifacts/school-classroom-plugin-v0.2.0.zip';
     $intermediate = __DIR__ . '/../artifacts/school-classroom-plugin-v0.2.2.zip';
     $upgrade = __DIR__ . '/../artifacts/school-classroom-plugin-v0.2.3.zip';
+    $scheduled = __DIR__ . '/../artifacts/school-classroom-plugin-v0.3.0.zip';
     mpm_link_menus($root, $dir);
     $menus = static fn() => [file_get_contents($root . '/other-settings.php'), file_get_contents($root . '/includes/header.php')];
     $managerMenus = $menus();
@@ -202,6 +205,27 @@ try {
     submit($db, $site, 'disable');
     expect(mpm_menu_items($db, $dir, 'student') === [] && mpm_table_exists($db, $table) && is_dir($path), 'disable only hides');
     submit($db, $site, 'enable');
+    submit($db, $site, 'disable');
+    $store = mpm_store_table($row);
+    $db->exec("CREATE TABLE `$store` (bucket VARCHAR(80),item VARCHAR(100),payload TEXT)");
+    denied(fn()=>mpm_install($db, $dir, $scheduled));
+    expect(mpm_row($db, $slug)['version'] === '0.2.3' && mpm_table_exists($db, $store), 'in-place upgrade will not claim an unrelated table');
+    $db->exec("DROP TABLE `$store`");
+    expect(mpm_install($db, $dir, $scheduled), 'reviewed scheduled upgrade');
+    $row = mpm_row($db, $slug);
+    expect($row['version'] === '0.3.0' && mpm_check_store($db, $row) === $store && mpm_settings($db, $dir, $row) === $previous, 'new data store, legacy API keys and owner preserved');
+    expect($db->query("SELECT settings FROM `$table`")->fetchColumn() === $stored, 'no decryption/re-entry or rewrite at upgrade');
+    submit($db, $site, 'enable');
+    expect(isset(mpm_menu_items($db, $dir, 'teacher', 'report_menus')[$slug]) && mpm_menu_items($db, $dir, 'student', 'report_menus') === [], 'report link only in staff menus');
+    // A real HTTP request exercises 0.3.0 dispatch separately from the already-loaded 0.2.3 PHP code in this fixture.
+    mpm_query($db, "INSERT INTO `$store` (bucket,item,payload) VALUES ('reports','sample','{}')", []);
+    submit($db, $site, 'disable');
+    expect($db->query("SELECT payload FROM `$store` WHERE bucket='reports'")->fetchColumn() === '{}', 'disable preserves attendance store');
+    submit($db, $site, 'enable');
+    mpm_query($db, "UPDATE `$store` SET payload='unowned' WHERE bucket='!owner'");
+    denied(fn()=>submit($db, $site, 'remove', ['confirm_delete'=>'yes']));
+    expect(is_dir($path) && mpm_table_exists($db, $store), 'refuse to purge unowned attendance store');
+    mpm_query($db, "UPDATE `$store` SET payload=? WHERE bucket='!owner'", [$row['owner']]);
     // If a table at the expected name is no longer ours, block routes but do not touch it.
     mpm_query($db, "UPDATE `$table` SET owner='not-ours' WHERE id=1");
     denied(fn()=>submit($db, $site, 'remove', ['confirm_delete'=>'yes']));
@@ -210,7 +234,7 @@ try {
     file_put_contents($work . '/outside.txt', 'do not delete');
     if (function_exists('symlink')) @symlink($work . '/outside.txt', $path . '/outside-link');
     submit($db, $site, 'remove', ['confirm_delete'=>'yes']);
-    expect(!is_dir(dirname($path)) && !mpm_table_exists($db, $table) && !mpm_row($db, $slug), 'purged dedicated folder, data table, and registry row');
+    expect(!is_dir(dirname($path)) && !mpm_table_exists($db, $table) && !mpm_table_exists($db, $store) && !mpm_row($db, $slug), 'purged dedicated folder, data table, and registry row');
     expect(file_get_contents($dir . '/plugins/other-plugin/keep.txt') === 'independent', 'uninstall preserves the neighboring plugin folder');
     expect($menus() === $managerMenus && file_get_contents($root . '/student-panel.php') === 'unchanged-panel' && $normal() === $before, 'uninstall does not modify any host menu files, panels, or school records');
     expect(file_get_contents($work . '/outside.txt') === 'do not delete', 'unlink without following symlink');
@@ -226,7 +250,7 @@ try {
         $db->exec("DELETE FROM `$table` WHERE id=1"); // Crash after DDL, before initial row insertion.
         submit($db, $site, 'remove', ['confirm_delete'=>'yes']);
         expect(!mpm_table_exists($db, $table) && !mpm_row($db, $slug) && !file_exists(mpm_path($dir, $attempt)), 'aborted install recoverable despite partially applied DDL');
-        foreach (['classes', 'students', 'admins', 'settings', MPM_REGISTRY, MPM_SITE] as $fixtureTable) $db->exec("DROP TABLE `$fixtureTable`");
+        foreach (['classes', 'students', 'admins', 'settings', 'academic_years', MPM_REGISTRY, MPM_SITE] as $fixtureTable) $db->exec("DROP TABLE `$fixtureTable`");
     }
     echo strtoupper($db->getAttribute(PDO::ATTR_DRIVER_NAME)) . " PASS nested gateway, protected per-plugin directories, old layout migration, reviewed ZIP only, state-preserving upgrade, real dispatch and scoped purge\n";
 } finally {

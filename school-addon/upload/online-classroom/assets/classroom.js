@@ -1,42 +1,89 @@
 (() => {
     'use strict';
     const el = (id) => document.getElementById(id);
+    class PublicError extends Error {
+        constructor(message, status) { super(message); this.status = status; }
+    }
+    async function request(root, action, data = {}, {multipart = false, keepalive = false} = {}) {
+        const ctl = new AbortController();
+        const timer = setTimeout(() => ctl.abort(), multipart ? 90000 : 7000);
+        try {
+            const headers = {'X-Classroom-CSRF': root.dataset.csrf};
+            let body;
+            if (multipart) body = data;
+            else { headers['Content-Type'] = 'application/json'; body = JSON.stringify({action, ...data}); }
+            const res = await fetch(root.dataset.api, {method:'POST', credentials:'same-origin', cache:'no-store', headers, body, signal:ctl.signal, keepalive});
+            const reply = await res.json().catch(() => ({}));
+            if (!res.ok || reply.ok !== true) throw new PublicError(reply.message || 'درخواست کلاس کامل نشد.', res.status);
+            return reply;
+        } finally {
+            clearTimeout(timer);
+        }
+    }
+
+    const pair = el('rubika');
+    if (pair) {
+        async function link(action) {
+            el('rubika-pair').disabled = el('rubika-unlink').disabled = true;
+            try {
+                const result = await request(pair, action);
+                el('rubika-code').textContent = result.command || '';
+                el('rubika-note').textContent = result.command ? 'این دستور را حداکثر تا ۱۰ دقیقه در گفت‌وگوی خصوصی با ربات بفرستید.' : 'اتصال روبیکا حذف شد.';
+            } catch (err) {
+                el('rubika-note').textContent = err instanceof PublicError ? err.message : 'اتصال با سایت برقرار نشد.';
+            } finally {
+                el('rubika-pair').disabled = el('rubika-unlink').disabled = false;
+            }
+        }
+        el('rubika-pair').addEventListener('click', () => link('rubika-pair'));
+        el('rubika-unlink').addEventListener('click', () => { if (window.confirm('دریافت اعلان روبیکا قطع شود؟')) link('rubika-unlink'); });
+    }
     const root = el('classroom');
     if (!root) return;
     const lk = window.LivekitClient;
-    const moderator = root.dataset.moderator === 'yes';
-    const enter = el(moderator ? 'open' : 'join');
-    let room = null;
-    let busy = false;
+    const staff = root.dataset.moderator === 'yes';
+    const roomClass = Number(root.dataset.class);
+    const api = (action, data = {}, options) => request(root, action, {class: roomClass, ...data}, options);
+    const student = (id) => /^student-[1-9]\d{0,17}$/.test(id);
+    let active = null, connecting = false, busy = false, polling = false, needsRefresh = false, permanent = false, stopped = false;
+    let wanted = !staff, state = {phase:'idle', watch:null}, chatCursor = 0, seconds = {}, admitted = false;
+    let pollTimer, flow = 0, retryAt = 0, attempts = 0;
+    let peopleKey = '', peopleTimers = new Map();
 
-    function message(value) { el('status').textContent = value; }
-    function authenticatedRoomConnected() { return room?.state === lk.ConnectionState.Connected; }
-    function microphoneFeedback(value = '') {
-        const feedback = el('mic-feedback');
-        feedback.textContent = value;
-        feedback.hidden = value === '';
+    function note(text = '') {
+        el('notice').textContent = text;
+        el('notice').hidden = !text;
+    }
+    function micNote(text = '') {
+        el('mic-feedback').textContent = text;
+        el('mic-feedback').hidden = !text;
+    }
+    function connected() { return active?.room.state === lk?.ConnectionState.Connected; }
+    function hasAccess() { return !!active && connected() && admitted; }
+    function scope(link = active) {
+        return link ? {lesson:link.lesson, epoch:link.epoch, sid:link.room.localParticipant.sid || ''} : {};
     }
     function maySpeak(person) {
-        const permissions = person?.permissions;
-        const sources = permissions?.canPublishSources;
-        // The SDK's protobuf TrackSource.MICROPHONE is 2. An empty list is unrestricted.
-        return permissions?.canPublish === true && Array.isArray(sources) && (sources.length === 0 || sources.includes(2));
+        const p = person?.permissions;
+        const sources = p?.canPublishSources;
+        // Backend grants a single explicit source; never assume that a missing constraint means permission.
+        return p?.canPublish === true && Array.isArray(sources) && sources.includes(2);
     }
-
-    // Only show fixed diagnostic codes. SDK error messages may contain signaling details.
+    function duration(value) {
+        const n = Math.max(0, Number(value) || 0);
+        return [Math.floor(n / 3600), Math.floor(n % 3600 / 60), n % 60].map(v => String(v).padStart(2,'0')).join(':');
+    }
     function microphoneFailure(local, enabling, error) {
-        const name = error?.name;
-        if (error && error === local.lastMicrophoneError) {
-            if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
-                return 'مرورگر اجازهٔ استفاده از میکروفون را نداد. (MIC-ACCESS)';
-            }
-            return 'مرورگر نتوانست میکروفون دستگاه را راه‌اندازی کند. (MIC-CAPTURE)';
+        const capture = enabling ? local?.lastMicrophoneError : null;
+        const name = error?.name || capture?.name;
+        if (['NotAllowedError','PermissionDeniedError','SecurityError'].includes(name) || capture?.name === 'NotAllowedError') {
+            return 'مرورگر اجازهٔ استفاده از میکروفون را نداده است. (MIC-ACCESS)';
         }
-        if (name === 'NegotiationError' || name === 'OperationError') {
-            return 'مرورگر و سرور نتوانستند مسیر ارسال صدا را برقرار کنند. (MIC-RTC)';
+        if (enabling && (capture || ['NotFoundError','DevicesNotFoundError','NotReadableError','TrackStartError','OverconstrainedError'].includes(name))) {
+            return 'مرورگر نتوانست میکروفون را راه‌اندازی کند. (MIC-CAPTURE)';
         }
-        if (!authenticatedRoomConnected() || name === 'ConnectionError' || name === 'SignalReconnectError' ||
-            (name === 'PublishTrackError' && error.status === 408)) {
+        if (enabling && ['OperationError','NegotiationError'].includes(name)) return 'مسیر ارسال صدا برقرار نشد. (MIC-RTC)';
+        if (!connected() || ['ConnectionError','SignalReconnectError'].includes(name) || (name === 'PublishTrackError' && error.status === 408)) {
             return 'درخواست میکروفون به‌دلیل اختلال اتصال کامل نشد. (MIC-CONNECTION)';
         }
         if (enabling && (!maySpeak(local) || (name === 'PublishTrackError' && error.status === 403))) {
@@ -45,207 +92,346 @@
         return enabling ? 'میکروفون برای ارسال صدا فعال نشد. (MIC-PUBLISH)' : 'خاموش‌کردن میکروفون کامل نشد. (MIC-MUTE)';
     }
 
-    function participantControl(person, title, action, successMessage) {
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.disabled = busy;
-        button.textContent = title;
-        button.setAttribute('aria-label', `${title}: ${person.name || person.identity}`);
-        button.addEventListener('click', () => run(async () => {
-            await api(action, { identity: person.identity });
-            message(successMessage);
-        }));
-        return button;
-    }
+    const board = window.ClassroomBoard(root, {
+        canEdit: () => staff && hasAccess(),
+        async send(action, data, file) {
+            if (!hasAccess() || !staff) throw new PublicError('تخته در حالت انتظار قابل ویرایش نیست.');
+            if (file) {
+                const form = new FormData();
+                for (const [k,v] of Object.entries({class:roomClass, ...scope(), ...data})) form.set(k,String(v));
+                form.set('file', file);
+                await request(root, 'upload', form, {multipart:true});
+            } else await api(action, {...scope(), ...data});
+            refresh();
+        },
+        explain: e => e instanceof PublicError ? e.message : 'پردازش فایل یا ارتباط با تخته کامل نشد.',
+    });
 
-    function render() {
-        const connected = authenticatedRoomConnected();
-        const state = room?.state;
-        const reconnecting = state === lk.ConnectionState.Reconnecting || state === lk.ConnectionState.SignalReconnecting;
-        const local = room?.localParticipant;
-        enter.hidden = !!room;
-        enter.disabled = busy;
-        el('leave').hidden = !room;
-        el('people-panel').hidden = !connected;
-        const mic = el('microphone');
-        mic.hidden = !connected && !reconnecting;
-        mic.disabled = busy || !connected || !maySpeak(local);
-        mic.textContent = local?.isMicrophoneEnabled ? 'خاموش‌کردن میکروفون' : 'روشن‌کردن میکروفون';
-        el('enable-audio').hidden = !connected || room.canPlaybackAudio;
-        if (moderator) {
-            for (const id of ['close', 'clear-floor']) {
-                el(id).hidden = !connected;
-                el(id).disabled = busy;
-            }
-        }
-        const people = el('people');
-        people.replaceChildren();
-        if (!connected) return;
-        for (const person of [local, ...room.remoteParticipants.values()]) {
-            const li = document.createElement('li');
-            const title = person.name || person.identity;
-            const allowed = maySpeak(person);
-            li.textContent = title + (person === local ? ' (شما)' : '') + (allowed ? ' · نوبت صدا' : '');
-            const student = /^student-[1-9]\d{0,17}$/.test(person.identity);
-            if (moderator && (!allowed || student)) {
-                const controls = document.createElement('div');
-                controls.className = 'participant-controls';
-                if (!allowed) controls.append(participantControl(person, 'دادن نوبت صدا', 'give-mic', 'نوبت صدا داده شد. گوینده باید خودش میکروفون را روشن کند.'));
-                if (student) {
-                    controls.append(participantControl(person, 'قطع میکروفون', 'cut-mic', 'مجوز میکروفون این دانش‌آموز قطع شد.'));
-                    controls.append(participantControl(person, 'قطع تصویر', 'cut-video', 'مجوز تصویر این دانش‌آموز بسته شد.'));
-                }
-                li.append(controls);
-            }
-            people.append(li);
-        }
-    }
-
-    async function api(action, data = {}) {
-        const response = await fetch(root.dataset.api || 'api.php', {
-            method: 'POST', credentials: 'same-origin', cache: 'no-store',
-            headers: {'Content-Type': 'application/json', 'X-Classroom-CSRF': root.dataset.csrf},
-            body: JSON.stringify({action, ...data}),
-        });
-        const body = await response.json();
-        if (!response.ok || body.ok !== true) {
-            throw new PublicError(typeof body.message === 'string' ? body.message : 'درخواست به نتیجه نرسید.');
-        }
-        return body;
-    }
-
-    class PublicError extends Error {}
-    async function run(action) {
+    async function run(work) {
         if (busy) return;
         busy = true;
         render();
-        try {
-            await action();
-        } catch (error) {
-            message(error instanceof PublicError ? error.message : 'عملیات انجام نشد. اتصال، مجوز مرورگر یا وضعیت کلاس را بررسی کن.');
-        } finally {
-            busy = false;
-            render();
+        try { await work(); }
+        catch (err) { note(err instanceof PublicError ? err.message : 'عملیات کامل نشد؛ اتصال یا وضعیت کلاس را بررسی کن.'); }
+        finally { busy = false; render(); }
+    }
+
+    function personButton(person, label, action, success) {
+        const btn = document.createElement('button');
+        btn.type = 'button'; btn.className = 'secondary'; btn.textContent = label;
+        btn.setAttribute('aria-label', `${label}: ${person.name || person.identity}`);
+        btn.addEventListener('click', () => run(async () => {
+            if (!hasAccess()) return;
+            await api(action, {...scope(), identity:person.identity});
+            note(success);
+        }));
+        return btn;
+    }
+    function renderPeople() {
+        const field = el('people');
+        if (!hasAccess()) {
+            if (peopleKey) field.replaceChildren();
+            peopleKey = ''; peopleTimers.clear();
+            return;
         }
-    }
-
-    function disconnected(active, reason = 'از کلاس خارج شدی. برای برگشت، دوباره وارد شو.') {
-        if (room !== active) return;
-        room = null;
-        el('audio-tracks').replaceChildren();
-        message(reason);
-        render();
-    }
-
-    if (!lk) {
-        enter.disabled = true;
-        message('بستهٔ رابط رسانه بارگذاری نشد. نسخهٔ ZIP کامل را روی هاست آزمایشی بگذار.');
-        return;
-    }
-
-    enter.addEventListener('click', () => run(async () => {
-        if (room) return;
-        if (!window.isSecureContext) throw new PublicError('برای کلاس به HTTPS معتبر نیاز است.');
-        microphoneFeedback();
-        const active = new lk.Room({
-            // Use separate send/receive peer connections for the audio-only pilot. The
-            // SDK's single-PC path can fail renegotiation on the first mic publication.
-            singlePeerConnection: false,
-            audioCaptureDefaults: {channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true},
-            publishDefaults: {audioPreset: {maxBitrate: 24000}, dtx: true, red: false, forceStereo: false},
-        });
-        room = active;
-        render();
-        message('در حال ورود…');
-        // Try within the click gesture; keep an explicit playback button if blocked.
-        active.startAudio().catch(() => {});
-        for (const event of [lk.RoomEvent.ParticipantConnected, lk.RoomEvent.ParticipantDisconnected, lk.RoomEvent.TrackMuted,
-            lk.RoomEvent.TrackUnmuted, lk.RoomEvent.LocalTrackPublished, lk.RoomEvent.LocalTrackUnpublished,
-            lk.RoomEvent.AudioPlaybackStatusChanged, lk.RoomEvent.ConnectionStateChanged]) {
-            active.on(event, render);
-        }
-        active.on(lk.RoomEvent.TrackSubscribed, (track) => {
-            if (active === room && track.kind === lk.Track.Kind.Audio) el('audio-tracks').append(track.attach());
-        });
-        active.on(lk.RoomEvent.TrackUnsubscribed, (track) => track.detach().forEach((node) => node.remove()));
-        active.on(lk.RoomEvent.ParticipantPermissionsChanged, (before, person) => {
-            if (active !== room) return;
-            if (person === active.localParticipant) {
+        const local = active.room.localParticipant;
+        const people = [local, ...active.room.remoteParticipants.values()];
+        const key = JSON.stringify(people.map(p => [p.identity,p.name,maySpeak(p)]));
+        if (key !== peopleKey) {
+            peopleKey = key; peopleTimers.clear();
+            field.replaceChildren(...people.map(person => {
+                const li = document.createElement('li');
+                const line = document.createElement('div'); line.className = 'person-line';
+                const name = document.createElement('span');
                 const allowed = maySpeak(person);
-                if (!allowed) person.setMicrophoneEnabled(false).catch(() => {});
-                if (!moderator && before && authenticatedRoomConnected() && maySpeak({ permissions: before }) !== allowed) {
-                    message(allowed ? 'اجازهٔ میکروفون داری. برای صحبت، خودت آن را روشن کن.'
-                        : 'نوبت میکروفون گرفته شد. هنوز می‌توانی صدای کلاس را بشنوی.');
+                name.textContent = (person.name || person.identity) + (local === person ? ' (شما)' : '') + (allowed ? ' · نوبت صدا' : '');
+                line.append(name);
+                if (student(person.identity)) {
+                    const timer = document.createElement('bdi'); timer.className = 'duration';
+                    timer.setAttribute('aria-label','مدت حضور ثبت‌شده');
+                    peopleTimers.set(person.identity, timer); line.append(timer);
+                }
+                li.append(line);
+                if (staff && (!allowed || student(person.identity))) {
+                    const box = document.createElement('div'); box.className = 'participant-controls';
+                    if (!allowed) box.append(personButton(person,'دادن نوبت صدا','give-mic','نوبت داده شد؛ گوینده میکروفون را خودش روشن می‌کند.'));
+                    if (student(person.identity)) {
+                        box.append(personButton(person,'قطع میکروفون','cut-mic','میکروفون این دانش‌آموز قطع شد.'));
+                        box.append(personButton(person,'قطع تصویر','cut-video','مجوز تصویر این دانش‌آموز بسته شد.'));
+                    }
+                    li.append(box);
+                }
+                return li;
+            }));
+        }
+        for (const [id, node] of peopleTimers) node.textContent = duration(seconds[id] || 0);
+        for (const btn of field.querySelectorAll('button')) btn.disabled = busy;
+    }
+
+    function render() {
+        const live = hasAccess();
+        const phase = state.phase;
+        const connectingNow = connecting || (!!active && !live);
+        el('live-panel').hidden = !live;
+        el('waiting').hidden = live;
+        el('status').textContent = live ? 'کلاس در جریان است' : 'اتاق انتظار';
+        el('lecture-title').textContent = state.subject ? `${state.subject} · ${state.period}` : el('lecture-title').dataset.original;
+        el('leave').hidden = staff ? (!wanted && !active) : !wanted;
+        if (staff) {
+            const slot = el('slot');
+            const currentSlot = state.slot || 0;
+            if (currentSlot && Array.from(slot.options).some(o => Number(o.value) === currentSlot)) slot.value = String(currentSlot);
+            slot.disabled = !!currentSlot || busy;
+            el('open').disabled = busy || !!active || connecting || !state.watch || permanent || phase === 'closing'
+                || phase === 'reserved' || (!currentSlot && !slot.value) || (phase === 'paused' && !state.resumable);
+            el('open').textContent = phase === 'paused' ? 'ادامهٔ زنگ' : currentSlot ? 'پیوستن به زنگ' : 'شروع زنگ';
+            el('close').hidden = !state.lesson || phase === 'reserved';
+            el('close').disabled = busy || phase === 'closing';
+            el('clear-floor').disabled = !live || busy;
+        } else el('join').hidden = wanted || permanent;
+        el('wait-title').textContent = phase === 'paused' ? 'کلاس موقتاً متوقف است' : phase === 'closing' ? 'کلاس در حال پایان است'
+            : connectingNow ? 'در حال تأیید ورود…' : staff ? 'در انتظار شروع زنگ' : 'در انتظار ورود دبیر';
+        el('wait-message').textContent = permanent ? 'برای دسترسی دوباره صفحه را از پنل مدرسه باز کنید.'
+            : phase === 'reserved' ? 'زنگ فعلی برای این حساب مجاز نیست. پس از پایان زنگ می‌توانی جلسهٔ خودت را شروع کنی.'
+            : state.watch === false ? 'ارتباط با ناظر رسانه هنوز برقرار نیست. تا تأیید اتصال، دسترسی کلاس بسته است.'
+            : phase === 'paused' ? 'تا بازگشت دبیر یا ناظر مجاز منتظر بمانید؛ شمارش حضور متوقف است.'
+            : staff ? 'زنگِ برنامهٔ امروز را انتخاب کن. کلاس فقط بعد از تأیید اتصال شروع می‌شود.'
+            : 'شما وارد اتاق انتظار شده‌اید. نیازی به اقدامی نیست؛ لطفاً تا ورود دبیر منتظر بمانید.';
+        const local = active?.room.localParticipant;
+        el('microphone').disabled = !live || busy || !maySpeak(local);
+        el('microphone').textContent = local?.isMicrophoneEnabled ? 'خاموش‌کردن میکروفون' : 'روشن‌کردن میکروفون';
+        el('enable-audio').hidden = !live || active.room.canPlaybackAudio;
+        el('chat-text').disabled = !live || busy;
+        for (const audio of el('audio-tracks').children) audio.muted = !live;
+        renderPeople();
+    }
+
+    function clearActivity() {
+        if (admitted || chatCursor || board.position().board) {
+            el('chat-log').replaceChildren();
+            el('chat-text').value = '';
+            board.reset();
+        }
+        admitted = false;
+        chatCursor = 0; seconds = {};
+    }
+    function release(link = active, warn = false) {
+        if (!link || active !== link) return;
+        const current = scope(link);
+        active = null;
+        clearActivity();
+        flow++;
+        el('audio-tracks').replaceChildren();
+        if (warn && current.sid) api('leave', current, {keepalive:true}).catch(() => {});
+        link.room.disconnect().catch(() => {});
+        render();
+    }
+    function pushChat(values) {
+        const log = el('chat-log');
+        const end = log.scrollHeight - log.clientHeight - log.scrollTop < 45;
+        for (const row of values || []) {
+            if (row.n <= chatCursor) continue;
+            const item = document.createElement('li');
+            const name = document.createElement('bdi'); name.className = 'chat-by'; name.textContent = row.by;
+            const text = document.createElement('span'); text.className = 'chat-text'; text.textContent = row.text;
+            item.append(name,text); log.append(item);
+            chatCursor = row.n;
+        }
+        while (log.children.length > 120) log.firstElementChild.remove();
+        if (end) log.scrollTop = log.scrollHeight;
+    }
+
+    function makeRoom() {
+        return new lk.Room({
+            singlePeerConnection:false, // Preserve the tested first-speaker fix; publishing does not renegotiate the receiving PC.
+            audioCaptureDefaults:{channelCount:1,echoCancellation:true,noiseSuppression:true,autoGainControl:true},
+            publishDefaults:{audioPreset:{maxBitrate:24000},dtx:true,red:false,forceStereo:false},
+        });
+    }
+    async function enter(getTicket, gesture = false) {
+        if (active || connecting || !wanted || stopped || permanent || !lk || !window.isSecureContext) return;
+        const pending = ++flow;
+        connecting = true;
+        const room = makeRoom();
+        if (gesture) room.startAudio().catch(() => {});
+        let link = null;
+        try {
+            const ticket = await getTicket();
+            if (pending !== flow || !wanted || stopped || permanent || ticket.preparing) { await room.disconnect(); return; }
+            link = {room, lesson:ticket.lesson, epoch:ticket.epoch};
+            active = link;
+            flow++; // Ignore status requests made before this transport was installed.
+            for (const event of [lk.RoomEvent.ParticipantConnected,lk.RoomEvent.ParticipantDisconnected,lk.RoomEvent.LocalTrackPublished,
+                lk.RoomEvent.LocalTrackUnpublished,lk.RoomEvent.AudioPlaybackStatusChanged,lk.RoomEvent.ConnectionStateChanged]) {
+                room.on(event, () => { if (active === link) render(); });
+            }
+            room.on(lk.RoomEvent.TrackSubscribed, (track) => {
+                if (active !== link || track.kind !== lk.Track.Kind.Audio) return;
+                const node = track.attach(); node.muted = !hasAccess(); el('audio-tracks').append(node);
+            });
+            room.on(lk.RoomEvent.TrackUnsubscribed, (track) => track.detach().forEach(node => node.remove()));
+            room.on(lk.RoomEvent.ParticipantPermissionsChanged, (before, person) => {
+                if (active !== link) return;
+                if (person === room.localParticipant && !maySpeak(person)) person.setMicrophoneEnabled(false).catch(() => {});
+                if (!staff && person === room.localParticipant && hasAccess() && before && maySpeak({permissions:before}) !== maySpeak(person)) {
+                    note(maySpeak(person) ? 'نوبت صدا داری؛ اگر آماده‌ای، خودت میکروفون را روشن کن.' : 'نوبت صدا گرفته شد؛ هنوز می‌توانی گوش بدهی.');
+                }
+                render();
+            });
+            const retrying = () => {
+                if (active !== link) return;
+                if (staff) release(link, true); // Stop the staff lease at the first signal-loss event, not just after ICE timeout.
+                else {
+                    const last = scope(link);
+                    clearActivity();
+                    if (last.sid) api('leave', last, {keepalive:true}).catch(() => {});
+                    render();
+                }
+                refresh();
+            };
+            room.on(lk.RoomEvent.SignalReconnecting, retrying);
+            room.on(lk.RoomEvent.Reconnecting, retrying);
+            room.on(lk.RoomEvent.Reconnected, refresh);
+            room.on(lk.RoomEvent.Disconnected, (reason) => {
+                if (active !== link) return;
+                const code = Number.isInteger(reason) ? lk.DisconnectReason?.[reason] : '';
+                if (code === 'DUPLICATE_IDENTITY') {
+                    wanted = false;
+                    note('این حساب در دستگاه یا صفحهٔ دیگری وارد شده است. (DUPLICATE_IDENTITY)');
+                } else if (!['ROOM_DELETED','CLIENT_INITIATED'].includes(code)) {
+                    note(`ارتباط رسانه قطع شد. هر زمان کلاس آماده باشد، دوباره وصل می‌شویم. (${code || 'ROOM-DISCONNECTED'})`);
+                }
+                retryAt = Date.now() + 1700;
+                release(link, true); refresh();
+            });
+            await room.connect(ticket.url, ticket.token);
+            attempts = 0; retryAt = 0;
+            if (active === link) { note(); micNote(); }
+        } catch (error) {
+            if (link && active === link) release(link);
+            else await room.disconnect().catch(() => {});
+            attempts++;
+            retryAt = Date.now() + Math.min(15000, 1600 * (2 ** Math.min(4, attempts - 1)));
+            if (error instanceof PublicError && error.status === 403) { if (gesture) wanted = false; }
+            if (gesture) throw error;
+            if (!(error instanceof PublicError && error.status === 409)) note(error instanceof PublicError ? error.message : 'ورود رسانه ممکن نشد؛ اتصال را بررسی کن. (ROOM-CONNECT)');
+        } finally {
+            connecting = false;
+            render(); refresh();
+        }
+    }
+
+    async function poll() {
+        if (polling || stopped || permanent) return;
+        polling = true; needsRefresh = false;
+        const captured = flow;
+        const local = connected() ? scope() : {};
+        try {
+            const result = await api('status', {...local, chat:chatCursor, ...board.position()});
+            if (captured !== flow || stopped) return;
+            const prior = state;
+            state = result;
+            if (active && (active.epoch !== state.epoch || active.lesson !== state.lesson || !result.watch
+                || !['live', ...(staff ? ['starting'] : [])].includes(state.phase))) release(active);
+            if (staff && prior.lesson && state.phase === 'idle') wanted = false; // Closing a lesson never starts the next one.
+            if (active && local.sid && scope().sid === local.sid && connected() && result.admitted === true) {
+                admitted = true; seconds = result.seconds || {};
+                render(); pushChat(result.chat);
+                board.sync(result.board, scope());
+                needsRefresh ||= !!(result.chatMore || result.board?.more);
+            } else clearActivity();
+            if (!active && !connecting && wanted && state.watch && Date.now() >= retryAt) {
+                if (state.joinable) {
+                    const info = {lesson:state.lesson,epoch:state.epoch};
+                    enter(() => api('ticket',info));
+                } else if (staff && state.resumable && state.slot) {
+                    const slot = state.slot;
+                    enter(() => api('open',{slot}));
                 }
             }
-            render();
-        });
-        const retrying = () => {
-            if (active === room) message('در حال اتصال دوباره… اگر قطع شد، دوباره وارد شو.');
-        };
-        active.on(lk.RoomEvent.SignalReconnecting, retrying);
-        active.on(lk.RoomEvent.Reconnecting, retrying);
-        active.on(lk.RoomEvent.Reconnected, () => {
-            if (active === room) { message('اتصال دوباره برقرار شد.'); render(); }
-        });
-        active.on(lk.RoomEvent.Disconnected, (reason) => {
-            const label = Number.isInteger(reason) ? lk.DisconnectReason?.[reason] : undefined;
-            if (label === 'CLIENT_INITIATED') disconnected(active);
-            else disconnected(active, `ارتباط با کلاس قطع شد. برای برگشت، دوباره وارد شو. (${label || 'ROOM-DISCONNECTED'})`);
-        });
-        try {
-            const ticket = await api(moderator ? 'open' : 'join');
-            await active.connect(ticket.url, ticket.token);
-            message(moderator ? 'وارد شدی. از فهرست حاضران نوبت صدا بده یا مجوز هر دانش‌آموز را قطع کن.' : 'وارد شدی. اجازهٔ میکروفون را دبیر می‌دهد.');
         } catch (error) {
-            await active.disconnect();
-            disconnected(active);
-            throw error;
+            if (captured !== flow || stopped) return;
+            release(active, true);
+            clearActivity();
+            state = {...state, watch:false, phase:state.lesson ? 'paused' : 'idle', resumable:false};
+            permanent = error instanceof PublicError && [401,403,404].includes(error.status);
+            if (permanent) wanted = false;
+            note(error instanceof PublicError ? error.message : 'ارتباط با سایت قطع است؛ تا بازگشت اتصال، کلاس در انتظار می‌ماند.');
+        } finally {
+            polling = false; render();
+            if (!stopped && !permanent) pollTimer = setTimeout(poll, needsRefresh ? 50 : (active || connecting ? 1900 : 3400) + Math.random()*270);
         }
-    }));
+    }
+    function refresh() {
+        if (stopped || permanent) return;
+        if (polling) { needsRefresh = true; return; }
+        clearTimeout(pollTimer);
+        pollTimer = setTimeout(poll, 30);
+    }
 
     el('microphone').addEventListener('click', () => run(async () => {
-        const active = room;
-        const local = active?.localParticipant;
-        if (!authenticatedRoomConnected() || !maySpeak(local)) return;
-        microphoneFeedback();
+        const link = active;
+        const local = link?.room.localParticipant;
+        if (!hasAccess() || !maySpeak(local)) return;
+        micNote();
         const enabling = !local.isMicrophoneEnabled;
         try {
             await local.setMicrophoneEnabled(enabling);
-            if (local.isMicrophoneEnabled !== enabling) microphoneFeedback(microphoneFailure(local, enabling));
-            else if (active === room && authenticatedRoomConnected() && maySpeak(local)) {
-                message(enabling ? 'میکروفون برای ارسال صدا روشن است.' : 'میکروفون خاموش است.');
-            }
-        } catch (error) {
-            microphoneFeedback(microphoneFailure(local, enabling, error));
-        }
+            if (link !== active || !hasAccess()) { await local.setMicrophoneEnabled(false).catch(() => {}); return; }
+            if (local.isMicrophoneEnabled !== enabling) micNote(microphoneFailure(local,enabling));
+        } catch (error) { micNote(microphoneFailure(local,enabling,error)); }
     }));
     el('enable-audio').addEventListener('click', () => run(async () => {
-        try { await room?.startAudio(); } catch (_) {
-            throw new PublicError('پخش صدا در دستگاه شنونده فعال نشد. (AUDIO-PLAYBACK)');
-        }
+        if (!hasAccess()) return;
+        try { await active.room.startAudio(); }
+        catch (_) { throw new PublicError('پخش صدا روی دستگاه شنونده فعال نشد. (AUDIO-PLAYBACK)'); }
     }));
-    el('leave').addEventListener('click', () => run(async () => {
-        const active = room;
-        if (active) {
-            await active.disconnect();
-            disconnected(active);
-        }
-    }));
-    if (moderator) {
+    el('chat-form').addEventListener('submit', event => {
+        event.preventDefault();
+        run(async () => {
+            if (!hasAccess()) return;
+            const field = el('chat-text');
+            await api('chat', {...scope(), text:field.value}); field.value = ''; refresh();
+        });
+    });
+    el('leave').addEventListener('click', () => {
+        wanted = false; flow++; release(active,true); clearActivity(); render(); refresh();
+    });
+    if (staff) {
+        el('slot').addEventListener('change', render);
+        el('open').addEventListener('click', () => run(async () => {
+            if (state.phase === 'closing' || !state.watch || permanent) return;
+            const slot = state.slot || Number(el('slot').value);
+            if (!slot) return;
+            wanted = true;
+            retryAt = 0;
+            await enter(() => api('open',{slot}), true);
+        }));
         el('clear-floor').addEventListener('click', () => run(async () => {
-            await api('cut-all-mics');
-            message('نوبت میکروفون از همه گرفته شد.');
+            if (!hasAccess()) return;
+            await api('cut-all-mics',scope()); note('نوبت صدا از همه گرفته شد.');
         }));
         el('close').addEventListener('click', () => {
-            if (window.confirm('کلاس برای همه بسته شود؟')) run(async () => {
-                await api('close');
-                const active = room;
-                if (active) await active.disconnect();
-                disconnected(active, 'کلاس پایان یافت.');
+            if (!state.lesson || !window.confirm('کلاس برای همه پایان یابد و گزارش حضور ثبت شود؟')) return;
+            run(async () => {
+                wanted = false; flow++;
+                const lesson = state.lesson, slot = state.slot;
+                const response = api('close',{lesson});
+                release(active,true);
+                await response;
+                for (const option of Array.from(el('slot').options)) if (Number(option.value) === slot) option.remove();
+                state = {phase:'idle', watch:state.watch};
+                note('زنگ پایان یافت؛ گزارش حضور در پنل ثبت شد.'); refresh();
             });
         });
+    } else el('join').addEventListener('click', () => { wanted = true; retryAt = 0; note(); render(); refresh(); });
+    window.addEventListener('pagehide', () => { stopped = true; clearTimeout(pollTimer); release(active,true); });
+    window.addEventListener('pageshow', event => { if (event.persisted) { stopped = false; refresh(); } });
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
+    el('lecture-title').dataset.original = el('lecture-title').textContent;
+    if (!lk || !window.isSecureContext) {
+        permanent = true;
+        note('برای ورود به رسانه به مرورگر سازگار، بستهٔ کامل کلاس و HTTPS معتبر نیاز است.');
     }
-    window.addEventListener('pagehide', () => room?.disconnect());
-    render();
+    render(); refresh();
 })();
