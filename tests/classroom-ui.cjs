@@ -20,9 +20,10 @@ class Element {
 }
 function fixture(staff, autoSlot = 0) {
     const elements = Object.fromEntries(['classroom','status','status-dot','notice','mic-feedback','people','live-panel','waiting','wait-title','wait-message',
-        'audio-tracks','chat-log','chat-form','chat-text','leave','microphone','enable-audio','microphone-label','people-count',
-        'toggle-people','toggle-chat','people-panel','chat-panel','chat-empty',
-        ...(staff ? ['slot','open','close','clear-floor','staff-start'] : ['join','attendance','attendance-time'])].map(id => [id,new Element(id)]));
+        'audio-tracks','chat-log','chat-form','chat-text','leave','microphone','enable-audio','people-count',
+        'toggle-people','toggle-chat','people-panel','chat-panel','chat-empty','lesson-start','lesson-start-time','speaker-strip','speakers',
+        ...(staff ? ['slot','open','close','clear-floor','staff-start'] : ['join','waiting-attendance','waiting-attendance-time'])].map(id => [id,new Element(id)]));
+    elements['speaker-strip'].hidden = true;
     const date='2026-11-18';
     const choice = (id, label) => ({id, label});
     elements.classroom.dataset = { moderator:staff?'yes':'no',api:'/fixture',csrf:'session',class:'22',bellDate:date };
@@ -64,7 +65,7 @@ function fixture(staff, autoSlot = 0) {
             const input=JSON.parse(opt.body); assert.equal(input.class,22); requests.push(input);
             let reply={ok:true}, status=200;
             if(input.action==='status'){
-                const phased = ['idle','reserved'].includes(srv.phase) ? {phase:srv.phase} : {phase:srv.phase,slot:srv.slot ?? 11, lesson:srv.lesson,epoch:srv.epoch,resumable:srv.resumable,subject:'ریاضی',period:'زنگ یک'};
+                const phased = ['idle','reserved'].includes(srv.phase) ? {phase:srv.phase} : {phase:srv.phase,slot:srv.slot ?? 11, lesson:srv.lesson,epoch:srv.epoch,resumable:srv.resumable,startTime:srv.startTime ?? null,subject:'ریاضی',period:'زنگ یک'};
                 reply={...reply,ready:srv.ready,...phased,joinable:srv.phase==='live'||(staff&&srv.phase==='starting'&&srv.staffCanJoin)};
                 if (staff && srv.phase==='idle') reply.schedule=srv.schedule;
                 if (!staff && srv.phase==='idle' && srv.practiceAvailable) reply.practiceAvailable=true;
@@ -95,7 +96,7 @@ function fixture(staff, autoSlot = 0) {
         for (let i=0;i<12 && requests.filter(r=>r.action==='status').length===before;i++) await time();
         assert.ok(requests.filter(r=>r.action==='status').length>before, 'status heartbeat is not starved');
     }
-    function controls(identity){return elements.people.children.find(row=>row.children[0].children[1].textContent.startsWith(identity)).querySelectorAll('button');}
+    function controls(identity){return elements.people.children.find(row=>row.children[0].children[1].children[0].textContent.startsWith(identity)).querySelectorAll('button');}
     return {elements,srv,requests,boards,time,status,change,controls,get room(){return lastRoom;}};
 }
 
@@ -107,7 +108,9 @@ test('student waits without media, auto enters and sees attendance only for pupi
     assert.equal(f.room.options.singlePeerConnection,false); assert.equal(f.elements['live-panel'].hidden,false);
     assert.deepEqual(f.elements.people.querySelectorAll('bdi').map(n=>n.textContent),['00:00','00:00']);
     assert.equal(f.elements.people.children[0].className,'person-self');
-    assert.deepEqual(f.elements.people.children[0].children[0].children.slice(1,3).map(n=>n.textContent), ['student-1','شما']);
+    const [,detail,self] = f.elements.people.children[0].children[0].children;
+    assert.deepEqual(detail.children.map(n=>n.textContent), ['student-1','00:00']);
+    assert.equal(self.textContent,'شما');
     assert.ok(f.elements.people.children.slice(1).every(n=>n.className!=='person-self'));
     assert.deepEqual(f.room.localParticipant.micCalls,[]); assert.equal(f.elements.microphone.disabled,true);
     f.change('student-1',mic); assert.deepEqual(f.room.localParticipant.micCalls,[]);
@@ -115,8 +118,8 @@ test('student waits without media, auto enters and sees attendance only for pupi
     const first=f.room; f.srv.phase='paused'; await f.status();
     assert.equal(f.elements['live-panel'].hidden,true); assert.equal(first.state,'disconnected'); assert.equal(f.elements.microphone.disabled,true);
     assert.ok(f.boards.includes('reset'));
-    assert.equal(f.elements['attendance-time'].textContent, '00:00');
-    assert.match(f.elements.attendance.title, /متوقف/);
+    assert.equal(f.elements['waiting-attendance-time'].textContent, '00:00');
+    assert.equal(f.elements['waiting-attendance'].hidden,false);
     f.srv.epoch='epoch-B'; f.srv.phase='live'; await f.time(); await f.time();
     assert.notEqual(first,f.room); assert.equal(f.elements['live-panel'].hidden,false);
     assert.equal(f.elements.microphone.disabled,true); assert.deepEqual(f.room.localParticipant.micCalls,[]);
@@ -230,14 +233,18 @@ test('opted-in pupil waits for the teacher, sees a server-timed demo, and return
     const f = fixture(false);
     f.srv.slot='friday-test'; f.srv.attendance=0; f.srv.practiceAvailable=true;
     await f.time(); await f.time();
-    assert.equal(f.elements['attendance-time'].textContent,'00:00');
+    assert.equal(f.elements['waiting-attendance'].hidden,true);
+    assert.equal(f.elements['lesson-start'].hidden,true);
     assert.match(f.elements['wait-message'].textContent,/آزمایش جمعه/);
     f.srv.phase='starting'; await f.time();
     assert.equal(f.requests.some(r=>r.action==='ticket'),false);
-    f.srv.phase='live'; f.srv.attendance=75;
+    f.srv.phase='live'; f.srv.startTime='08:31'; f.srv.seconds['student-1']=f.srv.attendance=75;
     await f.time(); await f.time();
-    assert.equal(f.elements['attendance-time'].textContent,'00:01');
-    assert.equal(f.elements.attendance.title,'مدت حضور آزمایشی');
+    const selfTime=()=>f.elements.people.children[0].querySelectorAll('bdi')[0].textContent;
+    assert.equal(selfTime(),'00:01');
+    assert.equal(f.elements['lesson-start-time'].textContent,'08:31');
+    assert.equal(f.elements['lesson-start'].hidden,false);
+    assert.equal(f.elements['waiting-attendance'].hidden,true);
     assert.equal(f.elements['live-panel'].hidden,false);
     assert.equal(f.elements['people-count'].textContent,'۳');
     await f.elements['toggle-chat'].click();
@@ -245,12 +252,14 @@ test('opted-in pupil waits for the teacher, sees a server-timed demo, and return
     await f.elements['toggle-chat'].click();
     assert.equal(f.elements['chat-panel'].hidden,false);
     f.srv.phase='paused'; await f.status();
-    assert.equal(f.elements['attendance-time'].textContent,'00:01');
+    assert.equal(f.elements['waiting-attendance-time'].textContent,'00:01');
+    assert.equal(f.elements['waiting-attendance'].hidden,false);
     assert.equal(f.elements['waiting'].hidden,false);
     assert.equal(f.elements['toggle-chat'].disabled,true);
-    f.srv.phase='live'; f.srv.epoch='epoch-B'; f.srv.attendance=138;
+    f.srv.phase='live'; f.srv.epoch='epoch-B'; f.srv.seconds['student-1']=f.srv.attendance=138;
     await f.time(); await f.time();
-    assert.equal(f.elements['attendance-time'].textContent,'00:02');
+    assert.equal(selfTime(),'00:02');
+    assert.equal(f.elements['lesson-start-time'].textContent,'08:31');
     assert.equal(f.requests.filter(r=>r.action==='ticket').length,2);
 });
 
@@ -281,4 +290,50 @@ test('board reads speed up while writing without renewing the full heartbeat or 
     assert.equal(f.room.state,'disconnected');
     assert.equal(f.requests.at(-1).action,'leave');
     assert.deepEqual(f.requests.filter(r=>r.action==='close'), []);
+});
+
+
+test('only speaking participants appear, including multiple speakers; silence, mute and teardown clear them', async()=>{
+    const f=fixture(false); f.srv.phase='live'; await f.time(); await f.time();
+    const room=f.room, local=room.localParticipant, peer=room.remoteParticipants.get('teacher-1');
+    const strip=f.elements['speaker-strip'];
+    const names=()=>f.elements.speakers.children.flatMap(row=>row.children.map(node=>node.textContent));
+    f.change(local.identity,mic);
+    await f.elements.microphone.click();
+    assert.equal(strip.hidden,true,'opening the mic with permission is not speech');
+    const activity=(...people)=>room.emit('ActiveSpeakersChanged',people);
+    Object.assign(local,{isSpeaking:true,audioLevel:0});
+    activity(local);
+    assert.equal(strip.hidden,true,'speaking flag with zero audio level is not enough');
+    Object.assign(local,{isSpeaking:true,audioLevel:.5});
+    Object.assign(peer,{isSpeaking:true,audioLevel:.2,isMicrophoneEnabled:true,name:'دبیر نمونه'});
+    activity(peer,local);
+    assert.equal(strip.hidden,false);
+    assert.deepEqual(names(),['student-1','دبیر نمونه']);
+    activity(local,peer);
+    assert.deepEqual(names(),['student-1','دبیر نمونه'],'volume order does not reorder labels');
+    peer.isMicrophoneEnabled=false;
+    room.emit('TrackMuted',{},peer);
+    assert.deepEqual(names(),['student-1']);
+    peer.isMicrophoneEnabled=true;
+    room.emit('TrackUnmuted',{},peer);
+    assert.deepEqual(names(),['student-1'],'unmute without a new activity event cannot restore a speaker');
+    activity();
+    assert.equal(strip.hidden,true);
+    activity(local,peer);
+    await f.elements.microphone.click();
+    assert.deepEqual(names(),['دبیر نمونه']);
+    room.remoteParticipants.delete(peer.identity);
+    room.emit('ParticipantDisconnected',peer);
+    assert.equal(strip.hidden,true);
+    await f.elements.microphone.click();
+    activity(local);
+    assert.equal(strip.hidden,false);
+    f.srv.phase='paused'; await f.status();
+    assert.equal(strip.hidden,true);
+    f.srv.phase='live'; f.srv.epoch='epoch-B'; await f.time(); await f.time();
+    assert.notEqual(room,f.room);
+    activity(local,peer);
+    assert.equal(strip.hidden,true,'old-room events cannot restore speakers');
+    assert.deepEqual(names(),[]);
 });

@@ -36,7 +36,7 @@
     let wanted = true, autoStart = staff, optedIntoTest = false, state = {phase:'idle', ready:null}, chatCursor = 0, seconds = {}, admitted = false;
     let pollTimer, flow = 0, retryAt = 0, attempts = 0;
     let statusAt = 0, inkAt = Infinity, inkRead = 0, inkRetryAt = 0;
-    let peopleKey = '', peopleTimers = new Map(), slotKey = null;
+    let peopleKey = '', peopleTimers = new Map(), speakersKey = '', slotKey = null;
 
     function note(text = '') {
         el('notice').textContent = text;
@@ -147,16 +147,17 @@
                 avatar.setAttribute('aria-hidden', 'true');
                 const allowed = maySpeak(person);
                 name.textContent = (person.name || person.identity) + (allowed ? ' · نوبت صدا' : '');
-                line.append(avatar, name);
+                const detail = document.createElement('span'); detail.className = 'person-detail';
+                detail.append(name); line.append(avatar, detail);
+                if (student(person.identity)) {
+                    const timer = document.createElement('bdi'); timer.className = 'duration'; timer.dir = 'ltr';
+                    timer.setAttribute('aria-label','مدت حضور ثبت‌شده');
+                    peopleTimers.set(person.identity, timer); detail.append(timer);
+                }
                 if (local === person) {
                     li.className = 'person-self';
                     const self = document.createElement('span'); self.className = 'self-tag'; self.textContent = 'شما';
                     line.append(self);
-                }
-                if (student(person.identity)) {
-                    const timer = document.createElement('bdi'); timer.className = 'duration';
-                    timer.setAttribute('aria-label','مدت حضور ثبت‌شده');
-                    peopleTimers.set(person.identity, timer); line.append(timer);
                 }
                 li.append(line);
                 if (staff && (!allowed || student(person.identity))) {
@@ -173,6 +174,30 @@
         }
         for (const [id, node] of peopleTimers) put(node, duration(seconds[id] || 0));
         for (const btn of field.querySelectorAll('button')) btn.disabled = busy;
+    }
+
+    function renderSpeakers() {
+        // Prune the last audio activity event. Unmuting or reconnecting must not restore old activity.
+        if (active) {
+            const room = active.room;
+            active.speakers = connected() ? active.speakers.filter(person => person.isSpeaking && person.audioLevel > 0 && person.isMicrophoneEnabled
+                && (person === room.localParticipant || room.remoteParticipants.get(person.identity) === person)) : [];
+        }
+        const names = (hasAccess() ? active.speakers : []).map(person => [person.identity, person.name || person.identity]);
+        names.sort((a,b) => a[0].localeCompare(b[0])); // Do not move badges around as levels change.
+        const key = names.length ? JSON.stringify(names) : '';
+        if (key === speakersKey) return;
+        speakersKey = key;
+        const strip = el('speaker-strip');
+        el('speakers').replaceChildren(...names.map(([, name]) => {
+            const entry = document.createElement('li');
+            const label = document.createElement('bdi');
+            label.textContent = name;
+            entry.title = name;
+            entry.append(label);
+            return entry;
+        }));
+        strip.hidden = !names.length;
     }
 
     function syncSlots() {
@@ -213,15 +238,14 @@
         const status = live ? 'در جریان' : connectingNow ? 'در حال اتصال' : 'اتاق انتظار';
         put(el('status'), status);
         el('status-dot').title = status;
-        const practice = state.slot === fridaySlot;
+        const start = state.startTime || '';
+        el('lesson-start').hidden = !start;
+        root.dataset.started = start ? 'yes' : 'no';
+        put(el('lesson-start-time'), start);
         for (const id of panels) el(`toggle-${id}`).disabled = !live;
         if (!staff) {
-            const total = duration(state.attendance);
-            put(el('attendance-time'), total);
-            const label = practice ? 'مدت حضور آزمایشی' : 'مدت حضور شما';
-            const hint = live ? label : `${label} · متوقف`;
-            el('attendance').title = hint;
-            el('attendance-time').setAttribute('aria-label', `${hint}: ${total} (ساعت و دقیقه)`);
+            el('waiting-attendance').hidden = live || !Number.isInteger(state.attendance);
+            put(el('waiting-attendance-time'), duration(state.attendance));
         }
         if (staff) {
             const slot = el('slot');
@@ -257,12 +281,12 @@
         el('microphone').setAttribute('aria-pressed', String(micOn));
         el('microphone').setAttribute('aria-label', micAction);
         el('microphone').title = live && !maySpeak(local) ? 'برای روشن‌کردن میکروفون از دبیر نوبت بگیر' : micAction;
-        put(el('microphone-label'), micOn ? 'صدای من روشن' : 'میکروفون');
         el('enable-audio').hidden = !live || active.room.canPlaybackAudio;
         el('chat-text').disabled = !live || busy;
         el('chat-empty').hidden = chatCursor > 0;
         for (const audio of el('audio-tracks').children) audio.muted = !live;
         renderPeople();
+        renderSpeakers();
     }
 
     function clearActivity() {
@@ -271,6 +295,7 @@
             el('chat-text').value = '';
             board.reset();
         }
+        if (admitted && active) active.speakers = [];
         admitted = false; inkAt = Infinity; inkRetryAt = 0;
         chatCursor = 0; seconds = {};
     }
@@ -325,13 +350,19 @@
         try {
             const ticket = await getTicket();
             if (pending !== flow || !wanted || stopped || permanent) { await room.disconnect(); return; }
-            link = {room, lesson:ticket.lesson, epoch:ticket.epoch};
+            link = {room, lesson:ticket.lesson, epoch:ticket.epoch, speakers:[]};
             active = link;
             flow++; // Ignore status requests made before this transport was installed.
             for (const event of [lk.RoomEvent.ParticipantConnected,lk.RoomEvent.ParticipantDisconnected,lk.RoomEvent.LocalTrackPublished,
-                lk.RoomEvent.LocalTrackUnpublished,lk.RoomEvent.AudioPlaybackStatusChanged,lk.RoomEvent.ConnectionStateChanged]) {
+                lk.RoomEvent.LocalTrackUnpublished,lk.RoomEvent.TrackUnpublished,lk.RoomEvent.TrackMuted,lk.RoomEvent.TrackUnmuted,
+                lk.RoomEvent.AudioPlaybackStatusChanged,lk.RoomEvent.ConnectionStateChanged]) {
                 room.on(event, () => { if (active === link) render(); });
             }
+            room.on(lk.RoomEvent.ActiveSpeakersChanged, speakers => {
+                if (active !== link || !connected()) return;
+                link.speakers = speakers;
+                renderSpeakers();
+            });
             room.on(lk.RoomEvent.TrackSubscribed, (track) => {
                 if (active !== link || track.kind !== lk.Track.Kind.Audio) return;
                 const node = track.attach(); node.muted = !hasAccess(); el('audio-tracks').append(node);

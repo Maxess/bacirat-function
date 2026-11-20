@@ -44,6 +44,27 @@ function cl_classes(PDO $db, string $year): array
     return $classes;
 }
 
+/** These are labels only; keep the original school class key for access and reports. */
+function cl_class_label(string $name): string
+{
+    $name = cl_safe_label($name, 100);
+    $grades = ['اول'=>1, 'دوم'=>2, 'سوم'=>3, 'چهارم'=>4, 'پنجم'=>5, 'ششم'=>6,
+        'هفتم'=>7, 'هشتم'=>8, 'نهم'=>9, 'دهم'=>10, 'یازدهم'=>11, 'دوازدهم'=>12];
+    if (preg_match('~^([\p{L}]+)[\s\p{Z}\x{200C}_-]*([0-9۰-۹٠-٩]+)$~uD', $name, $m)) {
+        $grade = $grades[cl_class_key($m[1])] ?? null;
+        if ($grade !== null) return $grade . '/' . cl_class_key($m[2]);
+    }
+    if (preg_match('~^([0-9۰-۹٠-٩]{1,2})\s*/\s*([0-9۰-۹٠-٩]+)$~uD', $name, $m)) {
+        return cl_class_key($m[1]) . '/' . cl_class_key($m[2]);
+    }
+    return $name;
+}
+
+function cl_school_name(PDO $db): string
+{
+    return cl_safe_label((string)cl_query($db, 'SELECT key_value FROM settings WHERE key_name=? LIMIT 1', ['school_name'])->fetchColumn(), 150);
+}
+
 function cl_day(int $now): DateTimeImmutable
 {
     return (new DateTimeImmutable('@' . $now))->setTimezone(new DateTimeZone('Asia/Tehran'));

@@ -38,24 +38,24 @@ function cl_room_icon(string $name): string
   data-pdf="<?= cl_html(cl_asset('pdf.min.mjs')) ?>" data-pdf-worker="<?= cl_html(cl_asset('pdf.worker.min.mjs')) ?>"
   data-pdf-data="<?= cl_html(cl_href(['route'=>'pdf']) . '&name=') ?>">
     <header class="room-top">
-        <h1 class="room-name"><?= cl_html($class['name']) ?></h1>
+        <h1 class="room-name" title="<?= cl_html($pageTitle) ?>">
+            <?php if ($schoolName !== ''): ?><bdi class="school-name"><?= cl_html($schoolName) ?></bdi><?php endif; ?>
+            <bdi class="class-name" dir="<?= preg_match('~^[0-9]+/[0-9]+$~D', $classLabel) ? 'ltr' : 'auto' ?>"><?= cl_html($classLabel) ?></bdi>
+        </h1>
         <div class="room-controls" role="group" aria-label="کنترل‌های اتاق">
             <button type="button" id="microphone" class="icon-button mic-toggle" aria-pressed="false" aria-label="روشن‌کردن میکروفون" title="روشن‌کردن میکروفون" disabled>
-                <?= cl_room_icon('mic-off') . cl_room_icon('mic') ?><span id="microphone-label">میکروفون</span>
+                <?= cl_room_icon('mic-off') . cl_room_icon('mic') ?>
             </button>
-            <button type="button" id="enable-audio" class="icon-button audio-toggle" title="فعال‌کردن پخش صدا" hidden><?= cl_room_icon('sound') ?><span>پخش صدا</span></button>
-            <span class="control-divider" aria-hidden="true"></span>
-            <button type="button" id="toggle-people" class="icon-button" aria-label="حاضران" aria-controls="people-panel" aria-expanded="true" title="نمایش یا بستن فهرست حاضران" disabled><?= cl_room_icon('people') ?><span>حاضران</span></button>
-            <button type="button" id="toggle-chat" class="icon-button" aria-label="گفت‌وگوی کلاس" aria-controls="chat-panel" aria-expanded="true" title="نمایش یا بستن گفت‌وگو" disabled><?= cl_room_icon('chat') ?><span>گفت‌وگو</span></button>
+            <button type="button" id="enable-audio" class="icon-button audio-toggle" aria-label="فعال‌کردن پخش صدا" title="فعال‌کردن پخش صدا" hidden><?= cl_room_icon('sound') ?></button>
+            <button type="button" id="toggle-people" class="icon-button" aria-label="حاضران" aria-controls="people-panel" aria-expanded="true" title="نمایش یا بستن فهرست حاضران" disabled><?= cl_room_icon('people') ?></button>
+            <button type="button" id="toggle-chat" class="icon-button" aria-label="گفت‌وگوی کلاس" aria-controls="chat-panel" aria-expanded="true" title="نمایش یا بستن گفت‌وگو" disabled><?= cl_room_icon('chat') ?></button>
         </div>
         <div class="room-indicators">
-            <?php if (!$staff): ?>
-            <div class="attendance" id="attendance" title="مدت حضور">
-                <?= cl_room_icon('clock') ?><bdi id="attendance-time" dir="ltr" aria-label="مدت حضور، ساعت و دقیقه">00:00</bdi>
-            </div>
-            <?php endif; ?>
             <span class="status-dot" id="status-dot" title="اتاق انتظار"><span class="sr-only" id="status" role="status">اتاق انتظار</span></span>
-            <a id="leave" class="icon-button leave-button" href="<?= cl_html(cl_site_href($panel)) ?>" aria-label="خروج از اتاق" title="خروج از اتاق و بازگشت به پنل"><?= cl_room_icon('exit') ?><span>خروج</span></a>
+            <div class="room-exit">
+                <a id="leave" class="icon-button leave-button" href="<?= cl_html(cl_site_href($panel)) ?>" aria-label="خروج از اتاق" title="خروج از اتاق و بازگشت به پنل"><?= cl_room_icon('exit') ?><span>خروج</span></a>
+                <span class="lesson-start" id="lesson-start" title="ساعت شروع کلاس به وقت تهران" hidden>شروع <bdi dir="ltr" id="lesson-start-time"></bdi></span>
+            </div>
             <?php if ($staff): ?>
             <button type="button" id="close" class="icon-button finish-button" title="پایان کلاس برای همه" aria-label="پایان کلاس برای همه" hidden><?= cl_room_icon('finish') ?></button>
             <?php endif; ?>
@@ -78,7 +78,10 @@ function cl_room_icon(string $name): string
             <h2 id="wait-title"><?= $staff ? 'در انتظار شروع زنگ' : 'در انتظار ورود دبیر یا مسئول مدرسه' ?></h2>
             <p id="wait-message"><?= $staff ? 'در حال بررسی زنگ‌های امروز…' : 'وقتی اتصال دبیر تأیید شود، خودکار وارد کلاس می‌شوی.' ?></p>
             <p class="wait-hint"><?= cl_room_icon('clock') ?> زمان انتظار در تایمر حضور حساب نمی‌شود.</p>
-            <?php if (!$staff): ?><button type="button" id="join" hidden>بازگشت به اتاق انتظار</button><?php endif; ?>
+            <?php if (!$staff): ?>
+            <p class="waiting-attendance" id="waiting-attendance" hidden>حضور ثبت‌شده: <bdi dir="ltr" id="waiting-attendance-time"></bdi></p>
+            <button type="button" id="join" hidden>بازگشت به اتاق انتظار</button>
+            <?php endif; ?>
         </div>
     </section>
     <div id="live-panel" hidden>
@@ -132,6 +135,10 @@ function cl_room_icon(string $name): string
                 </div>
             </div>
         </section>
+        <section class="speaker-strip" id="speaker-strip" aria-label="در حال صحبت" hidden>
+            <?= cl_room_icon('mic') ?>
+            <ul id="speakers" class="speakers" role="list"></ul>
+        </section>
         <div class="room-side">
             <section class="room-panel" id="people-panel" aria-labelledby="people-title">
                 <div class="room-panel-head">
@@ -146,8 +153,8 @@ function cl_room_icon(string $name): string
                 <ol id="chat-log" class="chat-log" role="log" aria-label="پیام‌های کلاس"></ol>
                 <form id="chat-form">
                     <label for="chat-text" class="sr-only">متن پیام</label>
-                    <textarea id="chat-text" maxlength="600" rows="1" placeholder="پیامی برای این کلاس…" required></textarea>
-                    <button type="submit"><?= cl_room_icon('send') ?> ارسال</button>
+                    <textarea id="chat-text" maxlength="600" rows="1" placeholder="متن پیام…" required></textarea>
+                    <button type="submit" aria-label="ارسال پیام" title="ارسال پیام"><?= cl_room_icon('send') ?><span>ارسال</span></button>
                 </form>
             </section>
         </div>

@@ -61,6 +61,13 @@ $deputy = cl_school_user($db, ['teacher_id'=>3], $year);
 $manager = cl_school_user($db, ['admin_id'=>3], $year);
 foreach ([['student_id'=>3],['student_id'=>5],['admin_id'=>2],['teacher_id'=>1,'admin_id'=>1]] as $bad) denied(403, fn()=>cl_school_user($db,$bad,$year));
 $first = cl_class_for($db,$classes,10,$student);
+must(cl_class_label('هفتم1') === '7/1' && cl_class_label($first['name']) === '7/1'
+    && cl_class_label('دوازدهم-٣') === '12/3' && cl_class_label('۹ / ۲') === '9/2' && cl_class_label('پژوهش الف') === 'پژوهش الف',
+    'display labels normalize known grades and preserve custom class names');
+must($first['name'] === 'هفتم ۱' && $first['key'] === cl_class_key('هفتم1'), 'room labels do not alter stored names or matching');
+must(cl_school_name($db) === '', 'no fabricated school name if the setting is missing');
+$db->exec("INSERT INTO settings VALUES ('school_name','دبیرستان بصیرت')");
+must(cl_school_name($db) === 'دبیرستان بصیرت', 'read the school name from the existing settings table');
 denied(403,fn()=>cl_class_for($db,$classes,20,$student));
 must(cl_access_class($db,$classes[10],$other) && !cl_access_class($db,$classes[20],$teacher), 'teacher class from assignment, not display name');
 must(array_keys(cl_today_slots($db,$first,$teacher,$t)) === [11] && array_keys(cl_today_slots($db,$first,$deputy,$t)) === [11,13], 'Tehran weekday, real schedule id and deputy');
@@ -344,7 +351,8 @@ must(!$sfus && !cl_active($s,10), 'attempts outside a configured period do not c
 $firstBell = $timedOpen($teacher,99,$bell); $ring = $firstBell['room'];
 must($firstBell['deadline'] === $end && $firstBell['bell'] === '08:30 تا 08:31', 'configured cutoff instead of a fixed two-hour deadline');
 $event('room_started',$ring,$bell+1); $wire($ring,$teacherWire); $pulse(10,$teacher,'PA_Teacher',$bell+3);
-must($sample(10,$bell+3,$first)['phase'] === 'live', 'live authorization remains required in the scheduled window');
+$runningBell = $sample(10,$bell+3,$first);
+must($runningBell['phase'] === 'live' && $runningBell['started'] > $bell, 'the lesson starts only after confirmed staff admission');
 $event('participant_left',$ring,$bell+7,'teacher-1','PA_Teacher');
 must(!isset($sfus[$ring]) && cl_active($s,10)['phase'] === 'paused', 'scheduled bell still pauses after the last supervisor');
 $revised = array_replace($timed,['bell_hours'=>[1=>['start'=>'09:00','end'=>'09:30']]]);
@@ -355,6 +363,7 @@ $pulse(10,$teacher,'PA_Teacher',$end-7); $pulse(10,$student,'PA_Student',$end-7)
 cl_reconcile($s,$revised,$first,cl_active($s,10),$end-7,$rpc);
 $pulse(10,$teacher,'PA_Teacher',$end-1); $pulse(10,$student,'PA_Student',$end-1);
 $liveBell = cl_reconcile($s,$revised,$first,cl_active($s,10),$end-1,$rpc);
+must($liveBell['started'] === $runningBell['started'], 'resuming a lesson keeps its original server start');
 $lateTicket = cl_ticket($revised,$liveBell,$student,$bind($liveBell,'PA_Student'),$end-1);
 $claims = json_decode(base64_decode(strtr(explode('.',$lateTicket['token'])[1],'-_','+/')), true, 16, JSON_THROW_ON_ERROR);
 must($claims['exp'] === $end, 'signed listener token expires no later than the bell');

@@ -68,6 +68,7 @@ cl_json_reply(static function (): array {
             $result = ['phase'=>$phase,'ready'=>$ready, 'lesson'=>$lesson['id'], 'epoch'=>cl_epoch($lesson),
                 'callbackMissing'=>$lesson['phase'] === 'paused' && empty($lesson['event_received']),
                 'period'=>$lesson['period'], 'subject'=>$lesson['subject'], 'slot'=>$lesson['slot'], 'bell'=>$lesson['bell'] ?? null, 'admitted'=>$allowed,
+                'startTime'=>isset($lesson['started']) ? cl_day($lesson['started'])->format('H:i') : null,
                 'joinable'=>$ready && !$expired && cl_joinable($lesson, $actor, $now),
                 'resumable'=>$ready && !$expired && $lesson['phase'] === 'paused' && $lesson['room'] === null];
             // A paused or reconnecting pupil can still see their own last verified total, not the room activity.

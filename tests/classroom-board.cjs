@@ -7,14 +7,15 @@ const { webcrypto } = require('node:crypto');
 const script = fs.readFileSync(path.join(__dirname, '../school-addon/upload/online-classroom/assets/board.js'), 'utf8');
 
 // The real board, with DOM/canvas and the network acknowledgement stubbed.
-function fixture() {
-    const elements = new Map(), timers = new Map(), calls = [];
-    let time = 0, seq = 0, access = true, response;
-    const display = { strokes:[] };
+function fixture({staff=true,reducedMotion=false}={}) {
+    const elements = new Map(), timers = new Map(), frames = new Map(), calls = [];
+    let time = 0, seq = 0, access = staff, response, points;
+    const display = { strokes:[], paths:[] };
     const context = {
-        save(){}, restore(){}, beginPath(){}, moveTo(){}, lineTo(){}, arc(){}, fillRect(){},
-        clearRect(){ display.strokes=[]; },
-        stroke(){ display.strokes.push([this.globalCompositeOperation,this.strokeStyle]); },
+        save(){}, restore(){}, beginPath(){ points=[]; },
+        moveTo(x,y){ points.push([x,y]); }, lineTo(x,y){ points.push([x,y]); }, arc(x,y){ points.push([x,y]); }, fillRect(){},
+        clearRect(){ display.strokes=[]; display.paths=[]; },
+        stroke(){ display.strokes.push([this.globalCompositeOperation,this.strokeStyle]); display.paths.push(points); },
         fill(){ this.stroke(); },
     };
     const rect = { left:0,top:0,width:1000,height:500 };
@@ -33,12 +34,13 @@ function fixture() {
         }
         return elements.get(id);
     }
-    const window = { addEventListener(){}, confirm:()=>true };
+    const window = { addEventListener(){}, confirm:()=>true, matchMedia:()=>({matches:reducedMotion}) };
     vm.runInNewContext(script, {
-        document:{getElementById:el,createElement:el}, window, crypto:webcrypto,
+        document:{getElementById:el,createElement:el}, window, crypto:webcrypto, performance:{now:()=>time},
+        requestAnimationFrame(fn){const id=++seq;frames.set(id,fn);return id;}, cancelAnimationFrame:id=>frames.delete(id),
         setTimeout(fn,ms){const id=++seq;timers.set(id,{at:time+ms,fn});return id;}, clearTimeout:id=>timers.delete(id),
     });
-    const root = el('classroom'); root.dataset.moderator='yes';
+    const root = el('classroom'); root.dataset.moderator=staff ? 'yes' : 'no';
     const board = window.ClassroomBoard(root, {
         canEdit:()=>access,
         send(action,data){
@@ -56,7 +58,12 @@ function fixture() {
         if (next) {timers.delete(next[0]);time=next[1].at;next[1].fn();}
         await new Promise(resolve=>setImmediate(resolve));
     }
-    return {el,board,sync,display,calls,flush,delay:s=>response=s, access:v=>access=v, draw(type,x,y,other){el('board-ink').fire(type,{clientX:x,clientY:y,...other});}};
+    function frame(ms) {
+        time += ms;
+        const planned=[...frames.values()]; frames.clear();
+        for (const callback of planned) callback(time);
+    }
+    return {el,board,sync,display,calls,flush,frame,delay:s=>response=s, access:v=>access=v, draw(type,x,y,other){el('board-ink').fire(type,{clientX:x,clientY:y,...other});}};
 }
 const drawOp = (id, points, color='#0099ff') => ({tool:'pen',size:4,id,points,color});
 
@@ -128,4 +135,47 @@ test('clear drains pending ink, waits for the new revision and never sends a sta
     f.sync([],{rev:2,reset:true});
     assert.equal(f.el('pen').disabled,false);
     assert.deepEqual(f.display.strokes,[]);
+});
+
+
+const digit = drawOp('b'.repeat(32),[[3200,2300],[3900,1600],[4550,2100],[4550,2800],[3300,4300],[4800,4300]]);
+const px = (f,[x,y]) => [f.el('board-ink').width*x/10000, f.el('board-ink').height*y/10000];
+
+test('a quick digit arriving in one delta is revealed along its path instead of stamped all at once', ()=>{
+    const f=fixture({staff:false}); f.sync();
+    f.sync([digit],{moving:true,cursor:6});
+    assert.equal(f.display.paths.length,0);
+    f.frame(40);
+    assert.ok(f.display.paths.length>0);
+    assert.deepEqual(f.display.paths[0][0],px(f,digit.points[0]));
+    assert.ok(f.display.paths.every(path=>path.every(([,y])=>y<px(f,digit.points.at(-1))[1])),'end of digit not visible at the first frame');
+    f.frame(245);
+    assert.deepEqual(f.display.paths.at(-1).at(-1),px(f,digit.points.at(-1)));
+    assert.deepEqual({...f.board.position()},{board:1,ink:6},'animation does not delay the reader cursor');
+});
+
+test('no playback on reset pages, catch-up or reduced motion; old playback cannot survive erase or reset', ()=>{
+    const f=fixture({staff:false}); f.sync([digit],{moving:true,cursor:6});
+    assert.deepEqual(f.display.paths.at(-1).at(-1),px(f,digit.points.at(-1)));
+    const second={...digit,id:'c'.repeat(32)};
+    f.sync([second],{moving:true,cursor:12,more:true});
+    assert.deepEqual(f.display.paths.at(-1).at(-1),px(f,digit.points.at(-1)));
+    const third={...digit,id:'d'.repeat(32)};
+    f.sync([third],{moving:true,cursor:18});
+    assert.equal(f.display.paths.length,3,'last catch-up packet is painted immediately as well');
+    const fourth={...digit,id:'e'.repeat(32)};
+    f.sync([fourth],{moving:true,cursor:24});
+    assert.equal(f.display.paths.length,3);
+    f.frame(40);
+    f.sync([{tool:'erase-stroke',targets:[digit.id,second.id,third.id,fourth.id]}],{moving:true,cursor:25});
+    f.frame(250);
+    assert.deepEqual(f.display.paths,[]);
+    f.sync([third],{moving:true,rev:2,cursor:6});
+    f.sync([second],{moving:true,rev:2,cursor:12});
+    f.sync([],{rev:3,reset:true});
+    f.frame(250);
+    assert.deepEqual(f.display.paths,[]);
+    const accessible=fixture({staff:false,reducedMotion:true}); accessible.sync();
+    accessible.sync([digit],{moving:true,cursor:6});
+    assert.deepEqual(accessible.display.paths.at(-1).at(-1),px(accessible,digit.points.at(-1)));
 });

@@ -7,7 +7,7 @@ cl_headers();
 header('Content-Type: text/html; charset=UTF-8');
 $actor = $errorMessage = $class = $reports = $friday = null;
 $classes = $choices = [];
-$connect = $year = '';
+$connect = $year = $schoolName = $classLabel = '';
 $now = time();
 try {
     $cfg = cl_config();
@@ -32,7 +32,11 @@ try {
             $choices = cl_staff_schedule($s, $cfg, $class, $actor, $now)['choices'];
         }
     }
-    if ($class !== null) $connect = $cfg['api_url'] . ' ' . $cfg['signal_url'];
+    if ($class !== null) {
+        $schoolName = cl_school_name($s->db);
+        $classLabel = cl_class_label($class['name']);
+        $connect = $cfg['api_url'] . ' ' . $cfg['signal_url'];
+    }
 } catch (ClassroomError $error) {
     http_response_code($error->status);
     $errorMessage = $error->getMessage();
@@ -52,14 +56,15 @@ $panel = match ($actor['office'] ?? $actor['role'] ?? '') {
     'student'=>'student-panel.php', 'teacher'=>'teacher-panel.php', 'deputy'=>'deputy-panel.php', 'admin'=>'index.php?view=dashboard', default=>'index.php?view=login',
 };
 $roomPage = $class !== null && $errorMessage === null;
-$pageTitle = $reports !== null ? 'حضور و غیاب کلاس مجازی' : ($class === null ? 'کلاس مجازی' : $class['name']);
+$pageTitle = $roomPage ? trim($schoolName . ' ' . $classLabel)
+    : ($reports !== null ? 'حضور و غیاب کلاس مجازی' : 'کلاس مجازی');
 ?>
 <!doctype html>
 <html lang="fa" dir="rtl">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title><?= cl_html($pageTitle) ?> | مدرسه</title>
+    <title><?= cl_html($pageTitle) ?><?= $roomPage ? '' : ' | مدرسه' ?></title>
     <link rel="stylesheet" href="<?= cl_html(cl_asset('classroom.css')) ?>">
     <?php if ($class !== null && $errorMessage === null): ?>
     <script defer src="<?= cl_html(cl_asset('livekit-client.umd.js')) ?>"></script>

@@ -21,6 +21,8 @@
         const staff = root.dataset.moderator === 'yes';
         const url = value => new URL(value, document.baseURI).href;
         const widthLimit = 2048;
+        const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)');
+        let playback = null;
 
         function message(text = '') {
             el('board-note').textContent = text;
@@ -143,11 +145,76 @@
             if (op.tool !== 'erase-stroke' && !hidden.has(op.id)) paint(op);
         }
         function redraw() {
+            stopPlayback();
             const draft = drafts();
             const hidden = collectRemoved(new Set(removed), draft);
             context.clearRect(0,0,ink.width,ink.height);
             for (const op of ops) paintVisible(op, hidden);
             for (const op of draft) paintVisible(op, hidden);
+        }
+        function stopPlayback(finish = false) {
+            if (!playback) return;
+            const current = playback;
+            playback = null;
+            cancelAnimationFrame(current.frame);
+            if (finish) current.draw(1);
+        }
+        function presentInk(view, catchingUp) {
+            stopPlayback(true);
+            const rows = view.ops;
+            // A quick character can arrive entirely in one HTTP response. Reveal just recent ink
+            // along its actual path; old pages, erasures and catch-up never wait for an animation.
+            if (pointer === null && !document.hidden && !reducedMotion?.matches && view.moving && !catchingUp && rows.length <= 8
+                && rows.every(op => op.tool === 'pen' && op.id && !op.id.startsWith('old-'))) {
+                const parts = [];
+                let length = 0;
+                for (const op of rows) {
+                    if (removed.has(op.id)) continue;
+                    if (op.points.length === 1) {
+                        parts.push({op, from:length, to:length+4});
+                        length += 4;
+                    }
+                    for (let i = 1; i < op.points.length; i++) {
+                        const a = op.points[i-1], b = op.points[i];
+                        if (samePoint(a,b)) continue;
+                        const distance = Math.hypot((b[0]-a[0])*ink.width, (b[1]-a[1])*ink.height)/10000;
+                        parts.push({op,a,b,from:length,to:length+distance});
+                        length += distance;
+                    }
+                }
+                if (parts.some(part => part.b)) {
+                    const duration = Math.min(245, Math.max(145, 112 + .24*length));
+                    const start = performance.now();
+                    let index = 0, painted = 0;
+                    const current = {draw(fraction) {
+                        const target = length*fraction;
+                        while (index < parts.length && painted < target) {
+                            const {op,a,b,from,to} = parts[index];
+                            const end = Math.min(target,to);
+                            if (b) {
+                                const at = n => {
+                                    const f = (n-from)/(to-from);
+                                    return [a[0]+f*(b[0]-a[0]), a[1]+f*(b[1]-a[1])];
+                                };
+                                paint({...op, points:[at(painted),at(end)]});
+                            } else if (painted === from) paint(op);
+                            painted = end;
+                            if (painted === to) index++;
+                        }
+                    }};
+                    function tick(now) {
+                        if (playback !== current) return;
+                        const fraction = Math.max(0, Math.min(1, (now-start)/duration));
+                        current.draw(fraction);
+                        if (fraction < 1) current.frame = requestAnimationFrame(tick);
+                        else playback = null;
+                    }
+                    playback = current;
+                    current.frame = requestAnimationFrame(tick);
+                    return;
+                }
+            }
+            for (const op of rows) paintVisible(op, removed);
         }
         function receive(incoming) {
             collectRemoved(removed, incoming);
@@ -172,6 +239,7 @@
         }
         function wipeInk() {
             generation++;
+            stopPlayback();
             clearTimeout(writeTimer); writeTimer = undefined;
             ops = []; pending = []; sent = [];
             removed.clear(); targetRev = 0; cursor = 0; pointerEnd();
@@ -313,6 +381,7 @@
             const resetPage = next.reset || !data || next.rev !== data.rev || rival;
             const reloadDoc = rival || (next.doc?.id || '') !== docKey;
             const changedPaper = !data || reloadDoc || next.page !== data.page;
+            const catchingUp = data?.more || next.more;
             if (resetPage) wipeInk();
             transport = scope;
             data = next;
@@ -325,7 +394,7 @@
                 fit(1600,1000);
                 show(next,scope,reloadDoc);
             } else if (resetPage || dropped || (next.ops.length && (pending.length || sent.length || next.ops.some(op => op.tool === 'erase-stroke')))) redraw();
-            else for (const op of next.ops) paintVisible(op, removed);
+            else if (next.ops.length) presentInk(next, catchingUp);
             const caption = next.doc ? `${next.doc.name} · صفحهٔ ${next.page} از ${next.doc.pages}` : 'تختهٔ آزاد · همگام';
             if (el('board-caption').textContent !== caption) el('board-caption').textContent = caption;
             if (staff) {
@@ -354,7 +423,7 @@
         }
         function setExpanded(expand) {
             card.classList.toggle('expanded',expand);
-            for (const node of root.querySelectorAll('.room-top, .staff-actions, .room-side')) node.inert = expand;
+            for (const node of root.querySelectorAll('.room-top, .staff-actions, .speaker-strip, .room-side')) node.inert = expand;
             const btn = el('board-expand');
             btn.setAttribute('aria-pressed',String(expand));
             btn.setAttribute('aria-label', expand ? 'بازگشت به کلاس' : 'نمای بزرگ تخته');
@@ -419,6 +488,7 @@
                 const rect = ink.getBoundingClientRect();
                 if (!rect.width || !rect.height || (tool === 'pen' && !queuedSlot())) return;
                 event.preventDefault();
+                stopPlayback(true);
                 pointer = event.pointerId;
                 ink.setPointerCapture(pointer);
                 const point = xy(event,rect);
