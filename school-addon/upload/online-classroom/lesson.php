@@ -205,6 +205,7 @@ function cl_open_lesson(ClassroomStore $s, array $ctx, array $cfg, array $class,
     $lesson['sample'] = 0;
     $lesson['last_attempt'] = 0;
     $lesson['event_received'] = false;
+    unset($lesson['camera_codec'], $lesson['media_pending']);
     // Record this generation before asking the SFU; a failed reply must not orphan it.
     ($ctx['write_runtime'])('scheduled-v2');
     $s->tx(static function () use ($s, $class, $lesson, $id) {
@@ -212,7 +213,8 @@ function cl_open_lesson(ClassroomStore $s, array $ctx, array $cfg, array $class,
         $s->put('active', (string)$class['id'], ['id'=>$id]);
     });
     try {
-        cl_create_room($lesson['room'], $cfg['max_participants'], $rpc);
+        $lesson['camera_codec'] = cl_camera_codec(cl_create_room($lesson['room'], $cfg['max_participants'], $rpc));
+        $s->put('lesson', $id, $lesson);
     } catch (ClassroomError $error) {
         cl_pause($lesson);
         $s->put('lesson', $id, $lesson);
@@ -224,7 +226,7 @@ function cl_open_lesson(ClassroomStore $s, array $ctx, array $cfg, array $class,
 function cl_pause(array &$lesson, string $phase = 'paused'): void
 {
     $lesson['phase'] = $phase;
-    $lesson['seen'] = $lesson['staff'] = $lesson['pulses'] = [];
+    $lesson['seen'] = $lesson['staff'] = $lesson['pulses'] = $lesson['profiles'] = [];
 }
 
 function cl_leave_lesson(ClassroomStore $s, array $lesson, array $actor, array $input, int $now): void
@@ -288,18 +290,13 @@ function cl_observe(array $lesson, array $observed, array $staff, int $at, int $
 }
 
 /** Sample the existing LiveKit service from the school request; never trust a browser's participant list. */
-function cl_room_presence(array $lesson, int $now, callable $rpc): array
+function cl_room_presence(array $lesson, int $now, callable $rpc, array &$peers): array
 {
     $room = $lesson['room'];
-    $participants = $rpc('ListParticipants', $room, ['room'=>$room])['participants'] ?? [];
-    if (!is_array($participants) || !array_is_list($participants) || count($participants) > 60) throw cl_media_bad_reply();
+    $peers = cl_live_media_peers($rpc('ListParticipants', $room, ['room'=>$room]));
     $people = [];
-    foreach ($participants as $p) {
-        if (!is_array($p)) throw cl_media_bad_reply();
-        if (!in_array($p['state'] ?? null, ['ACTIVE', 2], true)) continue;
-        $id = $p['identity'] ?? null;
-        $sid = $p['sid'] ?? null;
-        if (!cl_media_identity($id) || !cl_sid($sid) || isset($people[$id])) throw cl_media_bad_reply();
+    foreach ($peers as $id=>$p) {
+        $sid = $p['sid'];
         if (!str_starts_with($id, 'student-')) {
             // Snapshots may lag behind a disconnected or replaced teacher. Only a matching active SID can supervise.
             $pulse = $lesson['pulses'][$id] ?? null;
@@ -307,6 +304,7 @@ function cl_room_presence(array $lesson, int $now, callable $rpc): array
             try { $real = $rpc('UpdateParticipant', $room, ['room'=>$room,'identity'=>$id]); }
             catch (ClassroomError $error) { if ($error->status === 409) continue; throw $error; }
             if (($real['sid'] ?? null) !== $sid || ($real['identity'] ?? null) !== $id || !in_array($real['state'] ?? null, ['ACTIVE',2], true)) continue;
+            $peers[$id] = $real;
         }
         $people[$id] = $sid;
     }
@@ -359,7 +357,8 @@ function cl_reconcile(ClassroomStore $s, array $cfg, ?array $class, array $lesso
     if (empty($lesson['event_received'])) return $lesson;
     if (cl_room_class($cfg, $lesson['room']) !== $lesson['class_id']) throw new LogicException('Invalid owned room record');
     $lesson['last_attempt'] = $now;
-    try { $observed = cl_room_presence($lesson, $now, $rpc); }
+    $peers = [];
+    try { $observed = cl_room_presence($lesson, $now, $rpc, $peers); }
     catch (ClassroomError $error) {
         cl_pause($lesson);
         // A definitive absent room retires immediately; other errors are retried by the next page request.
@@ -379,11 +378,68 @@ function cl_reconcile(ClassroomStore $s, array $cfg, ?array $class, array $lesso
     if (count($observed) !== count($staff) + count($roster)) cl_pause($lesson);
     else {
         $lesson['roster'] += $roster;
+        $previous = $lesson['seen'];
         $lesson = cl_observe($lesson, $observed, $staff, $now, $now);
+        if ($lesson['phase'] === 'live') {
+            if ($previous !== $lesson['seen'] || ($lesson['profiles_at'] ?? 0) + 60 <= $now) {
+                $lesson['profiles'] = cl_class_profiles($s->db, $class, $lesson['seen']);
+                $lesson['profiles_at'] = $now;
+            }
+            // Do not stop attendance because an individual device's media policy is still catching up.
+            $lesson['media_pending'] = !cl_sync_media($lesson, $peers, $rpc);
+        }
     }
     if ($lesson['phase'] === 'paused') return cl_retire_transport($s, $cfg, $lesson, $now, $rpc);
     $s->put('lesson', $lesson['id'], $lesson);
     return $lesson;
+}
+
+/** Under the same class lock as presence, page changes and ink writes. */
+function cl_set_access(ClassroomStore $s, array $lesson, array $actor, array $body, int $now, callable $rpc): array
+{
+    if (!cl_is_staff($actor)) throw new ClassroomError(403, 'تغییر دسترسی فقط برای دبیر یا مسئول مجاز است.');
+    $feature = $body['feature'] ?? null;
+    $enabled = $body['enabled'] ?? null;
+    $identity = $body['identity'] ?? null; // null/omitted is the whole class in this lesson only.
+    if (!in_array($feature, ['mic','camera','board'], true) || !is_bool($enabled)
+        || ($identity !== null && !cl_media_identity($identity, $feature === 'board'))) {
+        throw new ClassroomError(400, 'نوع دسترسی یا شرکت‌کننده معتبر نیست.');
+    }
+    $sid = $identity === null ? null : ($lesson['seen'][$identity] ?? null);
+    if ($identity !== null && !cl_entered($lesson, ['identity'=>$identity], $sid, $now)) {
+        throw new ClassroomError(409, 'ورود این شرکت‌کننده هنوز تأیید نشده است.');
+    }
+    if ($feature === 'camera' && $enabled && empty($lesson['camera_codec'])) {
+        throw new ClassroomError(409, 'سرور رسانهٔ این کلاس فقط صدا دارد؛ مدیر باید پشتیبانی دوربین را روی VPS فعال کند.');
+    }
+    if ($identity === null) $lesson['access'][$feature] = ['all'=>$enabled, 'members'=>[]];
+    else {
+        $rule = $lesson['access'][$feature] ?? ['all'=>false, 'members'=>[]];
+        if ($enabled === $rule['all']) unset($rule['members'][$identity]);
+        else $rule['members'][$identity] = $enabled;
+        $lesson['access'][$feature] = $rule;
+    }
+    // Commit the intended revocation before touching the SFU so a retry cannot restore the old grant.
+    $s->put('lesson', $lesson['id'], $lesson);
+    if ($feature !== 'board') {
+        try {
+            $room = $lesson['room'];
+            if ($identity === null) $peers = cl_live_media_peers($rpc('ListParticipants', $room, ['room'=>$room]));
+            else {
+                // Confirm that the live SFU identity has not already reconnected with a different SID.
+                $peer = $rpc('UpdateParticipant', $room, ['room'=>$room,'identity'=>$identity]);
+                $peers = cl_live_media_peers(['participants'=>[$peer]]);
+                if (($peers[$identity]['sid'] ?? null) !== $sid) $peers = [];
+            }
+            $verified = cl_sync_media($lesson, $peers, $rpc);
+        } catch (ClassroomError $error) { $verified = false; }
+        if (!$verified) {
+            $lesson['media_pending'] = true;
+            $s->put('lesson', $lesson['id'], $lesson);
+            throw cl_media_bad_reply();
+        }
+    }
+    return ['access'=>$lesson['access']];
 }
 
 function cl_finish_lesson(ClassroomStore $s, array $cfg, array $lesson, int $now): void
@@ -395,7 +451,7 @@ function cl_finish_lesson(ClassroomStore $s, array $cfg, array $lesson, int $now
             $s->delete('lesson', $id);
         } else {
             $lesson['ended'] = min($now, $lesson['deadline']);
-            foreach (['sample','transport_at','room','pulses','seen','staff','deadline','last_attempt','event_received'] as $key) unset($lesson[$key]);
+            foreach (['sample','transport_at','room','pulses','seen','staff','deadline','last_attempt','event_received','profiles','profiles_at','access','camera_codec','media_pending'] as $key) unset($lesson[$key]);
             $lesson['phase'] = 'finished';
             $s->put('lesson', $id, $lesson);
             $key = sprintf('%012d:%s', $lesson['created'], $id);

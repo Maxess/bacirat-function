@@ -68,6 +68,36 @@ must($first['name'] === 'هفتم ۱' && $first['key'] === cl_class_key('هفت�
 must(cl_school_name($db) === '', 'no fabricated school name if the setting is missing');
 $db->exec("INSERT INTO settings VALUES ('school_name','دبیرستان بصیرت')");
 must(cl_school_name($db) === 'دبیرستان بصیرت', 'read the school name from the existing settings table');
+$db->exec('ALTER TABLE students ADD COLUMN photo_url VARCHAR(255)');
+$db->beginTransaction();
+try {
+    $db->exec("UPDATE students SET first_name='حسن',last_name='احسانی',photo_url='uploads/photos/native.png' WHERE id=1;
+        UPDATE students SET first_name='علی',last_name='احسانی' WHERE id=4;
+        UPDATE students SET first_name='مریم',last_name='صادقی',photo_url='https://foreign.test/pupil.jpg' WHERE id=2;
+        UPDATE students SET first_name='ح',last_name='صادقی' WHERE id=3 OR id=5;");
+    $cards = cl_class_profiles($db,$first,['student-1'=>'PA_Sid','student-2'=>'PA_Other']);
+    must($cards === ['student-1'=>['name'=>"ح\u{200C}احسانی",'photo'=>true]], 'a duplicate who has not joined counts; only live classmates get cards');
+    $cards = cl_class_profiles($db,$first,['student-1'=>'PA_Sid','student-4'=>'PA_Peer']);
+    must($cards['student-4'] === ['name'=>"ع\u{200C}احسانی",'photo'=>false], 'first letter plus Persian half-space, not first name');
+    must(cl_class_profiles($db,$classes[20],['student-2'=>'PA_Other']) === ['student-2'=>['name'=>'صادقی','photo'=>false]],
+        'another class and year do not collide, external photo URL is not used');
+    must(cl_roster($db,$first)['student-1'] === 'حسن احسانی', 'reports retain full host names');
+} finally { $db->rollBack(); }
+$photoRoot = sys_get_temp_dir() . '/class-photo-' . bin2hex(random_bytes(6));
+mkdir($photoRoot . '/uploads/photos', 0700, true);
+$png = base64_decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aGDkAAAAASUVORK5CYII=');
+file_put_contents($photoRoot . '/uploads/photos/native.png',$png);
+file_put_contents($photoRoot . '/uploads/photos/not-an-image.jpg','hello');
+symlink($photoRoot . '/uploads/photos/native.png',$photoRoot . '/uploads/photos/alias.png');
+try {
+    must(cl_read_photo($photoRoot,'uploads/photos/native.png') === ['mime'=>'image/png','raw'=>$png], 'local image returned as binary');
+    foreach (['https://foreign.test/pupil.png','/etc/passwd','uploads/photos/../native.png','uploads/photos/alias.png','uploads/photos/not-an-image.jpg',
+        'uploads/photos/..%2Fnative.png','uploads/photos/a\\b.png'] as $badPhoto) must(cl_read_photo($photoRoot,$badPhoto)===null,'reject arbitrary paths, aliases and non-images');
+} finally {
+    foreach (['native.png','not-an-image.jpg','alias.png'] as $file) unlink($photoRoot . '/uploads/photos/' . $file);
+    rmdir($photoRoot . '/uploads/photos'); rmdir($photoRoot . '/uploads'); rmdir($photoRoot);
+}
+
 denied(403,fn()=>cl_class_for($db,$classes,20,$student));
 must(cl_access_class($db,$classes[10],$other) && !cl_access_class($db,$classes[20],$teacher), 'teacher class from assignment, not display name');
 must(array_keys(cl_today_slots($db,$first,$teacher,$t)) === [11] && array_keys(cl_today_slots($db,$first,$deputy,$t)) === [11,13], 'Tehran weekday, real schedule id and deputy');
@@ -150,6 +180,21 @@ cl_check_live($cfg,$active,$student,$bind($active,'PA_Student'),$t+9);
 cl_chat($s,$active,$student,'<b>متن است</b>',$t+9);
 denied(429,fn()=>cl_chat($s,$active,$student,'spam',$t+10));
 $stroke=['tool'=>'pen','color'=>'#0055aa','size'=>4,'points'=>[[420,200],[9000,9800]]];
+$pupilInk = ['strokes'=>[$stroke+['id'=>str_repeat('b',32)]]];
+denied(403,fn()=>cl_ink_input($active,$student,$pupilInk));
+cl_set_access($s,$active,$teacher,['feature'=>'board','enabled'=>true,'identity'=>'student-1'],$t+9,$rpc);
+$active = cl_active($s,10);
+must(cl_activity_sync($s,$active,$student,[])['board']['write'] && !cl_may_write($active,['role'=>'student','identity'=>'student-4']),
+    'individual pen grant is visible only to that pupil');
+must(cl_ink_input($active,$student,$pupilInk)['strokes'][0]['id'] !== $pupilInk['strokes'][0]['id'], 'pupil cannot extend another author’s stroke ID');
+denied(403,fn()=>cl_ink_input($active,$student,['strokes'=>[['tool'=>'erase-stroke','targets'=>['old-00000001']]]]));
+cl_set_access($s,$active,$manager,['feature'=>'board','enabled'=>false],$t+9,$rpc);
+$active = cl_active($s,10);
+must(!cl_activity_sync($s,$active,$student,[])['board']['write'] && cl_may_write($active,$teacher), 'group revoke resets individual exceptions and leaves staff tools');
+denied(403,fn()=>cl_ink_input($active,$student,$pupilInk));
+cl_set_access($s,$active,$teacher,['feature'=>'board','enabled'=>true],$t+9,$rpc);
+$active = cl_active($s,10);
+
 $ink = static fn(array $ops, int $rev = 1) => cl_board_action($s,$active,['board'=>$rev,'strokes'=>$ops],'board-ink');
 $view = static fn(int $rev, int $cursor = 0) => cl_board_view($s,$active['id'],$student,['board'=>$rev,'ink'=>$cursor],cl_activity($s,$active['id']));
 must($ink([$stroke])['ink']===1, 'existing ink format still accepted');
@@ -237,6 +282,7 @@ denied(409,fn()=>cl_ticket($cfg,$a,$student,$bind($a,'PA_Student'),$t+15));
 $a2=$open($teacher,11,$t+19);
 $r3=$a2['room'];
 must($a2['id']===$a['id'] && $r3!==$r && $a2['seconds']['student-1']===3, 'resume same lesson and counters with a new media room');
+must(cl_may_write($a2,$student) && !cl_may_write(cl_active($s,20),$student), 'board permission stays with the same lesson, not another class');
 denied(409,fn()=>cl_ticket($cfg,$a2,$teacher,$bind($a,'PA_Teacher'),$t+19));
 $event('room_finished',$r,$t+20);
 $event('participant_joined',$r3,$t+20);

@@ -56,6 +56,7 @@ $panel = match ($actor['office'] ?? $actor['role'] ?? '') {
     'student'=>'student-panel.php', 'teacher'=>'teacher-panel.php', 'deputy'=>'deputy-panel.php', 'admin'=>'index.php?view=dashboard', default=>'index.php?view=login',
 };
 $roomPage = $class !== null && $errorMessage === null;
+if ($roomPage) cl_headers(true); // Camera only on the authorized classroom page; no screen capture.
 $pageTitle = $roomPage ? trim($schoolName . ' ' . $classLabel)
     : ($reports !== null ? 'حضور و غیاب کلاس مجازی' : 'کلاس مجازی');
 ?>

@@ -32,30 +32,48 @@
     const persian = new Intl.NumberFormat('fa-IR');
     const put = (node, text) => { if (node.textContent !== text) node.textContent = text; };
     const panels = ['people', 'chat'];
+    const features = {mic:{label:'میکروفون',icons:['mic','mic-off'],source:2},
+        camera:{label:'دوربین',icons:['camera','camera-off'],source:1}, board:{label:'نوشتن روی تخته',icons:['pen']}};
+    const permissionIcons = el('permission-icons')?.content;
+    const cameraSource = lk?.Track.Source.Camera, micSource = lk?.Track.Source.Microphone;
     let active = null, connecting = false, busy = false, polling = false, needsRefresh = false, permanent = false, stopped = false;
     let wanted = true, autoStart = staff, optedIntoTest = false, state = {phase:'idle', ready:null}, chatCursor = 0, seconds = {}, admitted = false;
     let pollTimer, flow = 0, retryAt = 0, attempts = 0;
     let statusAt = 0, inkAt = Infinity, inkRead = 0, inkRetryAt = 0;
-    let peopleKey = '', peopleTimers = new Map(), speakersKey = '', slotKey = null;
+    let peopleKey = '', peopleRows = new Map(), speakersKey = '', slotKey = null;
+    const cameraTiles = new Map();
+    let toastTimer, lastNotice = '', lastNoticeAt = -Infinity;
 
     function note(text = '') {
-        el('notice').textContent = text;
-        el('notice').hidden = !text;
-    }
-    function micNote(text = '') {
-        el('mic-feedback').textContent = text;
-        el('mic-feedback').hidden = !text;
+        const notice = el('notice');
+        const now = performance.now();
+        if (text && text === lastNotice && now - lastNoticeAt < 12000) return;
+        clearTimeout(toastTimer);
+        put(notice, text);
+        notice.hidden = !text;
+        lastNotice = text;
+        lastNoticeAt = now;
+        if (text) toastTimer = setTimeout(() => { notice.hidden = true; put(notice, ''); }, 4000);
     }
     function connected() { return active?.room.state === lk?.ConnectionState.Connected; }
     function hasAccess() { return !!active && connected() && admitted; }
     function scope(link = active) {
         return link ? {lesson:link.lesson, epoch:link.epoch, sid:link.room.localParticipant.sid || ''} : {};
     }
-    function maySpeak(person) {
+    function allows(person, feature) {
+        // A LiveKit grant with no explicit sources isn't a classroom permission.
         const p = person?.permissions;
-        const sources = p?.canPublishSources;
-        // Backend grants a single explicit source; never assume that a missing constraint means permission.
-        return p?.canPublish === true && Array.isArray(sources) && sources.includes(2);
+        return p?.canPublish === true && Array.isArray(p.canPublishSources) && p.canPublishSources.includes(features[feature].source);
+    }
+    const maySpeak = person => allows(person, 'mic');
+    const mayCamera = person => allows(person, 'camera');
+    function granted(feature, identity) {
+        const rule = state.access?.[feature];
+        return (rule?.members?.[identity] ?? rule?.all) === true;
+    }
+    function personName(person) {
+        if (student(person.identity)) return state.profiles?.[person.identity]?.name || 'دانش‌آموز';
+        return person.name || 'مسئول کلاس';
     }
     function duration(value) {
         const n = Math.max(0, Number(value) || 0);
@@ -81,9 +99,10 @@
     }
 
     const board = window.ClassroomBoard(root, {
-        canEdit: () => staff && hasAccess(),
+        canEdit: hasAccess,
+        notice: note,
         async send(action, data, file) {
-            if (!hasAccess() || !staff) throw new PublicError('تخته در حالت انتظار قابل ویرایش نیست.');
+            if (!hasAccess() || (!staff && action !== 'board-ink')) throw new PublicError('ویرایش تخته در این وضعیت مجاز نیست.');
             const link = active, local = scope(link);
             let reply;
             try {
@@ -113,67 +132,167 @@
         finally { busy = false; render(); }
     }
 
-    function personButton(person, label, action, success) {
+    function changeAccess(feature, enabled, identity = null) {
+        return run(async () => {
+            if (!staff || !hasAccess()) return;
+            const link = active, local = scope(link);
+            try {
+                const result = await api('set-access', {...local, feature, enabled, identity});
+                if (active !== link || !hasAccess() || scope().sid !== local.sid) return;
+                flow++; // Discard reads made before this acknowledged permission change.
+                state = {...state, access:result.access};
+            } finally { refresh(); }
+        });
+    }
+    function personButton(identity, feature) {
         const btn = document.createElement('button');
-        btn.type = 'button'; btn.className = 'secondary'; btn.textContent = label;
-        btn.setAttribute('aria-label', `${label}: ${person.name || person.identity}`);
-        btn.addEventListener('click', () => run(async () => {
-            if (!hasAccess()) return;
-            await api(action, {...scope(), identity:person.identity});
-            note(success);
-        }));
+        btn.type = 'button'; btn.className = 'icon-button';
+        btn.dataset.feature = feature;
+        for (const icon of features[feature].icons) {
+            const svg = permissionIcons.querySelector(`.icon-${icon}`);
+            btn.append(svg.cloneNode(true));
+        }
+        btn.addEventListener('click', () => changeAccess(feature, !granted(feature, identity), identity));
         return btn;
+    }
+    function personRow(person, key, label, photo) {
+        const id = person.identity;
+        const li = document.createElement('li'); li.dataset.identity = id;
+        const line = document.createElement('div'); line.className = 'person-line';
+        const name = document.createElement('span'); name.className = 'person-name'; name.dir = 'auto'; name.textContent = label;
+        const avatar = document.createElement('span'); avatar.className = 'person-avatar';
+        avatar.textContent = Array.from(label)[0] || '·'; avatar.setAttribute('aria-hidden', 'true');
+        if (photo) {
+            const img = document.createElement('img'); img.alt = ''; img.decoding = 'async'; img.loading = 'lazy';
+            const url = new URL(root.dataset.content, document.baseURI);
+            for (const [k,v] of Object.entries({...scope(), photo:id})) url.searchParams.set(k,v);
+            img.addEventListener('error', () => img.remove(), {once:true});
+            img.src = url.href;
+            avatar.append(img);
+        }
+        const detail = document.createElement('span'); detail.className = 'person-detail';
+        detail.append(name); line.append(avatar, detail);
+        let timer;
+        if (student(id)) {
+            timer = document.createElement('bdi'); timer.className = 'duration'; timer.dir = 'ltr';
+            timer.setAttribute('aria-label','مدت حضور ثبت‌شده'); detail.append(timer);
+        }
+        if (active.room.localParticipant === person) {
+            li.className = 'person-self';
+            const self = document.createElement('span'); self.className = 'self-tag'; self.textContent = 'شما'; line.append(self);
+        }
+        li.append(line);
+        const controls = {};
+        if (staff) {
+            const box = document.createElement('div'); box.className = 'participant-controls';
+            for (const feature of Object.keys(features)) {
+                if (feature === 'board' && !student(id)) continue;
+                controls[feature] = personButton(id, feature); box.append(controls[feature]);
+            }
+            li.append(box);
+        }
+        return {key, li, timer, controls};
     }
     function renderPeople() {
         const field = el('people');
         if (!hasAccess()) {
             if (peopleKey) field.replaceChildren();
-            peopleKey = ''; peopleTimers.clear();
+            peopleKey = ''; peopleRows.clear();
             put(el('people-count'), '۰');
             return;
         }
-        const local = active.room.localParticipant;
-        const people = [local, ...active.room.remoteParticipants.values()];
+        const room = active.room;
+        const people = [room.localParticipant, ...room.remoteParticipants.values()];
         put(el('people-count'), persian.format(people.length));
-        const key = JSON.stringify(people.map(p => [p.identity,p.name,maySpeak(p)]));
+        const entries = people.map(person => [person.identity, person.sid, personName(person), state.profiles?.[person.identity]?.photo === true]);
+        const key = JSON.stringify(entries);
         if (key !== peopleKey) {
-            peopleKey = key; peopleTimers.clear();
-            field.replaceChildren(...people.map(person => {
-                const li = document.createElement('li');
-                const line = document.createElement('div'); line.className = 'person-line';
-                const name = document.createElement('span'); name.className = 'person-name';
-                const avatar = document.createElement('span'); avatar.className = 'person-avatar';
-                avatar.textContent = Array.from(String(person.name || person.identity))[0] || '·';
-                avatar.setAttribute('aria-hidden', 'true');
-                const allowed = maySpeak(person);
-                name.textContent = (person.name || person.identity) + (allowed ? ' · نوبت صدا' : '');
-                const detail = document.createElement('span'); detail.className = 'person-detail';
-                detail.append(name); line.append(avatar, detail);
-                if (student(person.identity)) {
-                    const timer = document.createElement('bdi'); timer.className = 'duration'; timer.dir = 'ltr';
-                    timer.setAttribute('aria-label','مدت حضور ثبت‌شده');
-                    peopleTimers.set(person.identity, timer); detail.append(timer);
-                }
-                if (local === person) {
-                    li.className = 'person-self';
-                    const self = document.createElement('span'); self.className = 'self-tag'; self.textContent = 'شما';
-                    line.append(self);
-                }
-                li.append(line);
-                if (staff && (!allowed || student(person.identity))) {
-                    const box = document.createElement('div'); box.className = 'participant-controls';
-                    if (!allowed) box.append(personButton(person,'دادن نوبت صدا','give-mic','نوبت داده شد؛ گوینده میکروفون را خودش روشن می‌کند.'));
-                    if (student(person.identity)) {
-                        box.append(personButton(person,'قطع میکروفون','cut-mic','میکروفون این دانش‌آموز قطع شد.'));
-                        box.append(personButton(person,'قطع تصویر','cut-video','مجوز تصویر این دانش‌آموز بسته شد.'));
-                    }
-                    li.append(box);
-                }
-                return li;
-            }));
+            peopleKey = key;
+            const rows = new Map();
+            entries.forEach(([id, sid, label, photo], i) => {
+                const k = JSON.stringify([sid,label,photo]), old = peopleRows.get(id);
+                rows.set(id, old?.key === k ? old : personRow(people[i], k, label, photo));
+            });
+            peopleRows = rows;
+            field.replaceChildren(...Array.from(rows.values(), row => row.li));
         }
-        for (const [id, node] of peopleTimers) put(node, duration(seconds[id] || 0));
-        for (const btn of field.querySelectorAll('button')) btn.disabled = busy;
+        for (const person of people) {
+            const id = person.identity, row = peopleRows.get(id);
+            if (row.timer) put(row.timer, duration(seconds[id] || 0));
+            for (const [feature, btn] of Object.entries(row.controls)) {
+                const on = feature === 'mic' ? maySpeak(person) && person.isMicrophoneEnabled
+                    : feature === 'camera' ? mayCamera(person) && person.isCameraEnabled : false;
+                const enabled = granted(feature, id);
+                const label = `${features[feature].label} · ${personName(person)}`;
+                btn.dataset.granted = String(enabled);
+                btn.dataset.on = String(!!on);
+                btn.setAttribute('aria-pressed', String(enabled));
+                btn.setAttribute('aria-label', label);
+                btn.title = `${enabled ? 'لغو اجازهٔ' : 'دادن اجازهٔ'} ${label}${on ? ' (روشن)' : ''}`;
+                btn.disabled = busy || state.members?.[id] !== person.sid || (feature === 'camera' && !state.cameraCodec && !enabled);
+            }
+        }
+    }
+
+    function stopCamera(link) {
+        link.cameraAttempt++;
+        const track = link.cameraTrack;
+        link.cameraTrack = null;
+        if (!track) return;
+        // End capture immediately, even if signaling is unavailable or permission was revoked mid-publish.
+        track.stop();
+        return link.room.localParticipant.unpublishTrack(track, true).catch(() => {});
+    }
+    function renderCameras() {
+        const strip = el('camera-strip');
+        const cameraPeople = new Map();
+        if (hasAccess() && state.cameraCodec) {
+            const room = active.room;
+            for (const person of [room.localParticipant, ...room.remoteParticipants.values()]) {
+                const pub = person.getTrackPublication(cameraSource);
+                if (!mayCamera(person) || !pub?.track || pub.isMuted || pub.track.kind !== lk.Track.Kind.Video
+                    || (person === room.localParticipant && pub.track !== active.cameraTrack)) continue;
+                cameraPeople.set(person.identity, {track:pub.track, name:personName(person)});
+            }
+        }
+        for (const [id, tile] of cameraTiles) {
+            if (cameraPeople.get(id)?.track === tile.track) continue;
+            tile.track.detach(tile.video); tile.figure.remove(); cameraTiles.delete(id);
+        }
+        for (const [id,{track,name}] of cameraPeople) {
+            let tile = cameraTiles.get(id);
+            if (!tile) {
+                const figure = document.createElement('figure'), caption = document.createElement('figcaption');
+                const video = document.createElement('video');
+                video.autoplay = true; video.playsInline = true; video.muted = true;
+                track.attach(video);
+                figure.append(video, caption); strip.append(figure);
+                tile = {track,video,caption,figure}; cameraTiles.set(id,tile);
+            }
+            put(tile.caption, name);
+        }
+        strip.hidden = !cameraTiles.size;
+    }
+
+    function setAccessMenu(open, restoreFocus = false) {
+        const menu = el('access-menu'), btn = el('toggle-access');
+        menu.hidden = !open;
+        btn.setAttribute('aria-expanded', String(open));
+        if (restoreFocus) btn.focus();
+    }
+    function renderAccessMenu(live) {
+        el('room-permissions').hidden = !live;
+        if (!live) setAccessMenu(false);
+        el('camera-unavailable').hidden = !!state.cameraCodec;
+        for (const feature of Object.keys(features)) {
+            const anyException = Object.keys(state.access?.[feature]?.members || {}).length > 0;
+            const all = granted(feature);
+            const give = el(`all-${feature}-give`), cut = el(`all-${feature}-cut`);
+            give.setAttribute('aria-pressed', String(all && !anyException));
+            cut.setAttribute('aria-pressed', String(!all && !anyException));
+            give.disabled = !live || busy || (all && !anyException) || (feature === 'camera' && !state.cameraCodec);
+            cut.disabled = !live || busy || (!all && !anyException);
+        }
     }
 
     function renderSpeakers() {
@@ -183,7 +302,7 @@
             active.speakers = connected() ? active.speakers.filter(person => person.isSpeaking && person.audioLevel > 0 && person.isMicrophoneEnabled
                 && (person === room.localParticipant || room.remoteParticipants.get(person.identity) === person)) : [];
         }
-        const names = (hasAccess() ? active.speakers : []).map(person => [person.identity, person.name || person.identity]);
+        const names = (hasAccess() ? active.speakers : []).map(person => [person.identity, personName(person)]);
         names.sort((a,b) => a[0].localeCompare(b[0])); // Do not move badges around as levels change.
         const key = names.length ? JSON.stringify(names) : '';
         if (key === speakersKey) return;
@@ -261,7 +380,7 @@
             el('close').title = end;
             el('close').hidden = !state.lesson || phase === 'reserved';
             el('close').disabled = busy || phase === 'closing';
-            el('clear-floor').disabled = !live || busy;
+            renderAccessMenu(live);
         } else el('join').hidden = wanted || permanent;
         put(el('wait-title'), phase === 'paused' ? 'کلاس موقتاً متوقف است' : phase === 'closing' ? 'کلاس در حال پایان است'
             : connectingNow ? 'در حال تأیید ورود…' : staff ? 'در انتظار شروع زنگ' : 'در انتظار ورود دبیر یا مسئول مدرسه');
@@ -281,12 +400,22 @@
         el('microphone').setAttribute('aria-pressed', String(micOn));
         el('microphone').setAttribute('aria-label', micAction);
         el('microphone').title = live && !maySpeak(local) ? 'برای روشن‌کردن میکروفون از دبیر نوبت بگیر' : micAction;
+        const cam = el('camera');
+        const camOn = live && !!active.cameraTrack && !!local.isCameraEnabled && mayCamera(local);
+        const canCamera = live && !!state.cameraCodec && mayCamera(local);
+        const camAction = camOn ? 'خاموش‌کردن دوربین' : 'روشن‌کردن دوربین';
+        cam.hidden = !canCamera;
+        cam.disabled = !canCamera || !!active?.cameraBusy;
+        cam.setAttribute('aria-pressed', String(camOn));
+        cam.setAttribute('aria-label', camAction); cam.title = camAction;
         el('enable-audio').hidden = !live || active.room.canPlaybackAudio;
+        root.dataset.extraControls = live && (staff || canCamera || !el('enable-audio').hidden) ? 'yes' : 'no';
         el('chat-text').disabled = !live || busy;
         el('chat-empty').hidden = chatCursor > 0;
         for (const audio of el('audio-tracks').children) audio.muted = !live;
         renderPeople();
         renderSpeakers();
+        renderCameras();
     }
 
     function clearActivity() {
@@ -295,7 +424,7 @@
             el('chat-text').value = '';
             board.reset();
         }
-        if (admitted && active) active.speakers = [];
+        if (active) { active.speakers = []; stopCamera(active); }
         admitted = false; inkAt = Infinity; inkRetryAt = 0;
         chatCursor = 0; seconds = {};
     }
@@ -303,6 +432,7 @@
         if (!link || active !== link) return;
         const current = scope(link);
         active = null;
+        stopCamera(link);
         clearActivity();
         flow++;
         el('audio-tracks').replaceChildren();
@@ -350,7 +480,7 @@
         try {
             const ticket = await getTicket();
             if (pending !== flow || !wanted || stopped || permanent) { await room.disconnect(); return; }
-            link = {room, lesson:ticket.lesson, epoch:ticket.epoch, speakers:[]};
+            link = {room, lesson:ticket.lesson, epoch:ticket.epoch, speakers:[], cameraAttempt:0, cameraTrack:null, cameraBusy:false};
             active = link;
             flow++; // Ignore status requests made before this transport was installed.
             for (const event of [lk.RoomEvent.ParticipantConnected,lk.RoomEvent.ParticipantDisconnected,lk.RoomEvent.LocalTrackPublished,
@@ -364,15 +494,20 @@
                 renderSpeakers();
             });
             room.on(lk.RoomEvent.TrackSubscribed, (track) => {
-                if (active !== link || track.kind !== lk.Track.Kind.Audio) return;
-                const node = track.attach(); node.muted = !hasAccess(); el('audio-tracks').append(node);
-            });
-            room.on(lk.RoomEvent.TrackUnsubscribed, (track) => track.detach().forEach(node => node.remove()));
-            room.on(lk.RoomEvent.ParticipantPermissionsChanged, (before, person) => {
                 if (active !== link) return;
-                if (person === room.localParticipant && !maySpeak(person)) person.setMicrophoneEnabled(false).catch(() => {});
-                if (!staff && person === room.localParticipant && hasAccess() && before && maySpeak({permissions:before}) !== maySpeak(person)) {
-                    note(maySpeak(person) ? 'نوبت صدا داری؛ اگر آماده‌ای، خودت میکروفون را روشن کن.' : 'نوبت صدا گرفته شد؛ هنوز می‌توانی گوش بدهی.');
+                if (track.kind === lk.Track.Kind.Audio && track.source === micSource) {
+                    const node = track.attach(); node.muted = !hasAccess(); el('audio-tracks').append(node);
+                } else if (track.source === cameraSource) renderCameras();
+            });
+            room.on(lk.RoomEvent.TrackUnsubscribed, track => {
+                if (track.kind === lk.Track.Kind.Audio) track.detach().forEach(node => node.remove());
+                if (active === link && track.source === cameraSource) renderCameras();
+            });
+            room.on(lk.RoomEvent.ParticipantPermissionsChanged, (_before, person) => {
+                if (active !== link) return;
+                if (person === room.localParticipant) {
+                    if (!maySpeak(person) && person.isMicrophoneEnabled) person.setMicrophoneEnabled(false).catch(() => {});
+                    if (!mayCamera(person)) stopCamera(link);
                 }
                 render();
             });
@@ -404,7 +539,6 @@
             });
             await room.connect(ticket.url, ticket.token);
             attempts = 0; retryAt = 0;
-            if (active === link) { note(); micNote(); }
         } catch (error) {
             if (link && active === link) release(link);
             else await room.disconnect().catch(() => {});
@@ -521,14 +655,44 @@
         const link = active;
         const local = link?.room.localParticipant;
         if (!hasAccess() || !maySpeak(local)) return;
-        micNote();
         const enabling = !local.isMicrophoneEnabled;
         try {
             await local.setMicrophoneEnabled(enabling);
-            if (link !== active || !hasAccess()) { await local.setMicrophoneEnabled(false).catch(() => {}); return; }
-            if (local.isMicrophoneEnabled !== enabling) micNote(microphoneFailure(local,enabling));
-        } catch (error) { micNote(microphoneFailure(local,enabling,error)); }
+            if (link !== active || !hasAccess() || !maySpeak(local)) { await local.setMicrophoneEnabled(false).catch(() => {}); return; }
+            if (local.isMicrophoneEnabled !== enabling) note(microphoneFailure(local,enabling));
+        } catch (error) { if (active === link && hasAccess()) note(microphoneFailure(local,enabling,error)); }
     }));
+    el('camera').addEventListener('click', async () => {
+        const link = active, codec = state.cameraCodec;
+        const local = link?.room.localParticipant;
+        if (!hasAccess() || !codec || !mayCamera(local) || link.cameraBusy) return;
+        link.cameraBusy = true;
+        const attempt = ++link.cameraAttempt;
+        const valid = () => link === active && hasAccess() && state.cameraCodec === codec && mayCamera(local) && link.cameraAttempt === attempt;
+        render();
+        try {
+            if (link.cameraTrack) { await stopCamera(link); return; }
+            // This click is the only path to getUserMedia for video. A grant never calls it.
+            const track = await lk.createLocalVideoTrack({facingMode:'user',resolution:{width:640,height:360,frameRate:15}});
+            if (!valid()) { track.stop(); return; }
+            link.cameraTrack = track;
+            track.mediaStreamTrack.addEventListener('ended', () => {
+                if (link.cameraTrack === track) { stopCamera(link); if (active === link) render(); }
+            }, {once:true});
+            await local.publishTrack(track, {source:cameraSource, videoCodec:codec, simulcast:false, backupCodec:false,
+                videoEncoding:{maxBitrate:260000,maxFramerate:15}});
+        } catch (error) {
+            if (valid()) {
+                stopCamera(link);
+                note(['NotAllowedError','PermissionDeniedError','SecurityError'].includes(error?.name)
+                    ? 'مرورگر اجازهٔ استفاده از دوربین را نداده است. (CAMERA-ACCESS)'
+                    : 'دوربین روشن نشد؛ دستگاه یا اتصال رسانه را بررسی کن. (CAMERA-START)');
+            }
+        } finally {
+            link.cameraBusy = false;
+            if (link === active) render();
+        }
+    });
     el('enable-audio').addEventListener('click', () => run(async () => {
         if (!hasAccess()) return;
         try { await active.room.startAudio(); }
@@ -561,10 +725,17 @@
             retryAt = 0;
             await enter(() => api('open',{slot}), true);
         }));
-        el('clear-floor').addEventListener('click', () => run(async () => {
-            if (!hasAccess()) return;
-            await api('cut-all-mics',scope()); note('نوبت صدا از همه گرفته شد.');
-        }));
+        el('toggle-access').addEventListener('click', () => setAccessMenu(el('access-menu').hidden));
+        document.addEventListener('click', event => {
+            if (!el('access-menu').hidden && !el('room-permissions').contains(event.target)) setAccessMenu(false);
+        });
+        document.addEventListener('keydown', event => {
+            if (event.key === 'Escape' && !el('access-menu').hidden) { event.preventDefault(); setAccessMenu(false, true); }
+        });
+        for (const feature of Object.keys(features)) {
+            el(`all-${feature}-give`).addEventListener('click', () => changeAccess(feature,true));
+            el(`all-${feature}-cut`).addEventListener('click', () => changeAccess(feature,false));
+        }
         el('close').addEventListener('click', () => {
             const test = state.slot === fridaySlot;
             if (!state.lesson || !window.confirm(test ? 'اتاق آزمایشی برای همه بسته شود؟ تا پایان جمعه می‌توان دوباره آن را باز کرد.' : 'کلاس برای همه پایان یابد و گزارش حضور ثبت شود؟')) return;

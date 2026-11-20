@@ -2,7 +2,7 @@
 declare(strict_types=1);
 
 // School plugin runtime and gateway. Settings are exposed by the reviewed host overlay.
-const MPM_VERSION = '0.1.11';
+const MPM_VERSION = '0.1.12';
 const MPM_CLASSROOM_NATIVE = '0.4.0';
 const MPM_CLASSROOM_PUPIL_TRIAL = '0.4.3';
 const MPM_REGISTRY = 'mtg_plugin_registry';
@@ -22,6 +22,7 @@ const MPM_CATALOG = [
         '0.4.3' => '7a6c7288400c9cd5f9ba563e2b845564785d689a181021b309455eafa52199e3',
         '0.4.4' => 'b4e8cf0a9a1887b00af5a4685b1b150c1ba8ab1c33704d0c593f2b8b5b31ca6a',
         '0.4.5' => '549980ae530938ce5d1544dbe790e5e26f9d965c53b5d04c30b0716d358fb96a',
+        '0.4.6' => '02ccccc105d26560d3e237a3314b635a6d311fc97287ebc7305dbc691a2a1a80',
     ],
 ];
 
@@ -858,6 +859,7 @@ function mpm_call(PDO $db, array $site, string $dir, array $row, array $manifest
     $table = mpm_data_table($row['slug']);
     $GLOBALS['MTAG_PLUGIN_CONTEXT'] = [
         'pdo' => $db, 'base' => 'school-plugins.php?plugin=' . rawurlencode($row['slug']), 'site_base' => '../',
+        'site_root' => mpm_host_root(),
         'store' => !empty($manifest['store']) ? mpm_check_store($db, $row) : null,
         'plugin_dir' => mpm_path($dir, $row), 'job_mode'=>$jobMode,
         'school_bot' => static function (string $provider) use ($db, $site): ?array {

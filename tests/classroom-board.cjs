@@ -8,7 +8,7 @@ const script = fs.readFileSync(path.join(__dirname, '../school-addon/upload/onli
 
 // The real board, with DOM/canvas and the network acknowledgement stubbed.
 function fixture({staff=true,reducedMotion=false}={}) {
-    const elements = new Map(), timers = new Map(), frames = new Map(), calls = [];
+    const elements = new Map(), timers = new Map(), frames = new Map(), calls = [], notices = [];
     let time = 0, seq = 0, access = staff, response, points;
     const display = { strokes:[], paths:[] };
     const context = {
@@ -20,6 +20,7 @@ function fixture({staff=true,reducedMotion=false}={}) {
     };
     const rect = { left:0,top:0,width:1000,height:500 };
     function el(id) {
+        if (!staff && ['eraser','eraser-tip','board-file','board-doc','board-upload','board-clear','page-prev','page-next','page-go','page-number'].includes(id)) return null;
         if (!elements.has(id)) {
             const classes = new Set(), events = {};
             elements.set(id, {
@@ -42,7 +43,7 @@ function fixture({staff=true,reducedMotion=false}={}) {
     });
     const root = el('classroom'); root.dataset.moderator=staff ? 'yes' : 'no';
     const board = window.ClassroomBoard(root, {
-        canEdit:()=>access,
+        canEdit:()=>access, notice:text=>notices.push(text),
         send(action,data){
             const call={action,...structuredClone(data)};
             calls.push(call);
@@ -63,7 +64,7 @@ function fixture({staff=true,reducedMotion=false}={}) {
         const planned=[...frames.values()]; frames.clear();
         for (const callback of planned) callback(time);
     }
-    return {el,board,sync,display,calls,flush,frame,delay:s=>response=s, access:v=>access=v, draw(type,x,y,other){el('board-ink').fire(type,{clientX:x,clientY:y,...other});}};
+    return {el,board,sync,display,calls,notices,flush,frame,delay:s=>response=s, access:v=>access=v, draw(type,x,y,other){el('board-ink').fire(type,{clientX:x,clientY:y,...other});}};
 }
 const drawOp = (id, points, color='#0099ff') => ({tool:'pen',size:4,id,points,color});
 
@@ -178,4 +179,32 @@ test('no playback on reset pages, catch-up or reduced motion; old playback canno
     const accessible=fixture({staff:false,reducedMotion:true}); accessible.sync();
     accessible.sync([digit],{moving:true,cursor:6});
     assert.deepEqual(accessible.display.paths.at(-1).at(-1),px(accessible,digit.points.at(-1)));
+});
+
+
+test('a granted pupil can write only with the pen; revocation discards drafts but keeps confirmed ink', async()=>{
+    const f = fixture({staff:false}); f.access(true); f.sync();
+    assert.equal(f.el('ink-tools').hidden,true);
+    assert.equal(f.el('board-footer').hidden,true);
+    f.draw('pointerdown',100,100); await f.flush();
+    assert.deepEqual(f.calls,[]);
+    f.sync([],{write:true});
+    assert.equal(f.el('ink-tools').hidden,false);
+    assert.equal(f.el('pen').disabled,false);
+    assert.equal(f.el('eraser'),null);
+    assert.equal(f.el('board-clear'),null);
+    f.draw('pointerdown',100,100,{pointerType:'touch'}); f.draw('pointerup',181,202,{pointerType:'touch'});
+    await f.flush();
+    assert.equal(f.calls.length,1);
+    assert.deepEqual(f.calls[0].strokes[0].points,[[1000,2000],[1810,4040]]);
+    f.sync(f.calls[0].strokes,{write:true,cursor:1});
+    f.draw('pointerdown',250,260);
+    assert.equal(f.display.paths.length,2);
+    f.sync([],{write:false,cursor:1});
+    await f.flush();
+    assert.equal(f.el('ink-tools').hidden,true);
+    assert.equal(f.calls.length,1);
+    assert.equal(f.display.paths.length,1);
+    f.sync([],{write:true,cursor:1}); await f.flush();
+    assert.equal(f.calls.length,1, 'previous drafts are not sent if the teacher grants again');
 });

@@ -54,10 +54,10 @@ function cl_activity_sync(ClassroomStore $s, array $lesson, array $actor, array 
     $n = cl_id($input['chat'] ?? null);
     $chat = $n !== $state['messages'] ? array_values($s->rows('chat:' . $id, 40, cl_seq($n))) : [];
     return ['chat'=>$chat, 'chatMore'=>($chat ? $chat[array_key_last($chat)]['n'] : $n) < $state['messages'],
-        'board'=>cl_board_view($s, $id, $actor, $input, $state)];
+        'board'=>cl_board_view($s, $id, $actor, $input, $state, cl_may_write($lesson, $actor))];
 }
 
-function cl_board_view(ClassroomStore $s, string $id, array $actor, array $input, array $state): array
+function cl_board_view(ClassroomStore $s, string $id, array $actor, array $input, array $state, bool $write = false): array
 {
     $layer = cl_layer($s, $id, $state);
     $clock = $layer['clock'] ?? $layer['seq']; // Older rows are one tick each.
@@ -83,8 +83,33 @@ function cl_board_view(ClassroomStore $s, string $id, array $actor, array $input
     }
     $doc = $state['doc'] === null ? null : $state['docs'][$state['doc']];
     return ['doc'=>$doc, 'page'=>$state['page'], 'rev'=>$state['rev'], 'cursor'=>$cursor, 'more'=>$cursor < $clock,
-        'reset'=>$reset, 'ops'=>$ops, 'moving'=>($layer['changed_at'] ?? 0) > microtime(true) - 1.6,
+        'reset'=>$reset, 'write'=>$write, 'ops'=>$ops, 'moving'=>($layer['changed_at'] ?? 0) > microtime(true) - 1.6,
         'docs'=>cl_is_staff($actor) ? array_values($state['docs']) : []];
+}
+
+function cl_may_write(array $lesson, array $actor): bool
+{
+    return cl_is_staff($actor) || cl_access_enabled($lesson, 'board', $actor['identity']);
+}
+
+function cl_ink_input(array $lesson, array $actor, array $body): array
+{
+    if (!cl_may_write($lesson, $actor)) throw new ClassroomError(403, 'نوشتن روی تخته هنوز برای تو فعال نیست.');
+    if (cl_is_staff($actor)) return $body;
+    // Pupil access is a pen, not an eraser, page selector or file manager.
+    if (!is_array($body['strokes'] ?? null) || !array_is_list($body['strokes']) || count($body['strokes']) > CL_INK_BATCH) {
+        throw new ClassroomError(400, 'مسیر قلم معتبر نیست.');
+    }
+    foreach ($body['strokes'] as &$stroke) {
+        if (!is_array($stroke) || ($stroke['tool'] ?? null) !== 'pen') throw new ClassroomError(403, 'این دسترسی فقط برای نوشتن است.');
+        if (!is_string($stroke['id'] ?? null) || !preg_match('/^[a-f0-9]{32}$/D', $stroke['id'])) {
+            throw new ClassroomError(400, 'شناسهٔ خط معتبر نیست.');
+        }
+        // Isolate pupil gesture IDs so they cannot extend or merge into someone else's stroke.
+        $stroke['id'] = substr(hash('sha256', $lesson['id'] . ':' . $actor['identity'] . ':' . $stroke['id']), 0, 32);
+    }
+    unset($stroke);
+    return $body;
 }
 
 function cl_board_action(ClassroomStore $s, array $lesson, array $input, string $action): array

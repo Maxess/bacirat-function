@@ -9,6 +9,9 @@ function cl_room_icon(string $name): string
         'clock' => '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
         'mic' => '<rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11v1a7 7 0 0 0 14 0v-1m-7 8v3m-3 0h6"/>',
         'mic-off' => '<path d="m3 3 18 18M9 9v3a3 3 0 0 0 5 2m1-4V6a3 3 0 0 0-5-2M5 11v1a7 7 0 0 0 11 5m3-6v1a7 7 0 0 1-.5 2.6M12 19v3m-3 0h6"/>',
+        'camera' => '<rect x="3" y="6" width="13" height="12" rx="2"/><path d="m16 10 5-3v10l-5-3"/>',
+        'camera-off' => '<path d="m3 3 18 18M3 7v9a2 2 0 0 0 2 2h11M9 6h5a2 2 0 0 1 2 2v2l5-3v9"/>',
+        'menu' => '<path d="M4 6h16M4 12h16M4 18h16"/>',
         'sound' => '<path d="M11 5 6 9H3v6h3l5 4V5Zm4.5 4a4.2 4.2 0 0 1 0 6m3-9a8 8 0 0 1 0 12"/>',
         'people' => '<circle cx="9" cy="7.5" r="3"/><path d="M2.5 20v-2a4 4 0 0 1 4-4h5a4 4 0 0 1 4 4v2M16 5a3 3 0 0 1 0 6m2 3a4 4 0 0 1 3.5 4v2"/>',
         'chat' => '<path d="M21 11.5A8.5 8.5 0 0 1 12.5 20H5l1.3-3A8.5 8.5 0 1 1 21 11.5ZM8 10h8m-8 4h5"/>',
@@ -46,6 +49,9 @@ function cl_room_icon(string $name): string
             <button type="button" id="microphone" class="icon-button mic-toggle" aria-pressed="false" aria-label="روشن‌کردن میکروفون" title="روشن‌کردن میکروفون" disabled>
                 <?= cl_room_icon('mic-off') . cl_room_icon('mic') ?>
             </button>
+            <button type="button" id="camera" class="icon-button camera-toggle" aria-pressed="false" aria-label="روشن‌کردن دوربین" title="روشن‌کردن دوربین" hidden>
+                <?= cl_room_icon('camera-off') . cl_room_icon('camera') ?>
+            </button>
             <button type="button" id="enable-audio" class="icon-button audio-toggle" aria-label="فعال‌کردن پخش صدا" title="فعال‌کردن پخش صدا" hidden><?= cl_room_icon('sound') ?></button>
             <button type="button" id="toggle-people" class="icon-button" aria-label="حاضران" aria-controls="people-panel" aria-expanded="true" title="نمایش یا بستن فهرست حاضران" disabled><?= cl_room_icon('people') ?></button>
             <button type="button" id="toggle-chat" class="icon-button" aria-label="گفت‌وگوی کلاس" aria-controls="chat-panel" aria-expanded="true" title="نمایش یا بستن گفت‌وگو" disabled><?= cl_room_icon('chat') ?></button>
@@ -58,6 +64,22 @@ function cl_room_icon(string $name): string
             </div>
             <?php if ($staff): ?>
             <button type="button" id="close" class="icon-button finish-button" title="پایان کلاس برای همه" aria-label="پایان کلاس برای همه" hidden><?= cl_room_icon('finish') ?></button>
+            <div class="room-permissions" id="room-permissions" hidden>
+                <button type="button" class="icon-button" id="toggle-access" aria-label="دسترسی‌های کلاس" title="دسترسی‌های کلاس" aria-expanded="false" aria-controls="access-menu"><?= cl_room_icon('menu') ?></button>
+                <div class="access-menu" id="access-menu" role="group" aria-labelledby="access-title" hidden>
+                    <p id="access-title">دسترسی‌های این جلسه</p>
+                    <?php foreach (['mic'=>['mic','میکروفون'], 'camera'=>['camera','دوربین'], 'board'=>['pen','نوشتن روی تخته']] as $key=>[$icon,$label]): ?>
+                    <div class="access-row">
+                        <span class="access-name"><?= cl_room_icon($icon) ?> <?= cl_html($label) ?></span>
+                        <button type="button" class="subtle-button" id="all-<?= $key ?>-give" aria-label="دادن اجازهٔ <?= cl_html($label) ?> به همه">اجازه به همه</button>
+                        <button type="button" class="subtle-button" id="all-<?= $key ?>-cut" aria-label="لغو اجازهٔ <?= cl_html($label) ?> برای همه">لغو برای همه</button>
+                    </div>
+                    <?php endforeach; ?>
+                    <p class="access-hint" id="camera-unavailable" hidden>رسانهٔ این اتاق فعلاً فقط صدا دارد.</p>
+                    <p class="access-hint">میکروفون و دوربین را هر نفر خودش روشن می‌کند.</p>
+                </div>
+            </div>
+            <template id="permission-icons"><?= cl_room_icon('mic') . cl_room_icon('mic-off') . cl_room_icon('camera') . cl_room_icon('camera-off') . cl_room_icon('pen') ?></template>
             <?php endif; ?>
         </div>
     </header>
@@ -70,8 +92,7 @@ function cl_room_icon(string $name): string
         <button type="button" id="open" disabled>شروع زنگ</button>
     </div>
     <?php endif; ?>
-    <p id="notice" role="status" class="notice" hidden></p>
-    <p id="mic-feedback" role="status" class="notice" hidden></p>
+    <p id="notice" role="status" class="room-toast" hidden></p>
     <section class="waiting board-grid" id="waiting" aria-labelledby="wait-title">
         <div class="waiting-copy">
             <span class="waiting-icon"><?= cl_room_icon('clock') ?></span>
@@ -88,15 +109,15 @@ function cl_room_icon(string $name): string
         <section class="board-card" id="board" aria-label="تختهٔ کلاس">
             <div class="board-toolbar">
                 <div class="board-heading"><?= cl_room_icon('board') ?><h2>تختهٔ کلاس</h2></div>
-                <?php if ($staff): ?>
-                <div class="ink-tools" role="group" aria-label="ابزار نوشتن">
+                <div class="ink-tools" id="ink-tools" role="group" aria-label="ابزار نوشتن" hidden>
                     <button type="button" class="icon-button" id="pen" aria-pressed="true" title="قلم" aria-label="قلم"><?= cl_room_icon('pen') ?></button>
-                    <button type="button" class="icon-button" id="eraser" aria-pressed="false" title="پاک‌کن خط کامل" aria-label="پاک‌کن خط کامل"><?= cl_room_icon('erase') ?></button>
+                    <?php if ($staff): ?><button type="button" class="icon-button" id="eraser" aria-pressed="false" title="پاک‌کن خط کامل" aria-label="پاک‌کن خط کامل"><?= cl_room_icon('erase') ?></button><?php endif; ?>
                     <button type="button" class="icon-button" id="pan" aria-pressed="false" title="پیمایش تخته" aria-label="پیمایش تخته"><?= cl_room_icon('pan') ?></button>
                     <label class="color-control" title="رنگ قلم"><span class="sr-only">رنگ قلم</span><input type="color" id="ink-color" value="#278bc7"></label>
                     <label class="size-control" title="ضخامت قلم"><span class="sr-only">ضخامت قلم</span><input type="range" id="ink-size" min="1" max="36" value="4"></label>
-                    <button type="button" class="icon-button" id="board-clear" title="پاک‌کردن همهٔ نوشته‌های این صفحه" aria-label="پاک‌کردن همهٔ نوشته‌های این صفحه"><?= cl_room_icon('trash') ?></button>
+                    <?php if ($staff): ?><button type="button" class="icon-button" id="board-clear" title="پاک‌کردن همهٔ نوشته‌های این صفحه" aria-label="پاک‌کردن همهٔ نوشته‌های این صفحه"><?= cl_room_icon('trash') ?></button><?php endif; ?>
                 </div>
+                <?php if ($staff): ?>
                 <div class="page-tools" role="group" aria-label="صفحه‌های فایل">
                     <button type="button" class="icon-button" id="page-prev" aria-label="صفحهٔ قبلی" title="صفحهٔ قبلی" disabled><?= cl_room_icon('prev') ?></button>
                     <label><span class="sr-only">شمارهٔ صفحه</span><input type="number" id="page-number" min="1" value="1" dir="ltr" disabled></label>
@@ -105,6 +126,12 @@ function cl_room_icon(string $name): string
                 </div>
                 <button type="button" class="icon-button file-toggle" id="toggle-files" aria-controls="board-files" aria-expanded="false" title="فایل‌های تخته"><?= cl_room_icon('upload') ?><span>فایل</span></button>
                 <?php endif; ?>
+                <div class="view-tools" role="group" aria-label="اندازهٔ نمایش تخته">
+                    <button type="button" id="board-zoom-out" class="icon-button" aria-label="کوچک‌نمایی تخته" title="کوچک‌نمایی"><?= cl_room_icon('minus') ?></button>
+                    <button type="button" id="board-zoom" class="zoom-value" dir="ltr" aria-label="بازنشانی بزرگ‌نمایی به ۱۰۰ درصد" title="بازنشانی بزرگ‌نمایی">۱۰۰٪</button>
+                    <button type="button" id="board-zoom-in" class="icon-button" aria-label="بزرگ‌نمایی تخته" title="بزرگ‌نمایی"><?= cl_room_icon('plus') ?></button>
+                    <button type="button" id="board-expand" class="icon-button" aria-label="نمای بزرگ تخته" aria-pressed="false" title="نمای بزرگ تخته"><?= cl_room_icon('expand') . cl_room_icon('shrink') ?></button>
+                </div>
             </div>
             <?php if ($staff): ?>
             <div class="board-files" id="board-files" hidden>
@@ -115,35 +142,28 @@ function cl_room_icon(string $name): string
                 <label>زمینهٔ تخته <select id="board-doc"><option value="">تختهٔ خالی</option></select></label>
             </div>
             <?php endif; ?>
-            <p id="board-note" class="notice" role="status" hidden></p>
             <div class="board-workspace">
                 <div id="board-scroll" class="board-scroll board-grid" tabindex="0" aria-label="نمای تخته؛ برای دیدن قسمت‌های بزرگ‌نمایی‌شده پیمایش کن">
-                    <div class="board-bed"><div id="board-stage" class="board-stage<?= $staff ? ' editable' : '' ?>">
+                    <div class="board-bed"><div id="board-stage" class="board-stage">
                         <canvas id="board-paper" aria-label="صفحهٔ فایل یا تصویر تخته"></canvas>
                         <canvas id="board-ink" aria-label="نوشته‌های روی تخته"></canvas>
                         <?php if ($staff): ?><span id="eraser-tip" class="eraser-tip" aria-hidden="true" hidden></span><?php endif; ?>
                     </div></div>
                 </div>
             </div>
-            <div class="board-footer">
-                <p class="board-caption" id="board-caption">تختهٔ آزاد</p>
-                <div class="view-tools" role="group" aria-label="اندازهٔ نمایش تخته">
-                    <button type="button" id="board-zoom-out" class="icon-button" aria-label="کوچک‌نمایی تخته" title="کوچک‌نمایی"><?= cl_room_icon('minus') ?></button>
-                    <button type="button" id="board-zoom" class="zoom-value" dir="ltr" aria-label="بازنشانی بزرگ‌نمایی به ۱۰۰ درصد" title="بازنشانی بزرگ‌نمایی">۱۰۰٪</button>
-                    <button type="button" id="board-zoom-in" class="icon-button" aria-label="بزرگ‌نمایی تخته" title="بزرگ‌نمایی"><?= cl_room_icon('plus') ?></button>
-                    <button type="button" id="board-expand" class="icon-button" aria-label="نمای بزرگ تخته" aria-pressed="false" title="نمای بزرگ تخته"><?= cl_room_icon('expand') . cl_room_icon('shrink') ?></button>
-                </div>
+            <div class="board-footer" id="board-footer" hidden>
+                <bdi class="board-page" id="board-page-label" dir="ltr" aria-label="شمارهٔ صفحهٔ تخته"></bdi>
             </div>
         </section>
         <section class="speaker-strip" id="speaker-strip" aria-label="در حال صحبت" hidden>
             <?= cl_room_icon('mic') ?>
             <ul id="speakers" class="speakers" role="list"></ul>
         </section>
+        <section class="camera-strip" id="camera-strip" aria-label="دوربین‌های روشن" hidden></section>
         <div class="room-side">
             <section class="room-panel" id="people-panel" aria-labelledby="people-title">
                 <div class="room-panel-head">
                     <h2 id="people-title"><?= cl_room_icon('people') ?> حاضران <bdi id="people-count" class="count-chip">۰</bdi></h2>
-                    <?php if ($staff): ?><button type="button" id="clear-floor" class="subtle-button">گرفتن نوبت از همه</button><?php endif; ?>
                 </div>
                 <ul id="people" class="people"></ul>
             </section>

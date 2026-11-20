@@ -3,7 +3,7 @@
 
 LiveKit OSS refreshes tokens when changing permissions. Never admit a token
 that can publish: a new connection must start as a listener. The room service
-may grant the microphone on the established connection after admission.
+may grant specific sources on the established connection after admission.
 """
 import base64
 import hashlib

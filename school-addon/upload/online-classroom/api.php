@@ -73,7 +73,12 @@ cl_json_reply(static function (): array {
                 'resumable'=>$ready && !$expired && $lesson['phase'] === 'paused' && $lesson['room'] === null];
             // A paused or reconnecting pupil can still see their own last verified total, not the room activity.
             if ($actor['role'] === 'student') $result['attendance'] = $lesson['seconds'][$actor['identity']] ?? 0;
-            if ($allowed) $result += ['seconds'=>$lesson['seconds']] + cl_activity_sync($s, $lesson, $actor, $body);
+            if ($allowed) {
+                $result += ['seconds'=>$lesson['seconds'], 'profiles'=>array_intersect_key($lesson['profiles'] ?? [], $lesson['seen']),
+                    'cameraCodec'=>$lesson['camera_codec'] ?? null] + cl_activity_sync($s, $lesson, $actor, $body);
+                if (cl_is_staff($actor)) $result += ['access'=>$lesson['access'] ?? [], 'members'=>$lesson['seen'],
+                    'mediaPending'=>($lesson['media_pending'] ?? false) === true];
+            }
             return $result;
         }
         if ($lesson && ($lesson['year'] !== $class['year'] || !cl_can_lesson($lesson, $actor))) {
@@ -105,24 +110,17 @@ cl_json_reply(static function (): array {
         $lesson = cl_check_live($cfg, $lesson, $actor, $body, $now);
         if ($action === 'board-sync') {
             // Drawing latency is independent of the slower presence/attendance poll.
-            return ['board'=>cl_board_view($s, $lesson['id'], $actor, $body, cl_activity($s, $lesson['id']))];
+            return ['board'=>cl_board_view($s, $lesson['id'], $actor, $body, cl_activity($s, $lesson['id']), cl_may_write($lesson, $actor))];
         }
         if ($action === 'chat') {
             cl_chat($s, $lesson, $actor, $body['text'] ?? null, $now);
             return [];
         }
+        if ($action === 'board-ink') return cl_board_action($s, $lesson, cl_ink_input($lesson, $actor, $body), $action);
         if (!cl_is_staff($actor)) throw new ClassroomError(403, 'این عملیات فقط برای دبیر یا مسئول مجاز است.');
-        if (in_array($action, CL_MEDIA_ACTIONS, true)) {
-            $target = cl_media_target($action, $body['identity'] ?? null);
-            if ($target !== null && !isset($lesson['seen'][$target])) throw new ClassroomError(409, 'ورود شرکت‌کننده هنوز تأیید نشده است.');
-            cl_control_media($lesson['room'], $action, $target, static fn($method, $data) => $rpc($method, $lesson['room'], $data));
-        } elseif ($action === 'upload' && $isUpload) {
-            return cl_upload($s, $lesson, $body, $_FILES['file'] ?? []);
-        } elseif (in_array($action, ['board-page','board-clear','board-ink'], true)) {
-            return cl_board_action($s, $lesson, $body, $action);
-        } else {
-            throw new ClassroomError(400, 'عملیات شناخته نشد.');
-        }
-        return [];
+        if ($action === 'set-access') return cl_set_access($s, $lesson, $actor, $body, $now, $rpc);
+        if ($action === 'upload' && $isUpload) return cl_upload($s, $lesson, $body, $_FILES['file'] ?? []);
+        if (in_array($action, ['board-page','board-clear'], true)) return cl_board_action($s, $lesson, $body, $action);
+        throw new ClassroomError(400, 'عملیات شناخته نشد.');
     });
 });

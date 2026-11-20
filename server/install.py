@@ -77,7 +77,8 @@ def write_private(file, content, mode=0o640, gid=0):
         out.write(content)
 
 
-def engine_config(ip, api_key, secret):
+def engine_config(ip, api_key, secret, *, camera=True):
+    video = '    - mime: video/VP8\n' if camera else ''
     return f'''port: 7880
 bind_addresses: [127.0.0.1]
 rtc:
@@ -92,7 +93,7 @@ room:
   departure_timeout: 20
   enabled_codecs:
     - mime: audio/opus
-turn:
+{video}turn:
   enabled: false
 keys:
   "{api_key}": "{secret}"
@@ -169,8 +170,9 @@ WantedBy=multi-user.target
 '''
 
 
-def sfu_unit_config():
-    return unit('School classroom LiveKit audio SFU', f'{APP}/livekit-server --config {CFG}/livekit.yaml')
+def sfu_unit_config(*, legacy=False):
+    description = 'School classroom LiveKit audio SFU' if legacy else 'School classroom LiveKit SFU'
+    return unit(description, f'{APP}/livekit-server --config {CFG}/livekit.yaml')
 
 
 def webhook_url(origin, path):
@@ -189,17 +191,19 @@ api:
 '''
 
 
-def registered_config(current, deployment, path):
-    """Only update the exact shipped configuration, not an arbitrary or shared YAML file."""
+def installed_layout(current, deployment):
+    """Recognize only the exact stock audio or camera layout, including a managed webhook if present."""
     ip = re.search(r'^  node_ip: ([0-9.]+)$', current, re.MULTILINE)
     if not ip:
         raise ValueError('LiveKit configuration is not from this pilot installer; use the manual guide')
-    base = engine_config(str(ipaddress.IPv4Address(ip[1])), deployment['api_key'], deployment['api_secret'])
-    previous_path = ''
-    if current != base:
+    ip = str(ipaddress.IPv4Address(ip[1]))
+    for camera in (False, True):
+        base = engine_config(ip, deployment['api_key'], deployment['api_secret'], camera=camera)
+        if current == base:
+            return ip, camera, None
         if not current.startswith(base + WEBHOOK_MARKER + '\n'):
-            raise ValueError('Existing/custom LiveKit configuration was left unchanged; use the manual guide')
-        # Recognize exactly an earlier block of ours on the same configured test origin.
+            continue
+        # A block edited by hand or pointing to another site must never be overwritten.
         previous = re.search(r"^    - '(https://[^'\n]+)'$", current[len(base):], re.MULTILINE)
         prefix = deployment['school_origin']
         if not previous or not previous[1].startswith(prefix + '/') or not previous[1].endswith(EVENT_ROUTE):
@@ -211,8 +215,23 @@ def registered_config(current, deployment, path):
             raise ValueError('Unrecognized managed webhook block; no change made') from error
         if current != base + native_webhook_block(deployment['api_key'], old_url):
             raise ValueError('The managed webhook block was edited; no change made')
-    url = webhook_url(deployment['school_origin'], previous_path if path is None else path)
+        return ip, camera, previous_path
+    raise ValueError('Existing/custom LiveKit configuration was left unchanged; use the manual guide')
+
+
+def registered_config(current, deployment, path):
+    ip, camera, previous_path = installed_layout(current, deployment)
+    base = engine_config(ip, deployment['api_key'], deployment['api_secret'], camera=camera)
+    url = webhook_url(deployment['school_origin'], (previous_path or '') if path is None else path)
     return base + native_webhook_block(deployment['api_key'], url), url
+
+
+def camera_config(current, deployment):
+    ip, camera, _ = installed_layout(current, deployment)
+    if camera:
+        return current
+    audio = engine_config(ip, deployment['api_key'], deployment['api_secret'], camera=False)
+    return engine_config(ip, deployment['api_key'], deployment['api_secret']) + current[len(audio):]
 
 
 @contextlib.contextmanager
@@ -227,7 +246,7 @@ def locked_config(exclusive):
         try:
             fcntl.flock(fd, (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB)
         except BlockingIOError as error:
-            raise ValueError('Another webhook setup is in progress; try again later') from error
+            raise ValueError('Another media setup is in progress; try again later') from error
         yield
     finally:
         os.close(fd)
@@ -335,7 +354,7 @@ def local_rooms(deployment):
 
 def check_restart_target(deployment):
     service_file = SYSTEMD / SFU_SERVICE
-    if read_pilot_file(service_file, private=False)[0] != sfu_unit_config():
+    if read_pilot_file(service_file, private=False)[0] not in (sfu_unit_config(), sfu_unit_config(legacy=True)):
         raise ValueError('This is not the pilot systemd unit; automatic restart refused')
     values = subprocess.run(['systemctl', 'show', SFU_SERVICE, '--all',
                              '--property=FragmentPath,DropInPaths,ActiveState,NeedDaemonReload'],
@@ -367,46 +386,65 @@ def restart_pilot(deployment):
             time.sleep(0.4)
 
 
-def require_webhook_sudo():
+def require_media_sudo():
     if os.geteuid() != 0 or platform.system() != 'Linux':
-        raise ValueError('Run webhook setup locally on the test media VPS with sudo')
+        raise ValueError('Run media setup locally on the test media VPS with sudo')
+
+
+def apply_pilot_change(path, before, wanted, info, deployment, restart, change):
+    changed = before != wanted
+    if restart:
+        check_restart_target(deployment)
+    if changed:
+        backup = CFG / (f'livekit.yaml.before-{change}-' + secrets.token_hex(6) + '.bak')
+        write_private(backup, before, mode=0o600)
+        print(f'backup={backup}', flush=True)
+        replace_pilot_config(path, before, wanted, info)
+    if restart:
+        try:
+            restart_pilot(deployment)
+        except (ValueError, OSError, subprocess.SubprocessError):
+            if not changed:
+                raise ValueError('Restart failed; configuration was not changed') from None
+            replace_pilot_config(path, wanted, before, info)
+            try:
+                restart_pilot(deployment)
+            except (ValueError, OSError, subprocess.SubprocessError):
+                raise ValueError('Previous configuration restored, but LiveKit did not recover; check the test unit') from None
+            raise ValueError(f'Restart with the {change} change failed; previous configuration and service restored') from None
+    return f'changed={"yes" if changed else "no"} restarted={"yes" if restart else "no"}'
 
 
 def configure_webhook(args):
-    require_webhook_sudo()
+    require_media_sudo()
     with locked_config(args.apply):
         deployment = pilot_deployment()
         path = CFG / 'livekit.yaml'
         before, info = read_pilot_file(path)
         wanted, url = registered_config(before, deployment, args.site_path)
-        changed = before != wanted
         print(f'webhook_url={url}', flush=True)
         if args.verify:
             verify_receiver(deployment, url)
             print('webhook_endpoint_verified=yes (signed probe, not LiveKit event delivery)')
         if not args.apply:
-            print(f'webhook_configured={"no" if changed else "yes"} applied=no restarted=no')
+            print(f'webhook_configured={"yes" if before == wanted else "no"} applied=no restarted=no')
             return
-        if args.restart:
-            check_restart_target(deployment)
-        if changed:
-            backup = CFG / ('livekit.yaml.before-webhook-' + secrets.token_hex(6) + '.bak')
-            write_private(backup, before, mode=0o600)
-            print(f'backup={backup}', flush=True)
-            replace_pilot_config(path, before, wanted, info)
-        if args.restart:
-            try:
-                restart_pilot(deployment)
-            except (ValueError, OSError, subprocess.SubprocessError):
-                if not changed:
-                    raise ValueError('Restart failed; configuration was not changed') from None
-                replace_pilot_config(path, wanted, before, info)
-                try:
-                    restart_pilot(deployment)
-                except (ValueError, OSError, subprocess.SubprocessError):
-                    raise ValueError('Previous configuration restored, but LiveKit did not recover; check the test unit') from None
-                raise ValueError('Restart with the webhook failed; previous configuration and service restored') from None
-        print(f'webhook_configured=yes changed={"yes" if changed else "no"} restarted={"yes" if args.restart else "no"}')
+        result = apply_pilot_change(path, before, wanted, info, deployment, args.restart, 'webhook')
+        print(f'webhook_configured=yes {result}')
+
+
+def configure_camera(args):
+    require_media_sudo()
+    with locked_config(args.apply):
+        deployment = pilot_deployment()
+        path = CFG / 'livekit.yaml'
+        before, info = read_pilot_file(path)
+        wanted = camera_config(before, deployment)
+        if not args.apply:
+            print(f'camera_configured={"yes" if before == wanted else "no"} applied=no restarted=no')
+            return
+        result = apply_pilot_change(path, before, wanted, info, deployment, args.restart, 'camera')
+        print(f'camera_configured=yes {result}')
 
 
 def checked_archive(destination, offline_archive):
@@ -489,17 +527,20 @@ def install(args):
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
-    if argv and argv[0] == 'webhook':
-        parser = argparse.ArgumentParser(prog='install.py webhook', description='Configure the native webhook of the existing test media pilot.')
-        parser.add_argument('--site-path', type=site_path, help='site subpath; defaults to the existing setting or domain root on first setup')
-        parser.add_argument('--apply', action='store_true', help='save the webhook after making a private config backup; default is read-only')
-        parser.add_argument('--restart', action='store_true', help='restart only the idle pilot SFU, after applying; requires --apply')
-        parser.add_argument('--verify', action='store_true', help='probe the enabled school endpoint with a signed, non-room event')
-        args, work = parser.parse_args(argv[1:]), configure_webhook
+    if argv and argv[0] in ('webhook', 'camera'):
+        change = argv[0]
+        parser = argparse.ArgumentParser(prog='install.py ' + change, description=f'Configure {change} on the existing dedicated media pilot.')
+        if change == 'webhook':
+            parser.add_argument('--site-path', type=site_path, help='test school subpath; default keeps a managed URL, or uses / for new setup')
+            parser.add_argument('--verify', action='store_true', help='verify the receiver with a signed read-only probe')
+        parser.add_argument('--apply', action='store_true', help='save the configuration after making a private backup; default is read-only')
+        parser.add_argument('--restart', action='store_true', help='restart only the running, idle, unmodified pilot SFU unit; requires --apply')
+        args = parser.parse_args(argv[1:])
+        work = configure_webhook if change == 'webhook' else configure_camera
         if args.restart and not args.apply:
             parser.error('--restart requires --apply')
     else:
-        parser = argparse.ArgumentParser(description=__doc__, epilog='Existing pilot? See install.py webhook --help.')
+        parser = argparse.ArgumentParser(description=__doc__, epilog='Existing pilot? See install.py webhook --help or install.py camera --help.')
         parser.add_argument('media_host', type=hostname)
         parser.add_argument('ipv4', type=public_ip)
         parser.add_argument('school_origin', type=school_origin)

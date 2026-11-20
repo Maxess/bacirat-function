@@ -216,17 +216,75 @@ function cl_get_slot(PDO $db, array $class, int $slotId, int $now): ?array
     return cl_slots_for_date($db, $class, $now)[$slotId] ?? null;
 }
 
-function cl_roster(PDO $db, array $class, ?array $studentIds = null): array
+function cl_roster_rows(PDO $db, array $class, ?array $studentIds = null): Generator
 {
-    if ($studentIds === []) return [];
+    if ($studentIds === []) return;
     $params = $studentIds ?? [];
     $where = $params ? ' AND id IN (' . implode(',', array_fill(0, count($params), '?')) . ')' : '';
     $rows = cl_query($db, 'SELECT id,first_name,last_name,class_name,academic_year FROM students WHERE status=?' . $where . ' ORDER BY last_name,first_name,id', ['active', ...$params]);
-    $roster = [];
     while ($row = $rows->fetch(PDO::FETCH_ASSOC)) {
-        if (cl_slot_class($row, $class) && ($id = cl_id($row['id']))) {
-            $roster['student-' . $id] = cl_safe_label($row['first_name'] . ' ' . $row['last_name'], 90);
-        }
+        if (cl_slot_class($row, $class) && ($id = cl_id($row['id']))) yield $id => $row;
+    }
+}
+
+function cl_roster(PDO $db, array $class, ?array $studentIds = null): array
+{
+    $roster = [];
+    foreach (cl_roster_rows($db, $class, $studentIds) as $id=>$row) {
+        $roster['student-' . $id] = cl_safe_label($row['first_name'] . ' ' . $row['last_name'], 90);
     }
     return $roster;
+}
+
+function cl_photo_relative(mixed $value): ?string
+{
+    if (!is_string($value) || !preg_match('~^/?uploads/photos/([^/\\\\]{1,235}\.(?:jpe?g|png|webp))$~iuD', trim($value), $m)
+        || preg_match('~[\p{C}?#%:]~u', $m[1])) return null;
+    return 'uploads/photos/' . $m[1];
+}
+
+function cl_photo_paths(PDO $db, array $ids): array
+{
+    if (!$ids) return [];
+    try {
+        $params = implode(',', array_fill(0, count($ids), '?'));
+        return cl_query($db, "SELECT id,photo_url FROM students WHERE id IN ($params)", $ids)->fetchAll(PDO::FETCH_KEY_PAIR);
+    } catch (PDOException $error) { return []; } // Optional native photo field; its absence cannot interrupt a lesson.
+}
+
+/** Count alike surnames across the class, including absent pupils. Return only admitted pupils' cards. */
+function cl_class_profiles(PDO $db, array $class, array $seen): array
+{
+    $counts = $present = [];
+    if (!array_filter(array_keys($seen), static fn($id) => cl_media_identity($id, true))) return [];
+    foreach (cl_roster_rows($db, $class) as $id=>$row) {
+        $surname = cl_safe_label((string)$row['last_name'], 90);
+        $key = strtolower(cl_class_key($surname));
+        if ($key !== '') $counts[$key] = ($counts[$key] ?? 0) + 1;
+        if (!isset($seen['student-' . $id])) continue;
+        $given = cl_safe_label((string)$row['first_name'], 90);
+        preg_match('/\p{L}\p{M}*/u', $given, $initial);
+        $present[$id] = [$key, $surname, $initial[0] ?? ''];
+    }
+    $photos = cl_photo_paths($db, array_keys($present));
+    $cards = [];
+    foreach ($present as $id=>[$key,$surname,$initial]) {
+        $name = ($counts[$key] ?? 0) > 1 && $initial !== '' ? $initial . "\u{200C}" . $surname : $surname;
+        $cards['student-' . $id] = ['name'=>$name !== '' ? $name : 'دانش‌آموز', 'photo'=>cl_photo_relative($photos[$id] ?? null) !== null];
+    }
+    return $cards;
+}
+
+/** Use the school's local photo only; do not return its path (which may contain a national ID). */
+function cl_read_photo(string $root, mixed $source): ?array
+{
+    $relative = cl_photo_relative($source);
+    if ($relative === null || $root === '' || ($base = realpath($root)) === false) return null;
+    $path = $base . '/' . $relative;
+    if (realpath($path) !== $path || !is_file($path)) return null;
+    $raw = @file_get_contents($path, false, null, 0, 2 * 1024 * 1024 + 1);
+    if ($raw === false || strlen($raw) > 2 * 1024 * 1024) return null;
+    $image = @getimagesizefromstring($raw);
+    if (!$image || !in_array($image['mime'], ['image/jpeg','image/png','image/webp'], true) || $image[0] * $image[1] > 12_000_000) return null;
+    return ['mime'=>$image['mime'], 'raw'=>$raw];
 }

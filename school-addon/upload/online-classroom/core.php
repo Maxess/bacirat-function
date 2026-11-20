@@ -15,12 +15,12 @@ final class ClassroomError extends RuntimeException
 
 require_once __DIR__ . '/media.php';
 
-function cl_headers(): void
+function cl_headers(bool $camera = false): void
 {
     header('Cache-Control: no-store, private');
     header('Referrer-Policy: same-origin');
     header('X-Content-Type-Options: nosniff');
-    header('Permissions-Policy: microphone=(self), camera=(), display-capture=()');
+    header('Permissions-Policy: microphone=(self), camera=' . ($camera ? '(self)' : '()') . ', display-capture=()');
 }
 
 function cl_origin(string $value, string $scheme): string
@@ -204,12 +204,13 @@ function cl_rpc(array $cfg, string $room, string $method, array $payload): array
 {
     $grant = cl_service_grant($method, $room);
     $ch = curl_init($cfg['api_url'] . '/twirp/livekit.RoomService/' . $method);
+    $moderating = $method === 'UpdateParticipant' && isset($payload['permission']);
     curl_setopt_array($ch, [
         CURLOPT_POST => true,
         CURLOPT_HTTPHEADER => ['Content-Type: application/json', 'Authorization: Bearer ' . cl_jwt($cfg, $grant, 45)],
         CURLOPT_POSTFIELDS => json_encode($payload, JSON_THROW_ON_ERROR),
         CURLOPT_RETURNTRANSFER => true, CURLOPT_FOLLOWLOCATION => false,
-        CURLOPT_CONNECTTIMEOUT => 3, CURLOPT_TIMEOUT => 6,
+        CURLOPT_CONNECTTIMEOUT_MS => $moderating ? 700 : 3000, CURLOPT_TIMEOUT_MS => $moderating ? 1150 : 6000,
     ]);
     $response = curl_exec($ch);
     $status = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
@@ -242,9 +243,9 @@ function cl_room_lock(PDO $pdo, string $room, callable $work): mixed
     }
 }
 
-function cl_create_room(string $room, int $max, callable $rpc): void
+function cl_create_room(string $room, int $max, callable $rpc): array
 {
-    $rpc('CreateRoom', $room, ['name'=>$room,'maxParticipants'=>$max,'emptyTimeout'=>60,'departureTimeout'=>20]);
+    return $rpc('CreateRoom', $room, ['name'=>$room,'maxParticipants'=>$max,'emptyTimeout'=>60,'departureTimeout'=>20]);
 }
 
 function cl_delete_room(string $room, callable $rpc): void

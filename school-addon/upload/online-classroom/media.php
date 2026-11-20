@@ -1,23 +1,13 @@
 <?php
 declare(strict_types=1);
 
-const CL_MEDIA_ACTIONS = ['give-mic', 'cut-mic', 'cut-video', 'cut-all-mics'];
+const CL_MEDIA_FEATURES = ['mic'=>'MICROPHONE', 'camera'=>'CAMERA'];
 const CL_TRACK_SOURCES = [1 => 'CAMERA', 2 => 'MICROPHONE', 3 => 'SCREEN_SHARE', 4 => 'SCREEN_SHARE_AUDIO'];
-const CL_VIDEO_SOURCES = ['CAMERA', 'SCREEN_SHARE']; // SCREEN_SHARE_AUDIO, if present, is separate.
 
 function cl_media_identity(mixed $value, bool $studentsOnly = false): bool
 {
     $roles = $studentsOnly ? 'student' : '(student|teacher|admin)';
     return is_string($value) && preg_match('/^' . $roles . '-[1-9]\d{0,17}$/D', $value) === 1;
-}
-
-function cl_media_target(string $action, mixed $target): ?string
-{
-    if (!in_array($action, CL_MEDIA_ACTIONS, true)) throw new LogicException('Unknown moderation action');
-    if ($action === 'cut-all-mics' ? $target !== null : !cl_media_identity($target, $action !== 'give-mic')) {
-        throw new ClassroomError(400, 'شناسهٔ شرکت‌کننده برای این عملیات معتبر نیست.');
-    }
-    return $target;
 }
 
 function cl_media_bad_reply(): ClassroomError
@@ -45,7 +35,7 @@ function cl_media_permission(array $participant, string $identity): array
     $wire = $participant['permission'] ?? null;
     if (($participant['identity'] ?? null) !== $identity || !is_array($wire)) throw cl_media_bad_reply();
     // LiveKit Twirp defaults to original proto names, e.g. can_publish.
-    // Preserve the other flags when changing just one source policy.
+    // The classroom policy deliberately does not allow data, metadata, screen share, or agent permissions.
     $fields = [
         'canSubscribe' => 'can_subscribe', 'canPublish' => 'can_publish', 'canPublishData' => 'can_publish_data',
         'canUpdateMetadata' => 'can_update_metadata', 'hidden' => 'hidden', 'recorder' => 'recorder',
@@ -75,61 +65,89 @@ function cl_media_permission(array $participant, string $identity): array
     return $permission;
 }
 
-function cl_change_media_permission(string $room, string $identity, string $action, callable $rpc): void
+/** Null identity reads the room default, not the policy of a particular participant. */
+function cl_access_enabled(array $lesson, string $feature, ?string $identity = null): bool
 {
-    $scope = ['room' => $room, 'identity' => $identity];
-    // UpdateParticipant without permission or metadata fields returns the live state unchanged.
-    // It reads the real participant rather than relying on the ListParticipants store snapshot.
-    $reply = $rpc('UpdateParticipant', $scope);
-    $permission = $previous = cl_media_permission($reply, $identity);
-    $sources = $previous['canPublishSources'];
-    $next = match ($action) {
-        'give-mic' => [...$sources, 'MICROPHONE'],
-        'cut-mic', 'cut-all-mics' => array_diff($sources, ['MICROPHONE']),
-        'cut-video' => array_diff($sources, CL_VIDEO_SOURCES),
-        default => throw new LogicException('Unknown participant moderation action'),
-    };
-    $permission['canPublishSources'] = array_values(array_intersect(CL_TRACK_SOURCES, $next));
-    $permission['canPublish'] = $permission['canPublishSources'] !== [];
-    if ($permission !== $previous) {
-        $reply = $rpc('UpdateParticipant', $scope + ['permission' => $permission]);
-        if (cl_media_permission($reply, $identity) !== $permission) throw cl_media_bad_reply();
-    }
-    if ($action === 'give-mic') return;
-    // Pinned LiveKit emits even an empty tracks list. Do not treat a truncated reply as a confirmed cut.
-    $tracks = $reply['tracks'] ?? null;
-    if (!is_array($tracks) || !array_is_list($tracks)) throw cl_media_bad_reply();
-    foreach ($tracks as $track) {
-        if (!is_array($track) || !in_array(cl_track_source($track['source'] ?? null), $permission['canPublishSources'], true)) {
-            throw cl_media_bad_reply();
-        }
-    }
+    $rule = $lesson['access'][$feature] ?? [];
+    if ($identity !== null && isset($rule['members'][$identity])) return $rule['members'][$identity] === true;
+    return ($rule['all'] ?? false) === true;
 }
 
-function cl_control_media(string $room, string $action, ?string $target, callable $rpc): void
+function cl_camera_codec(array $room): ?string
 {
-    cl_media_target($action, $target);
-    if ($target !== null) {
-        cl_change_media_permission($room, $target, $action, $rpc);
-        return; // Grant/cut affects exactly this participant, never a different speaker.
+    $codecs = $room['enabled_codecs'] ?? $room['enabledCodecs'] ?? [];
+    if (!is_array($codecs)) return null;
+    $names = [];
+    foreach ($codecs as $codec) if (is_array($codec) && is_string($codec['mime'] ?? null)) $names[] = strtolower($codec['mime']);
+    return in_array('video/vp8', $names, true) ? 'vp8' : (in_array('video/h264', $names, true) ? 'h264' : null);
+}
+
+function cl_live_media_peers(array $reply): array
+{
+    $people = array_key_exists('participants', $reply) ? $reply['participants'] : [];
+    if (!is_array($people) || !array_is_list($people) || count($people) > 60) throw cl_media_bad_reply();
+    $peers = [];
+    foreach ($people as $person) {
+        if (!is_array($person)) throw cl_media_bad_reply();
+        if (!in_array($person['state'] ?? null, ['ACTIVE', 2], true)) continue;
+        $id = $person['identity'] ?? null;
+        if (!cl_media_identity($id) || !cl_sid($person['sid'] ?? null) || isset($peers[$id])) throw cl_media_bad_reply();
+        $peers[$id] = $person;
     }
-    $participants = $rpc('ListParticipants', ['room' => $room])['participants'] ?? null;
-    if (!is_array($participants) || !array_is_list($participants)) throw cl_media_bad_reply();
-    $seen = [];
+    return $peers;
+}
+
+function cl_media_matches(array $peer, string $identity, array $wanted): bool
+{
+    try { $actual = cl_media_permission($peer, $identity); }
+    catch (ClassroomError $error) { return false; }
+    foreach ($actual as $key=>$value) {
+        if ($value !== ($wanted[$key] ?? false)) return false;
+    }
+    // Twirp returns an explicit tracks list. An incomplete result is not a confirmed revocation.
+    $tracks = $peer['tracks'] ?? null;
+    if (!is_array($tracks) || !array_is_list($tracks)) return false;
+    foreach ($tracks as $track) {
+        if (!is_array($track) || !in_array(cl_track_source($track['source'] ?? null), $wanted['canPublishSources'], true)) return false;
+    }
+    return true;
+}
+
+/** Apply the lesson policy to real SFU participants. Listener tickets never carry a reusable publish grant. */
+function cl_sync_media(array $lesson, array $peers, callable $rpc): bool
+{
+    if (!isset($lesson['access']['mic']) && !isset($lesson['access']['camera'])) return true;
+    $room = $lesson['room'];
     $failed = false;
-    foreach ($participants as $person) {
-        $identity = is_array($person) ? ($person['identity'] ?? null) : null;
-        if (!cl_media_identity($identity)) {
-            $failed = true;
-            continue;
+    $until = microtime(true) + 1.25; // Bound lock time; subsequent presence samples retry mismatches.
+    foreach ($peers as $id=>$peer) {
+        $sources = [];
+        if (($lesson['seen'][$id] ?? null) === $peer['sid']) {
+            foreach (CL_MEDIA_FEATURES as $feature=>$source) {
+                if (($feature !== 'camera' || !empty($lesson['camera_codec'])) && cl_access_enabled($lesson, $feature, $id)) $sources[] = $source;
+            }
         }
-        if (isset($seen[$identity])) continue;
-        $seen[$identity] = true;
+        // Canonical order also makes a comparison independent of the SFU's enum order.
+        $permission = ['canSubscribe'=>true, 'canPublish'=>count($sources)>0, 'canPublishData'=>false,
+            'canPublishSources'=>array_values(array_intersect(CL_TRACK_SOURCES, $sources))];
+        if (cl_media_matches($peer, $id, $permission)) continue;
+        if (microtime(true) >= $until) return false;
         try {
-            cl_change_media_permission($room, $identity, $action, $rpc);
-        } catch (ClassroomError) {
-            $failed = true; // Still cut the other participants, but never signal full success.
+            $reply = $rpc('UpdateParticipant', $room, ['room'=>$room,'identity'=>$id,'permission'=>$permission]);
+            if (($reply['sid'] ?? null) !== $peer['sid']) {
+                // UpdateParticipant addresses an identity, not a SID. A replacement racing this RPC
+                // must return to listeners until its own admission sample can apply the lesson policy.
+                if ($permission['canPublish']) {
+                    $rpc('UpdateParticipant', $room, ['room'=>$room,'identity'=>$id,'permission'=>[
+                        'canSubscribe'=>true,'canPublish'=>false,'canPublishData'=>false,'canPublishSources'=>[],
+                    ]]);
+                }
+                $failed = true;
+            } elseif (!cl_media_matches($reply, $id, $permission)) $failed = true;
+        } catch (ClassroomError $error) {
+            // A member who just left needs no update; a new SID will be sampled on re-entry.
+            if ($error->status !== 409) $failed = true;
         }
     }
-    if ($failed) throw cl_media_bad_reply();
+    return !$failed;
 }

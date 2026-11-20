@@ -68,6 +68,7 @@ try {
     $studio = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.3.zip';
     $streamed = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.4.zip';
     $compact = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.5.zip';
+    $access = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.6.zip';
     $menus = static fn() => [file_get_contents($root . '/other-settings.php'), file_get_contents($root . '/includes/header.php')];
     $managerMenus = [$other, $header];
     expect($menus() === $managerMenus, 'initialization does not rewrite the host');
@@ -304,6 +305,15 @@ try {
         && $db->query("SELECT payload FROM `$store` WHERE bucket='reports'")->fetchColumn()==='{}',
         '0.4.4 to 0.4.5 keeps owner, report rows, bell hours, media settings, and Friday opt-in');
     submit($db,$site,'enable');
+    denied(fn()=>mpm_install($db, $dir, $access));
+    submit($db,$site,'disable');
+    expect(mpm_install($db,$dir,$access), 'upgrade from 0.4.5 to access controls');
+    $row = mpm_row($db,$slug);
+    expect($row['version']==='0.4.6' && $row['owner']===$oldRow['owner'] && mpm_check_store($db,$row)===$store
+        && mpm_owned_row($db,$row)['settings']===$saved && mpm_settings($db,$dir,$row)['friday_test']===$pupilGrant
+        && $db->query("SELECT payload FROM `$store` WHERE bucket='reports'")->fetchColumn()==='{}',
+        '0.4.5 to 0.4.6 keeps owner, attendance, settings, hours and Friday opt-in');
+    submit($db,$site,'enable');
     submit($db,$site,'friday-test',['friday_date'=>$date,'friday_students'=>'yes']);
     expect(mpm_settings($db,$dir,$row)['friday_test']===$pupilGrant, 'saving the same pupil policy does not disrupt a test');
     submit($db,$site,'friday-test',['friday_date'=>$date]);
@@ -314,13 +324,14 @@ try {
     $_SESSION = ['student_id' => 1];
     $_GET = ['class'=>22];
     ob_start(); mpm_dispatch($db, $site, $slug, 'page'); $body = ob_get_clean();
-    expect(str_contains($body, 'id="classroom"') && str_contains($body, 'id="mic-feedback"') && str_contains($body, 'route=api') && !str_contains($body, $secret), 'current classroom renders without a config file or credential leak');
+    expect(str_contains($body, 'id="classroom"') && str_contains($body, 'id="notice"') && !str_contains($body, 'id="mic-feedback"') && str_contains($body, 'route=api') && !str_contains($body, $secret), 'current classroom renders without a config file or credential leak');
     expect(str_contains($body, 'href="../student-panel.php"') && str_contains($body, 'data-api="school-plugins.php?plugin='), 'single exit to school and same-gateway API resolve from plugins/');
     expect(substr_count($body,'id="leave"')===1 && str_contains($body,'class="status-dot"')
         && !str_contains($body,'id="attendance-time"') && !str_contains($body,'>بازگشت به پنل<'), 'compact header has a single exit and no duplicate attendance');
     expect(str_contains($body,'class="school-name">never change</bdi>') && str_contains($body,'class="class-name" dir="auto">۸ الف</bdi>')
         && str_contains($body,'id="lesson-start"') && str_contains($body,'id="speaker-strip" aria-label="در حال صحبت" hidden'),
         'room shows the configured school, preserves a custom class label, and starts without voice activity');
+    expect(str_contains($body, 'id="pen"') && !str_contains($body, 'id="board-clear"') && !str_contains($body, 'id="toggle-access"'), 'pupils get pen UI but no staff controls');
     expect(!isset($_SESSION['school_classroom_csrf']), 'managed session leaves no classroom-specific state');
     $old = $_GET ?? []; $_GET['name'] = 'assets/classroom.css';
     ob_start(); mpm_dispatch($db, $site, $slug, 'asset'); $asset = ob_get_clean(); $_GET = $old;

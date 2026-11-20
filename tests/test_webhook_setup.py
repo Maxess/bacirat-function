@@ -58,14 +58,14 @@ class WebhookSetupTest(unittest.TestCase):
         self.systemd_dir = root / 'systemd'
         self.systemd_dir.mkdir()
         self.enterContext(patch.multiple(installer, CFG=self.config_dir, APP=root / 'app', SYSTEMD=self.systemd_dir))
-        self.enterContext(patch.object(installer, 'require_webhook_sudo'))
+        self.enterContext(patch.object(installer, 'require_media_sudo'))
         self.enterContext(patch.object(installer.os, 'fchown'))  # File ownership is still checked in the temporary fixture.
         self.path = self.config_dir / 'livekit.yaml'
         self.base = STOCK_YAML
         self.write_private(self.path, self.base)
         self.write_private(self.config_dir / 'admission.json', json.dumps(DEPLOYMENT))
         self.service = self.systemd_dir / installer.SFU_SERVICE
-        self.service.write_text(installer.sfu_unit_config())
+        self.service.write_text(installer.sfu_unit_config(legacy=True))
         self.service.chmod(0o644)
         self.output = self.enterContext(redirect_stdout(StringIO()))
         # Unless explicitly testing local restart, keep the fixtures completely offline.
@@ -185,6 +185,53 @@ class WebhookSetupTest(unittest.TestCase):
         self.assertEqual(self.path.read_text(), self.base)
         self.assertEqual(len(self.backups()), 1)
         self.assertEqual([call.args[0][1] for call in self.systemctl.call_args_list], ['show', 'restart', 'restart'])
+
+    def test_camera_keeps_webhook_and_can_be_applied_only_to_stock_layouts(self):
+        self.webhook(apply=True, site_path='/school-test')
+        before = self.path.read_text()
+        self.assertNotIn('video/VP8', before, 'a webhook update must not enable video by itself')
+        installer.main(['camera'])
+        self.assertIn('camera_configured=no applied=no restarted=no', self.output.getvalue())
+        self.assertEqual(self.path.read_text(), before)
+        self.systemctl_idle([{'name': 'active-lesson'}])
+        with self.assertRaisesRegex(ValueError, 'open rooms'):
+            installer.configure_camera(SimpleNamespace(apply=True, restart=True))
+        self.assertEqual(self.path.read_text(), before)
+        self.systemctl_idle([])
+        installer.configure_camera(SimpleNamespace(apply=True, restart=True))
+        after = self.path.read_text()
+        self.assertEqual(after, before.replace('    - mime: audio/opus\n', '    - mime: audio/opus\n    - mime: video/VP8\n'))
+        self.assertEqual(self.systemctl.call_args.args[0], ['systemctl', 'restart', installer.SFU_SERVICE])
+        backups = list(self.config_dir.glob('livekit.yaml.before-camera-*.bak'))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_text(), before)
+        self.assertEqual(backups[0].stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.path.stat().st_mode & 0o777, 0o640)
+        installer.main(['camera', '--apply'])
+        self.assertEqual(self.path.read_text(), after)
+        self.assertEqual(len(list(self.config_dir.glob('livekit.yaml.before-camera-*.bak'))), 1)
+        self.webhook(apply=True, site_path='/next-test')
+        self.assertEqual(self.path.read_text(), after.replace('/school-test/', '/next-test/'))
+        unknown = after + '# local changes\n'
+        self.write_private(self.path, unknown)
+        with self.assertRaises(ValueError):
+            installer.configure_camera(SimpleNamespace(apply=True, restart=False))
+        self.assertEqual(self.path.read_text(), unknown)
+
+    def test_camera_restart_failure_restores_audio_configuration(self):
+        self.systemctl_idle([])
+        self.systemctl.side_effect = [self.systemctl.return_value, subprocess.CalledProcessError(1, ['systemctl', 'restart']), None]
+        with self.assertRaisesRegex(ValueError, 'camera change failed; previous configuration and service restored'):
+            installer.configure_camera(SimpleNamespace(apply=True, restart=True))
+        self.assertEqual(self.path.read_text(), self.base)
+        self.assertEqual([call.args[0][1] for call in self.systemctl.call_args_list], ['show', 'restart', 'restart'])
+
+    def test_new_pilot_enables_vp8_but_no_other_settings_change(self):
+        stock = installer.engine_config('203.0.113.50', DEPLOYMENT['api_key'], DEPLOYMENT['api_secret'])
+        self.assertEqual(stock.replace('    - mime: video/VP8\n', ''), self.base)
+        after, _ = installer.registered_config(stock, DEPLOYMENT, '/school-test')
+        self.assertTrue(after.startswith(stock + installer.WEBHOOK_MARKER))
+        self.assertEqual(installer.camera_config(after, DEPLOYMENT), after)
 
     def test_signed_probe_binds_body_without_room_side_effects(self):
         def check(url, body, mime, auth, timeout):
