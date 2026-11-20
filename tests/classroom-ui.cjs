@@ -23,9 +23,9 @@ class Element {
 }
 function fixture(staff, autoSlot = 0) {
     const elements = Object.fromEntries(['classroom','status','status-dot','notice','people','live-panel','waiting','wait-title','wait-message',
-        'camera','camera-strip','audio-tracks','chat-log','chat-form','chat-text','leave','microphone','enable-audio','people-count',
+        'camera','camera-strip','screen-panel','screen-video','screen-label','audio-tracks','chat-log','chat-form','chat-text','leave','microphone','enable-audio','people-count',
         'toggle-people','toggle-chat','people-panel','chat-panel','chat-empty','lesson-start','lesson-start-time','speaker-strip','speakers',
-        ...(staff ? ['slot','open','close','staff-start','toggle-access','room-permissions','access-menu','camera-unavailable','permission-icons',
+        ...(staff ? ['screen-toggle','slot','open','close','staff-start','toggle-access','room-permissions','access-menu','camera-unavailable','permission-icons',
             ...['mic','camera','board'].flatMap(f=>[`all-${f}-give`,`all-${f}-cut`])] : ['join','waiting-attendance','waiting-attendance-time'])].map(id => [id,new Element(id)]));
     elements['speaker-strip'].hidden = elements.notice.hidden = true;
     if (staff) elements['permission-icons'].content = {querySelector:()=>new Element('svg')};
@@ -33,19 +33,21 @@ function fixture(staff, autoSlot = 0) {
     const choice = (id, label) => ({id, label});
     elements.classroom.dataset = { moderator:staff?'yes':'no',api:'/fixture',csrf:'session',class:'22',bellDate:date,content:'/content?class=22' };
     const requests=[], scheduled=new Map(), boards=[];
-    let timerSeq=0, now=0, lastRoom, cameraAttempts=0;
+    let timerSeq=0, now=0, lastRoom, cameraAttempts=0, boardConfig, aim;
+    const captures=[], publications=[];
     const id=staff?'teacher-1':'student-1';
     const srv={phase:'idle',lesson:'lesson-11',epoch:'epoch-A',ready:true, staffCanJoin:false,seconds:{'student-1':9,'student-2':21},
         hidden:false, chat:[], moving:false, cameraCodec:'vp8',access:{},profiles:{'student-1':{name:'آزمایشی',photo:false},'student-2':{name:'دوم',photo:false}}, schedule:{date, timed:false, choices:autoSlot ? [choice(autoSlot,'ریاضی')] : [choice(11,'ریاضی'),choice(12,'علوم')], next:null}};
     const person = (identity) => ({identity, name:identity, sid:`PA_${identity}`, permissions:listener, micCalls:[], isMicrophoneEnabled:false,
         isCameraEnabled:false, publications:new Map(), getTrackPublication(source) { return this.publications.get(source); },
         async publishTrack(track, opts) {
-            assert.equal(opts.source,'camera'); assert.equal(opts.videoCodec,srv.cameraCodec);
-            this.publications.set(opts.source,{track,isMuted:false}); this.isCameraEnabled=true;
+            assert.ok(['camera','screen_share'].includes(opts.source)); assert.equal(opts.videoCodec,srv.cameraCodec);
+            publications.push({track,opts}); track.source=opts.source;
+            this.publications.set(opts.source,{track,isMuted:false}); if (opts.source==='camera') this.isCameraEnabled=true;
             lastRoom.emit('LocalTrackPublished');
         },
         async unpublishTrack(track) {
-            assert.equal(track.stopped,true); this.publications.delete('camera'); this.isCameraEnabled=false;
+            assert.equal(track.stopped,true); this.publications.delete(track.source); if (track.source==='camera') this.isCameraEnabled=false;
             lastRoom.emit('LocalTrackUnpublished');
         },
         async setMicrophoneEnabled(value) {
@@ -66,14 +68,24 @@ function fixture(staff, autoSlot = 0) {
     }
     const fixtureVideo = (source='camera') => ({kind:'video',source,stopped:false, mediaStreamTrack:{addEventListener(){}},
         attach(node) { this.element=node; }, detach(node) { if (this.element===node) this.element=null; }, stop() { this.stopped=true; }});
-    const lk={Room,async createLocalVideoTrack() { cameraAttempts++; return srv.capture ? await srv.capture : fixtureVideo(); },ConnectionState:{Connected:'connected'},Track:{Kind:{Audio:'audio',Video:'video'},Source:{Camera:'camera',Microphone:'microphone'}},DisconnectReason:{1:'CLIENT_INITIATED',2:'DUPLICATE_IDENTITY'},RoomEvent:new Proxy({}, {get:(_,key)=>key})};
+    const lk={Room,LocalVideoTrack:class { constructor(raw) { const track=fixtureVideo('screen_share'); track.mediaStreamTrack=raw; track.stop=()=>{ track.stopped=true; raw.stop(); }; return track; } },async createLocalVideoTrack() { cameraAttempts++; return srv.capture ? await srv.capture : fixtureVideo(); },ConnectionState:{Connected:'connected'},Track:{Kind:{Audio:'audio',Video:'video'},Source:{Camera:'camera',Microphone:'microphone',ScreenShare:'screen_share'}},DisconnectReason:{1:'CLIENT_INITIATED',2:'DUPLICATE_IDENTITY'},RoomEvent:new Proxy({}, {get:(_,key)=>key})};
     function change(identity, perm) {
         const p=identity===id?lastRoom.localParticipant:lastRoom.remoteParticipants.get(identity);
         const old=p.permissions; p.permissions=perm;
         lastRoom.emit('ParticipantPermissionsChanged',old,p);
     }
     vm.runInNewContext(script, {
-        window:{isSecureContext:true,LivekitClient:lk,addEventListener(){},confirm:()=>true,ClassroomBoard:()=>({position:()=>({board:0,ink:0}),sync:(...p)=>boards.push(p),reset:()=>boards.push('reset')})},
+        window:{isSecureContext:true,LivekitClient:lk,addEventListener(){},confirm:()=>true,
+            navigator:{mediaDevices:{async getDisplayMedia(opts) {
+                captures.push(opts); if (srv.screenPrompt) return srv.screenPrompt;
+                const raw={readyState:'live', handlers:{}, addEventListener(k,fn){this.handlers[k]=fn;},stop(){this.readyState='ended';},
+                    getSettings(){return {width:1280,height:720,frameRate:5};}};
+                return {getVideoTracks:()=>[raw],getTracks:()=>[raw]};
+            }}},
+            ClassroomAttention:()=>({setLive(){},snapshot(){},expand(){}}),
+            ClassroomBoard:(_,config)=>{boardConfig=config;return {position:()=>({board:0,ink:0}),takeAim:()=>{
+                const value=aim; aim=null; return value ? {aim:value} : {};
+            },sync:(...p)=>boards.push(p),reset:()=>boards.push('reset')};}},
         document:{getElementById:id=>elements[id],baseURI:'https://school.fixture.test/',createElement:tag=>new Element(tag),addEventListener(){},get hidden(){return srv.hidden;}},
         performance:{now:()=>now},
         setTimeout(fn,ms){const t=++timerSeq; scheduled.set(t,{fn,at:now+ms});return t;}, clearTimeout:t=>scheduled.delete(t), AbortController, URL,
@@ -82,6 +94,7 @@ function fixture(staff, autoSlot = 0) {
             const input=JSON.parse(opt.body); assert.equal(input.class,22); requests.push(input);
             let reply={ok:true}, status=200;
             if(input.action==='status'){
+                if (srv.beforeStatus) await srv.beforeStatus();
                 const phased = ['idle','reserved'].includes(srv.phase) ? {phase:srv.phase} : {phase:srv.phase,slot:srv.slot ?? 11, lesson:srv.lesson,epoch:srv.epoch,resumable:srv.resumable,startTime:srv.startTime ?? null,subject:'ریاضی',period:'زنگ یک'};
                 reply={...reply,ready:srv.ready,...phased,joinable:srv.phase==='live'||(staff&&srv.phase==='starting'&&srv.staffCanJoin)};
                 if (staff && srv.phase==='idle') reply.schedule=srv.schedule;
@@ -89,8 +102,8 @@ function fixture(staff, autoSlot = 0) {
                 if (!staff && phased.lesson) reply.attendance=srv.attendance ?? srv.seconds[id] ?? 0;
                 if(input.sid && srv.phase==='live' && input.epoch===srv.epoch) {
                     Object.assign(reply,{admitted:true,seconds:srv.seconds,chat:srv.chat,board:{rev:1,moving:srv.moving,write:srv.write},
-                        cameraCodec:srv.cameraCodec,profiles:srv.profiles});
-                    if (staff) Object.assign(reply,{access:structuredClone(srv.access),members:Object.fromEntries([lastRoom.localParticipant,
+                        cameraCodec:srv.cameraCodec,profiles:srv.profiles,screen:srv.screen || null});
+                    if (staff) Object.assign(reply,{screenEnabled:!!srv.screenEnabled,access:structuredClone(srv.access),members:Object.fromEntries([lastRoom.localParticipant,
                         ...lastRoom.remoteParticipants.values()].map(p=>[p.identity,p.sid]))});
                 }
             } else if (input.action==='board-sync') {
@@ -112,6 +125,13 @@ function fixture(staff, autoSlot = 0) {
                     change(p.identity,{canPublish:!!sources.length,canPublishSources:sources});
                 }
                 reply.access=structuredClone(srv.access);
+            } else if(input.action==='screen-access') {
+                const p=lastRoom.localParticipant;
+                const src=p.permissions.canPublishSources.filter(x=>x!==3);
+                if (input.enabled) { srv.screen={identity:p.identity,sid:p.sid}; src.push(3); }
+                else srv.screen=null;
+                change(p.identity,{canPublish:!!src.length,canPublishSources:src});
+                reply.screen=srv.screen;
             } else if(input.action==='close') {
                 srv.phase='idle'; srv.schedule={...srv.schedule, choices:srv.schedule.choices.filter(n=>n.id!==11)};
             }
@@ -134,7 +154,7 @@ function fixture(staff, autoSlot = 0) {
         now=target;
     }
     function controls(identity){return elements.people.children.find(row=>row.dataset.identity===identity).querySelectorAll('button');}
-    return {elements,srv,requests,boards,time,status,change,controls,fixtureVideo,advance,get cameraAttempts(){return cameraAttempts;},get room(){return lastRoom;}};
+    return {elements,srv,requests,boards,captures,publications,time,status,change,controls,fixtureVideo,advance,aim(point){aim=point;boardConfig.aimSoon();},get cameraAttempts(){return cameraAttempts;},get room(){return lastRoom;}};
 }
 
 test('student waits without media, auto enters and sees attendance only for pupils, then waits again',async()=>{
@@ -349,6 +369,20 @@ test('board reads speed up while writing without renewing the full heartbeat or 
 });
 
 
+test('a laser point queued during a status read rides the next board-only request and does not create an idle stream',async()=>{
+    const f=fixture(true); f.srv.phase='live'; await f.time(); await f.time();
+    let calls=0;
+    f.srv.beforeStatus=()=>{ calls++; if(calls===1){f.aim([111,222]); f.aim([333,444]);} };
+    await f.status();
+    assert.equal(f.requests.filter(r=>r.aim).length,0,'status requests are not laser mutations');
+    const before=f.requests.length;
+    await f.advance(450);
+    assert.deepEqual(f.requests.slice(before).map(r=>[r.action,r.aim]), [['board-sync',[333,444]]]);
+    await f.advance(400);
+    assert.equal(f.requests.length,before+1,'no continual fast polls for an idle point');
+});
+
+
 test('only speaking participants appear, including multiple speakers; silence, mute and teardown clear them', async()=>{
     const f=fixture(false); f.srv.phase='live'; await f.time(); await f.time();
     const room=f.room, local=room.localParticipant, peer=room.remoteParticipants.get('teacher-1');
@@ -447,4 +481,41 @@ test('a camera prompt resolved after revocation is stopped and reconnection neve
     f.srv.phase='live'; f.srv.epoch='epoch-B'; await f.time(); await f.time();
     f.change('student-1',camera);
     assert.equal(f.cameraAttempts,1); assert.equal(f.elements.camera['aria-pressed'],'false');
+});
+
+
+test('the pilot screen needs two explicit actions, never asks for system audio, and stopping preserves the mic',async()=>{
+    const f=fixture(true); f.srv.phase='live'; await f.time(); await f.time();
+    assert.equal(f.room.options.publishDefaults.audioPreset.maxBitrate,12000);
+    assert.equal(f.room.options.publishDefaults.dtx,true);
+    assert.equal(f.room.options.publishDefaults.forceStereo,false);
+    const button=f.elements['screen-toggle']; assert.equal(button.hidden,true);
+    f.srv.screenEnabled=true; await f.status(); assert.equal(button.hidden,false);
+    f.change('teacher-1',mic); await f.elements.microphone.click();
+    await button.click(); assert.equal(button.dataset.prepared,'true'); assert.equal(f.captures.length,0);
+    await button.click();
+    assert.equal(f.captures.length,1); assert.equal(f.captures[0].audio,false);
+    assert.equal(f.captures[0].video.frameRate.max,5);
+    const {track,opts}=f.publications.at(-1);
+    assert.equal(opts.source,'screen_share'); assert.equal(opts.screenShareEncoding.maxBitrate,400000);
+    assert.equal(opts.simulcast,false); assert.equal(opts.backupCodec,false);
+    assert.equal(track.mediaStreamTrack.contentHint,'detail');
+    assert.equal(f.elements['screen-panel'].hidden,false);
+    await button.click();
+    assert.equal(track.mediaStreamTrack.readyState,'ended'); assert.equal(f.elements['screen-panel'].hidden,true);
+    assert.equal(f.room.localParticipant.isMicrophoneEnabled,true);
+    assert.deepEqual(f.room.localParticipant.permissions.canPublishSources,[2]);
+});
+
+test('an open picker cannot start screen capture in a newer transport',async()=>{
+    const f=fixture(true); f.srv.phase='live'; f.srv.screenEnabled=true; await f.time(); await f.time();
+    await f.elements['screen-toggle'].click();
+    let choose;
+    f.srv.screenPrompt=new Promise(resolve=>{ choose=resolve; });
+    const click=f.elements['screen-toggle'].click();
+    f.srv.phase='paused'; await f.status();
+    let stopped=false;
+    const raw={stop(){stopped=true;}};
+    choose({getVideoTracks:()=>[raw],getTracks:()=>[raw]}); await click;
+    assert.equal(stopped,true); assert.equal(f.publications.length,0);
 });

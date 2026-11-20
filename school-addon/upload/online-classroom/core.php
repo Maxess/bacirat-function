@@ -15,12 +15,13 @@ final class ClassroomError extends RuntimeException
 
 require_once __DIR__ . '/media.php';
 
-function cl_headers(bool $camera = false): void
+function cl_headers(bool $room = false, bool $screen = false): void
 {
     header('Cache-Control: no-store, private');
     header('Referrer-Policy: same-origin');
     header('X-Content-Type-Options: nosniff');
-    header('Permissions-Policy: microphone=(self), camera=' . ($camera ? '(self)' : '()') . ', display-capture=()');
+    header('Permissions-Policy: microphone=(self), camera=' . ($room ? '(self)' : '()')
+        . ', screen-wake-lock=' . ($room ? '(self)' : '()') . ', display-capture=' . ($room && $screen ? '(self)' : '()'));
 }
 
 function cl_origin(string $value, string $scheme): string

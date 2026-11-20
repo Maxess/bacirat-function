@@ -35,7 +35,7 @@ function cl_media_permission(array $participant, string $identity): array
     $wire = $participant['permission'] ?? null;
     if (($participant['identity'] ?? null) !== $identity || !is_array($wire)) throw cl_media_bad_reply();
     // LiveKit Twirp defaults to original proto names, e.g. can_publish.
-    // The classroom policy deliberately does not allow data, metadata, screen share, or agent permissions.
+    // No data, metadata, share-audio, or agent permissions. Video sources are explicitly listed.
     $fields = [
         'canSubscribe' => 'can_subscribe', 'canPublish' => 'can_publish', 'canPublishData' => 'can_publish_data',
         'canUpdateMetadata' => 'can_update_metadata', 'hidden' => 'hidden', 'recorder' => 'recorder',
@@ -114,9 +114,9 @@ function cl_media_matches(array $peer, string $identity, array $wanted): bool
 }
 
 /** Apply the lesson policy to real SFU participants. Listener tickets never carry a reusable publish grant. */
-function cl_sync_media(array $lesson, array $peers, callable $rpc): bool
+function cl_sync_media(array $lesson, array $peers, callable $rpc, bool $strict = false): bool
 {
-    if (!isset($lesson['access']['mic']) && !isset($lesson['access']['camera'])) return true;
+    if (!isset($lesson['access']['mic']) && !isset($lesson['access']['camera']) && empty($lesson['screen_used'])) return true;
     $room = $lesson['room'];
     $failed = false;
     $until = microtime(true) + 1.25; // Bound lock time; subsequent presence samples retry mismatches.
@@ -126,6 +126,8 @@ function cl_sync_media(array $lesson, array $peers, callable $rpc): bool
             foreach (CL_MEDIA_FEATURES as $feature=>$source) {
                 if (($feature !== 'camera' || !empty($lesson['camera_codec'])) && cl_access_enabled($lesson, $feature, $id)) $sources[] = $source;
             }
+            if (($lesson['screen']['identity'] ?? null) === $id && ($lesson['screen']['sid'] ?? null) === $peer['sid']
+                && ($lesson['staff'][$id] ?? null) === $peer['sid']) $sources[] = 'SCREEN_SHARE';
         }
         // Canonical order also makes a comparison independent of the SFU's enum order.
         $permission = ['canSubscribe'=>true, 'canPublish'=>count($sources)>0, 'canPublishData'=>false,
@@ -146,7 +148,7 @@ function cl_sync_media(array $lesson, array $peers, callable $rpc): bool
             } elseif (!cl_media_matches($reply, $id, $permission)) $failed = true;
         } catch (ClassroomError $error) {
             // A member who just left needs no update; a new SID will be sampled on re-entry.
-            if ($error->status !== 409) $failed = true;
+            if ($strict || $error->status !== 409) $failed = true;
         }
     }
     return !$failed;

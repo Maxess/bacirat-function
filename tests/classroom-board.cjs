@@ -20,15 +20,16 @@ function fixture({staff=true,reducedMotion=false}={}) {
     };
     const rect = { left:0,top:0,width:1000,height:500 };
     function el(id) {
-        if (!staff && ['eraser','eraser-tip','board-file','board-doc','board-upload','board-clear','page-prev','page-next','page-go','page-number'].includes(id)) return null;
+        if (!staff && ['board-laser','board-file','board-doc','board-upload','board-clear','page-prev','page-next','page-go','page-number'].includes(id)) return null;
         if (!elements.has(id)) {
             const classes = new Set(), events = {};
             elements.set(id, {
-                id, dataset:{}, style:{}, width:1600, height:1000, clientWidth:1000, clientHeight:500, scrollWidth:1000, scrollHeight:500,
+                id, dataset:{}, style:{}, children:[], scrollLeft:0, scrollTop:0, width:1600, height:1000, clientWidth:1000, clientHeight:500, scrollWidth:1000, scrollHeight:500,
                 value: id==='ink-color' ? '#0099ff' : id==='ink-size' ? '4' : '',
-                classList:{contains: k=>classes.has(k), toggle(k,v){ if (v) classes.add(k); else classes.delete(k); }, remove:k=>classes.delete(k)},
+                classList:{contains: k=>classes.has(k), add:k=>classes.add(k), toggle(k,v){ if (v) classes.add(k); else classes.delete(k); }, remove:k=>classes.delete(k)},
                 addEventListener(k,fn){ events[k]=fn; }, setAttribute(k,v){ this[k]=v; }, getContext:()=>context,
-                querySelector: k=>el(k), querySelectorAll:()=>[], replaceChildren(){}, getBoundingClientRect:()=>rect,
+                querySelector: k=>el(k), querySelectorAll:()=>[], replaceChildren(){this.children=[];}, getBoundingClientRect:()=>rect,
+                append(node){node.parent=this; this.children.push(node);}, remove(){if(this.parent) this.parent.children=this.parent.children.filter(x=>x!==this);}, focus(){},
                 setPointerCapture(id){this.capture=id;}, hasPointerCapture(id){return id===this.capture;}, releasePointerCapture(){this.capture=null;},
                 fire(type, more={}) { return events[type]?.({type,button:0,clientX:0,clientY:0,pointerId:1,pointerType:'mouse',preventDefault(){},...more}); },
             });
@@ -37,13 +38,14 @@ function fixture({staff=true,reducedMotion=false}={}) {
     }
     const window = { addEventListener(){}, confirm:()=>true, matchMedia:()=>({matches:reducedMotion}) };
     vm.runInNewContext(script, {
-        document:{getElementById:el,createElement:el}, window, crypto:webcrypto, performance:{now:()=>time},
+        document:{getElementById:el,createElement:tag=>el(`${tag}-${++seq}`),addEventListener(){}}, window, crypto:webcrypto, performance:{now:()=>time},
         requestAnimationFrame(fn){const id=++seq;frames.set(id,fn);return id;}, cancelAnimationFrame:id=>frames.delete(id),
         setTimeout(fn,ms){const id=++seq;timers.set(id,{at:time+ms,fn});return id;}, clearTimeout:id=>timers.delete(id),
     });
     const root = el('classroom'); root.dataset.moderator=staff ? 'yes' : 'no';
     const board = window.ClassroomBoard(root, {
-        canEdit:()=>access, notice:text=>notices.push(text),
+        canEdit:()=>access, notice:text=>notices.push(text), identity:()=>staff ? 'teacher-1':'student-1',
+        authorName:()=> 'نام نویسنده', onExpand(){}, aimSoon(){},
         send(action,data){
             const call={action,...structuredClone(data)};
             calls.push(call);
@@ -64,7 +66,7 @@ function fixture({staff=true,reducedMotion=false}={}) {
         const planned=[...frames.values()]; frames.clear();
         for (const callback of planned) callback(time);
     }
-    return {el,board,sync,display,calls,notices,flush,frame,delay:s=>response=s, access:v=>access=v, draw(type,x,y,other){el('board-ink').fire(type,{clientX:x,clientY:y,...other});}};
+    return {el,board,sync,display,calls,notices,flush,frame,delay:s=>response=s, access:v=>access=v, draw(type,x,y,other){el('board-scroll').fire(type,{target:el('board-ink'),clientX:x,clientY:y,...other});}};
 }
 const drawOp = (id, points, color='#0099ff') => ({tool:'pen',size:4,id,points,color});
 
@@ -182,7 +184,7 @@ test('no playback on reset pages, catch-up or reduced motion; old playback canno
 });
 
 
-test('a granted pupil can write only with the pen; revocation discards drafts but keeps confirmed ink', async()=>{
+test('a pupil needs a grant for their pen and eraser; revocation drops drafts but keeps confirmed ink', async()=>{
     const f = fixture({staff:false}); f.access(true); f.sync();
     assert.equal(f.el('ink-tools').hidden,true);
     assert.equal(f.el('board-footer').hidden,true);
@@ -191,7 +193,7 @@ test('a granted pupil can write only with the pen; revocation discards drafts bu
     f.sync([],{write:true});
     assert.equal(f.el('ink-tools').hidden,false);
     assert.equal(f.el('pen').disabled,false);
-    assert.equal(f.el('eraser'),null);
+    assert.equal(f.el('eraser').hidden,false);
     assert.equal(f.el('board-clear'),null);
     f.draw('pointerdown',100,100,{pointerType:'touch'}); f.draw('pointerup',181,202,{pointerType:'touch'});
     await f.flush();
@@ -207,4 +209,78 @@ test('a granted pupil can write only with the pen; revocation discards drafts bu
     assert.equal(f.display.paths.length,1);
     f.sync([],{write:true,cursor:1}); await f.flush();
     assert.equal(f.calls.length,1, 'previous drafts are not sent if the teacher grants again');
+});
+
+
+test('two fingers can pan and pinch without creating a pen dot; a remaining finger cannot restart the stroke', async()=>{
+    const f=fixture(); f.sync();
+    const t=(id)=>({pointerId:id,pointerType:'touch'});
+    const initial=f.el('board-stage').style.width;
+    f.draw('pointerdown',290,235,t(1));
+    f.frame(125); f.draw('pointermove',287,222,t(1));
+    assert.ok(f.display.paths.length, 'a single intended stroke can have an unsent preview');
+    f.draw('pointerdown',570,230,t(2));
+    f.draw('pointermove',180,190,t(1)); f.draw('pointermove',720,190,t(2)); f.frame(16);
+    assert.ok(parseInt(f.el('board-stage').style.width)>parseInt(initial));
+    assert.ok(f.el('board-scroll').scrollLeft || f.el('board-scroll').scrollTop);
+    f.draw('pointerup',720,190,t(2)); f.draw('pointermove',349,240,t(1)); f.draw('pointerup',349,240,t(1));
+    assert.deepEqual(f.display.paths,[]); await f.flush(); assert.deepEqual(f.calls,[]);
+});
+
+test('a two-finger view gesture restores an unshared eraser preview',async()=>{
+    const f=fixture(); f.sync([drawOp('a'.repeat(32),[[900,3000],[4500,3000]])],{cursor:4});
+    const t=(id)=>({pointerId:id,pointerType:'touch'});
+    f.el('eraser').fire('click'); f.draw('pointerdown',220,150,t(1));
+    f.frame(125); f.draw('pointermove',231,151,t(1)); assert.deepEqual(f.display.strokes,[]);
+    f.draw('pointerdown',540,210,t(2));
+    f.draw('pointerup',540,210,t(2)); f.draw('pointerup',231,151,t(1));
+    await f.flush(); assert.deepEqual(f.calls,[]); assert.equal(f.display.strokes.length,1);
+});
+
+test('a contacting pen keeps its path and ignores simultaneous palm touches',async()=>{
+    const f=fixture(); f.sync();
+    const stylus={pointerType:'pen',pointerId:1}, palm={pointerType:'touch',pointerId:2};
+    f.draw('pointerdown',560,200,palm); f.frame(125); f.draw('pointermove',590,220,palm);
+    f.draw('pointerdown',130,150,stylus);
+    f.draw('pointermove',300,280,palm); f.draw('pointermove',155,187,stylus);
+    f.draw('pointerup',155,187,stylus); f.draw('pointerup',300,280,palm);
+    await f.flush(); assert.deepEqual(f.calls[0].strokes[0].points,[[1300,3000],[1550,3740]]);
+});
+
+test('an admitted pupil erases fragments of their own line, never other authors or a legacy mask',async()=>{
+    const f=fixture({staff:false}); f.access(true);
+    const prefix='b'.repeat(16), mine=prefix+'c'.repeat(16), other='a'.repeat(32);
+    f.sync([drawOp(mine,[[900,3000],[4500,3000]]),drawOp(other,[[900,3100],[4500,3100]],'#004400')],{write:true,owner:prefix,cursor:4});
+    f.delay(() => Promise.resolve({ink:5}));
+    f.el('eraser').fire('click'); f.draw('pointerdown',220,153); f.draw('pointerup',220,153); await f.flush();
+    assert.deepEqual(f.calls[0].strokes,[{tool:'erase-stroke',targets:[mine]}]);
+    assert.deepEqual(f.display.strokes,[['source-over','#004400']]);
+    f.sync([],{write:false,cursor:4}); assert.equal(f.el('eraser').hidden,true);
+});
+
+test('fresh remote author label follows the revealed tip, fades quickly, and cannot survive a reset',async()=>{
+    const f=fixture({staff:false}); const root=f.el('board-writers'); f.sync();
+    const op={...digit,author:'student-2',live:true};
+    f.sync([op],{moving:true,cursor:6}); assert.equal(root.children.length,0);
+    f.frame(60); const label=root.children[0]; assert.equal(label.textContent,'نام نویسنده');
+    assert.notEqual(label.style.left,'48%');
+    f.frame(210); assert.equal(label.style.left,'48%'); assert.equal(label.style.top,'43%');
+    await f.flush(); assert.equal(label.classList.contains('fading'),true);
+    await f.flush(); assert.deepEqual(root.children,[]);
+    f.sync([{...op,author:'student-1'}],{moving:true,cursor:12}); f.frame(250);
+    assert.deepEqual(root.children,[],'own ink stays unlabelled');
+    f.sync([op],{moving:true,cursor:6,rev:2,reset:true}); f.frame(250);
+    assert.deepEqual(root.children,[],'history stays unlabelled');
+});
+
+test('the presenter laser coalesces into one existing read and is never written as ink',async()=>{
+    const f=fixture(); f.sync();
+    f.el('board-laser').fire('click'); f.draw('pointerdown',200,200); f.draw('pointermove',600,300); f.draw('pointerup',600,300);
+    assert.deepEqual(structuredClone(f.board.takeAim()),{aim:[6000,6000]});
+    assert.deepEqual(structuredClone(f.board.takeAim()),{});
+    await f.flush(); assert.deepEqual(f.calls,[]); assert.deepEqual(f.display.paths,[]);
+    const pupil=fixture({staff:false}); pupil.sync([],{laser:{by:'teacher-1',xy:[6000,6000],ttl:600}});
+    const laser=pupil.el('board-laser-remote'); assert.equal(laser.hidden,false); assert.equal(laser.style.left,'60%');
+    await pupil.flush(); assert.equal(laser.classList.contains('fading'),true);
+    pupil.sync([],{rev:2,reset:true}); assert.equal(laser.hidden,true);
 });

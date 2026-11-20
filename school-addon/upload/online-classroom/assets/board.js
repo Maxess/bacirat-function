@@ -7,7 +7,7 @@
         const context = ink.getContext('2d');
         const background = paper.getContext('2d', {alpha:false});
         const zoom = el('board-zoom'), zoomOut = el('board-zoom-out'), zoomIn = el('board-zoom-in');
-        const zoomSteps = [.75, 1, 1.25, 1.5, 2, 2.5];
+        const zoomSteps = [.75, 1, 1.25, 1.5, 2, 2.5, 3];
         const percentage = new Intl.NumberFormat('fa-IR', {style:'percent'}), pageNumber = new Intl.NumberFormat('fa-IR');
         let zoomLevel = 1;
         let data = null, transport = null, cursor = 0, ops = [], stroke = null, pointer = null;
@@ -16,7 +16,11 @@
         const packetSize = 96, eraseSize = 32, batchSize = 6, queueLimit = 48, writeDelay = 175;
         const tip = el('eraser-tip');
         let tool = 'pen', busy = false, renderVersion = 0, documentVersion = 0, docKey = '', docsKey = '';
-        let drag = null;
+        let drag = null, pointerType = '', candidate = null, pinch = null, pinchFrame, touchBlocked = false, penUntil = 0, space = false;
+        const contacts = new Map();
+        const writers = el('board-writers'), labels = new Map();
+        const localLaser = el('board-laser-local'), remoteLaser = el('board-laser-remote');
+        let aimPending = null, localFade, remoteFade;
         let library, job, rendering, imageLoad, imageFile;
         const staff = root.dataset.moderator === 'yes';
         const url = value => new URL(value, document.baseURI).href;
@@ -60,42 +64,40 @@
         }
         function fitView() {
             const w = viewport.clientWidth, h = viewport.clientHeight;
-            if (w && h) {
-                stage.style.width = `${Math.max(1, Math.floor(Math.min(w, h * paper.width / paper.height) * zoomSteps[zoomLevel]))}px`;
-                dragState();
-            }
-        }
-        function canDrag() {
-            return (!canWrite() || tool === 'pan') && (viewport.scrollWidth > viewport.clientWidth || viewport.scrollHeight > viewport.clientHeight);
-        }
-        function dragState() { viewport.dataset.drag = drag ? 'moving' : canDrag() ? 'ready' : 'no'; }
-        viewport.addEventListener('pointerdown', event => {
-            if (event.pointerType !== 'mouse' || event.button !== 0 || !canDrag()) return;
-            event.preventDefault();
-            drag = {id:event.pointerId, x:event.clientX + viewport.scrollLeft, y:event.clientY + viewport.scrollTop};
-            viewport.setPointerCapture(event.pointerId);
+            if (!w || !h) return;
+            const width = `${Math.max(1, Math.round(Math.min(w, h * paper.width / paper.height) * zoomLevel))}px`;
+            if (stage.style.width !== width) stage.style.width = width;
             dragState();
-        });
-        viewport.addEventListener('pointermove', event => {
-            if (drag?.id !== event.pointerId) return;
-            viewport.scrollLeft = drag.x - event.clientX;
-            viewport.scrollTop = drag.y - event.clientY;
-        });
-        for (const type of ['pointerup','pointercancel','lostpointercapture']) {
-            viewport.addEventListener(type, event => { if (drag?.id === event.pointerId) { drag = null; dragState(); } });
         }
-        function setZoom(level, keepCenter = true) {
-            const x = (viewport.scrollLeft + viewport.clientWidth / 2) / Math.max(1, viewport.scrollWidth);
-            const y = (viewport.scrollTop + viewport.clientHeight / 2) / Math.max(1, viewport.scrollHeight);
-            zoomLevel = Math.max(0, Math.min(zoomSteps.length - 1, level));
-            zoom.textContent = percentage.format(zoomSteps[zoomLevel]);
-            zoomOut.disabled = zoomLevel === 0;
-            zoomIn.disabled = zoomLevel === zoomSteps.length - 1;
+        function canDrag() { return viewport.scrollWidth > viewport.clientWidth || viewport.scrollHeight > viewport.clientHeight; }
+        function dragState() { viewport.dataset.drag = drag || pinch ? 'moving' : canDrag() && (!canWrite() || tool === 'pan' || space) ? 'ready' : 'no'; }
+        const clamp = (n, min=0, max=1) => Math.max(min, Math.min(max,n));
+        const at = event => [event.clientX,event.clientY];
+        function center() {
+            const box = viewport.getBoundingClientRect();
+            return [box.left + viewport.clientWidth/2, box.top + viewport.clientHeight/2];
+        }
+        function relative(point) {
+            const box = stage.getBoundingClientRect();
+            return [clamp((point[0]-box.left)/Math.max(1,box.width)),clamp((point[1]-box.top)/Math.max(1,box.height))];
+        }
+        function setZoom(level, point = center(), anchor = point && relative(point)) {
+            zoomLevel = clamp(level, zoomSteps[0], zoomSteps[zoomSteps.length-1]);
+            const value = percentage.format(zoomLevel);
+            if (zoom.textContent !== value) zoom.textContent = value;
+            zoomOut.disabled = zoomLevel <= zoomSteps[0];
+            zoomIn.disabled = zoomLevel >= zoomSteps[zoomSteps.length-1];
             fitView();
-            if (keepCenter) {
-                viewport.scrollLeft = x * viewport.scrollWidth - viewport.clientWidth / 2;
-                viewport.scrollTop = y * viewport.scrollHeight - viewport.clientHeight / 2;
-            }
+            if (!point) return;
+            const box = stage.getBoundingClientRect();
+            const dx = box.left + anchor[0]*box.width - point[0], dy = box.top + anchor[1]*box.height - point[1];
+            if (Math.abs(dx) >= .5) viewport.scrollLeft += dx;
+            if (Math.abs(dy) >= .5) viewport.scrollTop += dy;
+        }
+        function stepZoom(direction) {
+            const list = direction > 0 ? zoomSteps : [...zoomSteps].reverse();
+            const next = list.find(n => direction*(n-zoomLevel) > .01);
+            if (next !== undefined) setZoom(next);
         }
         function fit(width, height) {
             if (!(width > 0 && height > 0 && Number.isFinite(width/height))) throw new Error('Invalid board size');
@@ -156,6 +158,43 @@
             cancelAnimationFrame(current.frame);
             if (finish) current.draw(1);
         }
+        function locate(node, point) {
+            node.style.left = `${point[0]/100}%`;
+            node.style.top = `${point[1]/100}%`;
+        }
+        function clearLabels() {
+            for (const cue of labels.values()) clearTimeout(cue.timer);
+            labels.clear(); writers.replaceChildren();
+        }
+        function writer(op, point) {
+            if (!op.live || !op.author || op.author === options.identity() || !point || removed.has(op.id)) return;
+            const name = options.authorName(op.author);
+            if (!name) return;
+            let cue = labels.get(op.author);
+            if (!cue) {
+                const label = document.createElement('bdi');
+                label.className = 'ink-writer';
+                writers.append(label);
+                labels.set(op.author, cue = {label});
+            }
+            const {label} = cue;
+            if (label.textContent !== name) label.textContent = name;
+            locate(label,point);
+            label.dataset.left = String(point[0] > 5450);
+            label.dataset.below = String(point[1] < 1600);
+            label.classList.remove('fading');
+            cue.id = op.id;
+            clearTimeout(cue.timer);
+            cue.timer = setTimeout(() => {
+                label.classList.add('fading');
+                cue.timer = setTimeout(() => { label.remove(); labels.delete(op.author); }, reducedMotion?.matches ? 0 : 160);
+            }, 370);
+        }
+        function lastWriters(rows) {
+            const latest = new Map();
+            for (const op of rows) if (op.tool === 'pen' && op.live && op.author) latest.set(op.author,op);
+            for (const op of latest.values()) writer(op,last(op.points));
+        }
         function presentInk(view, catchingUp) {
             stopPlayback(true);
             const rows = view.ops;
@@ -185,6 +224,7 @@
                     let index = 0, painted = 0;
                     const current = {draw(fraction) {
                         const target = length*fraction;
+                        const cues = new Map();
                         while (index < parts.length && painted < target) {
                             const {op,a,b,from,to} = parts[index];
                             const end = Math.min(target,to);
@@ -193,11 +233,17 @@
                                     const f = (n-from)/(to-from);
                                     return [a[0]+f*(b[0]-a[0]), a[1]+f*(b[1]-a[1])];
                                 };
-                                paint({...op, points:[at(painted),at(end)]});
-                            } else if (painted === from) paint(op);
+                                const head = at(end);
+                                paint({...op, points:[at(painted),head]});
+                                if (op.live && op.author) cues.set(op.author,[op,head]);
+                            } else if (painted === from) {
+                                paint(op);
+                                if (op.live && op.author) cues.set(op.author,[op,op.points[0]]);
+                            }
                             painted = end;
                             if (painted === to) index++;
                         }
+                        for (const [op,point] of cues.values()) writer(op,point);
                     }};
                     function tick(now) {
                         if (playback !== current) return;
@@ -212,6 +258,7 @@
                 }
             }
             for (const op of rows) paintVisible(op, removed);
+            if (!catchingUp && !document.hidden) lastWriters(rows);
         }
         function receive(incoming) {
             collectRemoved(removed, incoming);
@@ -219,7 +266,7 @@
                 const tail = last(ops);
                 if (op.tool === 'pen' && tail?.tool === 'pen' && tail.id === op.id && op.id && tail.color === op.color && tail.size === op.size
                     && samePoint(last(tail.points), op.points[0]) && tail.points.length + op.points.length - 1 <= packetSize) {
-                    ops[ops.length - 1] = {...tail, points:[...tail.points, ...op.points.slice(1)]};
+                    ops[ops.length - 1] = {...op, points:[...tail.points, ...op.points.slice(1)]};
                 } else ops.push(op);
             }
         }
@@ -228,18 +275,49 @@
             sent = sent.filter(entry => entry.until === null || entry.until > cursor);
             return before !== sent.length;
         }
+        function fadeDot(node) { node.classList.add('fading'); }
+        function pointDot(node, point) { locate(node,point); node.hidden = false; node.classList.remove('fading'); }
+        function clearPointers() {
+            aimPending = null; clearTimeout(localFade); clearTimeout(remoteFade);
+            localLaser.hidden = remoteLaser.hidden = true;
+        }
+        function showRemoteLaser(aim) {
+            clearTimeout(remoteFade);
+            if (!aim || aim.by === options.identity() || document.hidden) { remoteLaser.hidden = true; return; }
+            pointDot(remoteLaser,aim.xy);
+            remoteFade = setTimeout(() => fadeDot(remoteLaser), Math.max(0,aim.ttl - 215));
+        }
         function pointerEnd() {
-            const previous = pointer;
-            pointer = null; stroke = null;
-            if (tip) tip.hidden = true;
-            if (previous !== null && ink.hasPointerCapture?.(previous)) ink.releasePointerCapture(previous);
+            if (stroke?.mode === 'laser') {
+                clearTimeout(localFade);
+                localFade = setTimeout(() => fadeDot(localLaser), 410);
+            }
+            pointer = null; pointerType = ''; stroke = null; candidate = null;
+            tip.hidden = true;
+        }
+        function abandonUnsentTouch() {
+            // A touch can begin moving just before the second finger or the stylus is detected.
+            // Discard only its unshared preview; never retract established handwriting.
+            if (pointerType !== 'touch' || stroke.shared) return;
+            const id = stroke.style?.id, erasures = stroke.erasures;
+            if (!id && !erasures) return;
+            const count = pending.length;
+            pending = pending.filter(op => !(id && op.id === id) && !erasures?.has(op));
+            if (pending.length !== count) redraw();
+        }
+        function stopGestures() {
+            abandonUnsentTouch();
+            cancelAnimationFrame(pinchFrame); pinchFrame = undefined;
+            if (contacts.size) touchBlocked = true;
+            pinch = drag = null; space = false;
+            pointerEnd(); dragState();
         }
         function wipeInk() {
             generation++;
-            stopPlayback();
+            stopPlayback(); stopGestures(); clearLabels(); clearPointers();
             clearTimeout(writeTimer); writeTimer = undefined;
             ops = []; pending = []; sent = [];
-            removed.clear(); targetRev = 0; cursor = 0; pointerEnd();
+            removed.clear(); targetRev = 0; cursor = 0;
         }
         function canWrite() { return options.canEdit() && (staff || data?.write === true); }
         function editable() { return !!data && !busy && data.rev >= targetRev && canWrite(); }
@@ -258,6 +336,8 @@
             if (writing || !data || !pending.length || !canWrite()) return writing;
             const stamp = generation;
             const entry = {ops:pending.splice(0,batchSize), until:null};
+            if (pointerType === 'touch' && entry.ops.some(op => (stroke.style && op.id === stroke.style.id)
+                || stroke.erasures?.has(op))) stroke.shared = true;
             sent.push(entry);
             writing = options.send('board-ink',{board:data.rev,strokes:entry.ops}).then(reply => {
                 if (stamp !== generation) return;
@@ -364,13 +444,14 @@
             el('ink-tools').hidden = !staff && !canWrite();
             stage.classList.toggle('editable', ready);
             stage.classList.toggle('erasing',ready && tool === 'erase');
-            if (!ready && tip) tip.hidden = true;
-            for (const id of ['pen','pan','ink-color','ink-size']) el(id).disabled = !ready;
+            if (!ready) tip.hidden = true;
+            el('eraser').hidden = !staff && !canWrite();
+            for (const id of ['pen','pan','eraser','ink-color','ink-size']) el(id).disabled = !ready;
             dragState();
             if (!staff) return;
             const pages = data?.doc?.pages || 1;
             const n = data?.page || 1;
-            for (const id of ['eraser','board-clear','board-file','board-doc','page-number','page-go']) el(id).disabled = !ready;
+            for (const id of ['board-laser','board-clear','board-file','board-doc','page-number','page-go']) el(id).disabled = !ready;
             el('board-upload').querySelector('button').disabled = !ready;
             el('page-number').max = String(pages);
             el('page-number').disabled = el('page-go').disabled = !ready || pages === 1;
@@ -398,11 +479,18 @@
             const dropped = prune();
             receive(next.ops);
             if (removed.has(stroke?.style?.id)) pointerEnd();
+            for (const [id,cue] of labels) if (removed.has(cue.id)) {
+                clearTimeout(cue.timer); cue.label.remove(); labels.delete(id);
+            }
+            showRemoteLaser(next.laser);
             if (changedPaper) {
                 // Do not briefly show a page from the previous document during parsing.
                 fit(1600,1000);
                 show(next,scope,reloadDoc);
-            } else if (resetPage || revoked || dropped || (next.ops.length && (pending.length || sent.length || next.ops.some(op => op.tool === 'erase-stroke')))) redraw();
+            } else if (resetPage || revoked || dropped || (next.ops.length && (pending.length || sent.length || next.ops.some(op => op.tool === 'erase-stroke')))) {
+                redraw();
+                if (!resetPage && !catchingUp && !document.hidden) lastWriters(next.ops);
+            }
             else if (next.ops.length) presentInk(next, catchingUp);
             const caption = next.doc ? pageNumber.format(next.page) : '';
             if (el('board-page-label').textContent !== caption) el('board-page-label').textContent = caption;
@@ -427,13 +515,14 @@
             wipeInk(); clearDocument();
             stage.classList.remove('has-document');
             fit(1600,1000);
-            setZoom(1, false);
+            setZoom(1, null);
             if (card.classList.contains('expanded')) setExpanded(false);
             el('board-page-label').textContent = ''; el('board-footer').hidden = true; toolState();
         }
         function setExpanded(expand) {
             card.classList.toggle('expanded',expand);
-            for (const node of root.querySelectorAll('.room-top, .staff-actions, .speaker-strip, .camera-strip, .room-side')) node.inert = expand;
+            options.onExpand(expand);
+            for (const node of root.querySelectorAll('.room-top, .staff-actions, .screen-panel, .speaker-strip, .camera-strip, .room-side')) node.inert = expand;
             const btn = el('board-expand');
             btn.setAttribute('aria-pressed',String(expand));
             btn.setAttribute('aria-label', expand ? 'بازگشت به کلاس' : 'نمای بزرگ تخته');
@@ -442,13 +531,17 @@
             if (expand) btn.focus({preventScroll:true});
         }
         el('board-expand').addEventListener('click', () => setExpanded(!card.classList.contains('expanded')));
-        card.addEventListener('keydown', e => { if (e.key === 'Escape') setExpanded(false); });
+        card.addEventListener('keydown', e => {
+            if (e.key !== 'Escape') return;
+            if (el('wake-control').open) { el('wake-control').open = false; el('wake-control').querySelector('summary').focus(); }
+            else setExpanded(false);
+        });
         zoom.addEventListener('click', () => setZoom(1));
-        zoomOut.addEventListener('click', () => setZoom(zoomLevel - 1));
-        zoomIn.addEventListener('click', () => setZoom(zoomLevel + 1));
+        zoomOut.addEventListener('click', () => stepZoom(-1));
+        zoomIn.addEventListener('click', () => stepZoom(1));
         if ('ResizeObserver' in window) new ResizeObserver(fitView).observe(viewport);
         else window.addEventListener('resize', fitView);
-        setZoom(1, false);
+        setZoom(1, null);
 
         if (staff) {
             const files = el('board-files'), toggle = el('toggle-files');
@@ -461,7 +554,8 @@
             pointerEnd();
             tool = value;
             el('pen').setAttribute('aria-pressed',String(value==='pen'));
-            el('eraser')?.setAttribute('aria-pressed',String(value==='erase'));
+            el('eraser').setAttribute('aria-pressed',String(value==='erase'));
+            el('board-laser')?.setAttribute('aria-pressed',String(value==='laser'));
             el('pan').setAttribute('aria-pressed',String(value==='pan'));
             stage.classList.toggle('pan',value==='pan');
             toolState();
@@ -481,12 +575,13 @@
             const hidden = collectRemoved(new Set(removed), draft);
             let changed = false;
             for (const op of [...ops,...draft]) {
-                if (op.tool !== 'pen' || !op.id || hidden.has(op.id) || !touches(op,a,b,rect,type==='touch' ? 19 : 14)) continue;
+                if (op.tool !== 'pen' || !op.id || (!staff && (!data.owner || !op.id.startsWith(data.owner))) || hidden.has(op.id) || !touches(op,a,b,rect,type==='touch' ? 19 : 14)) continue;
                 let tail = last(pending);
-                if (tail?.tool !== 'erase-stroke' || tail.targets.length >= eraseSize) {
+                if (tail?.tool !== 'erase-stroke' || tail.targets.length >= eraseSize || (stroke.erasures && !stroke.erasures.has(tail))) {
                     if (!queuedSlot()) break;
                     tail = {tool:'erase-stroke',targets:[]};
                     pending.push(tail);
+                    stroke.erasures?.add(tail);
                 }
                 tail.targets.push(op.id);
                 hidden.add(op.id);
@@ -494,24 +589,32 @@
             }
             if (changed) { redraw(); scheduleWrite(); }
         }
-        function begin(event) {
-            if (tool === 'pan' || !editable() || pointer !== null || event.button !== 0) return;
-            const rect = ink.getBoundingClientRect();
-            if (!rect.width || !rect.height || (tool === 'pen' && !queuedSlot())) return;
-            event.preventDefault();
+        function laserPoint(point) {
+            clearTimeout(localFade);
+            pointDot(localLaser,point);
+            if (!aimPending) options.aimSoon();
+            aimPending = {point, at:performance.now(), rev:data.rev};
+        }
+        function takeAim() {
+            const item = aimPending;
+            aimPending = null;
+            return staff && editable() && item?.rev === data.rev && performance.now()-item.at <= 850 ? {aim:item.point} : {};
+        }
+        function beginStroke(id, type, point, rect, mode = tool) {
+            if (!editable() || pointer !== null || mode === 'pan' || (mode === 'pen' && !queuedSlot())) return;
             stopPlayback(true);
-            pointer = event.pointerId;
-            ink.setPointerCapture(pointer);
-            const point = xy(event,rect);
-            if (tool === 'erase') {
-                stroke = {last:point};
-                aim(point,event.pointerType);
-                erase(point,point,rect,event.pointerType);
+            pointer = id; pointerType = type;
+            stroke = {last:point,mode};
+            if (mode === 'erase') {
+                if (type === 'touch') stroke.erasures = new Set();
+                aim(point,type); erase(point,point,rect,type);
+            } else if (mode === 'laser') {
+                laserPoint(point);
             } else {
-                const id = Array.from(crypto.getRandomValues(new Uint8Array(16)), n => n.toString(16).padStart(2,'0')).join('');
-                const style = {tool:'pen',id,color:el('ink-color').value,size:Number(el('ink-size').value)};
-                stroke = {style,last:point};
-                const op = {...style,points:[point]};
+                const raw = Array.from(crypto.getRandomValues(new Uint8Array(16)), n => n.toString(16).padStart(2,'0')).join('');
+                const id = data.owner ? data.owner + raw.slice(16) : raw;
+                stroke.style = {tool:'pen',id,color:el('ink-color').value,size:Number(el('ink-size').value)};
+                const op = {...stroke.style,points:[point]};
                 pending.push(op); paint(op); scheduleWrite();
             }
         }
@@ -528,39 +631,157 @@
             stroke.last = point;
             paint({...style,points:[before,point]}); scheduleWrite();
         }
+        function inkPoint(point, rect) {
+            if (!stroke) return;
+            if (stroke.mode === 'erase') {
+                const before = stroke.last; stroke.last = point;
+                aim(point,pointerType);
+                if (!samePoint(before,point)) erase(before,point,rect,pointerType);
+            } else if (stroke.mode === 'laser') {
+                if (!samePoint(stroke.last,point)) { stroke.last = point; laserPoint(point); }
+            } else penPoint(point);
+        }
+        function beginDrag(event) {
+            const [x,y] = at(event);
+            drag = {id:event.pointerId,x:x+viewport.scrollLeft,y:y+viewport.scrollTop};
+            dragState();
+        }
+        function moveDrag(event) {
+            viewport.scrollLeft = drag.x-event.clientX;
+            viewport.scrollTop = drag.y-event.clientY;
+        }
+        function pair(ids) {
+            const [a,b] = ids.map(id => contacts.get(id));
+            return {point:[(a[0]+b[0])/2,(a[1]+b[1])/2], distance:Math.max(12,Math.hypot(a[0]-b[0],a[1]-b[1]))};
+        }
+        function beginPinch() {
+            cancelAnimationFrame(pinchFrame); pinchFrame = undefined;
+            const ids = [...contacts.keys()].slice(0,2), sample = pair(ids);
+            pinch = {ids, level:zoomLevel, distance:sample.distance, anchor:relative(sample.point), zooming:false};
+            drag = null; touchBlocked = true;
+            abandonUnsentTouch(); pointerEnd(); aimPending = null; dragState();
+        }
+        function movePinch() {
+            if (pinchFrame !== undefined) return;
+            pinchFrame = requestAnimationFrame(() => {
+                pinchFrame = undefined;
+                if (!pinch) return;
+                const sample = pair(pinch.ids);
+                const ratio = sample.distance / pinch.distance;
+                pinch.zooming ||= Math.abs(ratio-1) > .035; // Two-finger panning shouldn't jitter the scale.
+                setZoom(pinch.level * (pinch.zooming ? ratio : 1), sample.point, pinch.anchor);
+            });
+        }
+        function drawingTarget(event) { return event.target === ink; }
+        function grab(event) {
+            const target = event.target?.setPointerCapture ? event.target : viewport;
+            target.setPointerCapture?.(event.pointerId);
+            event.preventDefault();
+        }
+        function start(event) {
+            const type = event.pointerType, id = event.pointerId;
+            if (type === 'touch') {
+                if (pointerType === 'pen' || performance.now() < penUntil) return;
+                if (!contacts.size) touchBlocked = false;
+                contacts.set(id,at(event)); grab(event);
+                if (!pinch && contacts.size >= 2 && pointerType !== 'pen') { beginPinch(); return; }
+                if (touchBlocked || pointer !== null) return;
+                if (!editable() || tool === 'pan' || !drawingTarget(event)) { beginDrag(event); return; }
+                const rect = ink.getBoundingClientRect();
+                if (!rect.width || !rect.height) return;
+                if (tool === 'laser') beginStroke(id,type,xy(event,rect),rect);
+                else candidate = {id, at:performance.now(), start:at(event), first:xy(event,rect), trail:[]};
+                return;
+            }
+            const buttonErase = type === 'pen' && (event.button === 5 || (event.buttons & 32) !== 0);
+            if (event.button !== 0 && event.button !== 1 && !buttonErase) return;
+            if (type === 'pen') {
+                penUntil = performance.now() + 420;
+                if (contacts.size && pointerType !== 'pen') stopGestures();
+            }
+            if (event.button === 1 || space || !editable() || tool === 'pan' || !drawingTarget(event)) {
+                if (canDrag() && pointer === null) { grab(event); beginDrag(event); }
+                return;
+            }
+            const rect = ink.getBoundingClientRect();
+            if (pointer !== null || !rect.width || !rect.height) return;
+            grab(event);
+            beginStroke(id,type,xy(event,rect),rect,buttonErase ? 'erase' : tool);
+        }
+        function commitTouch(id, rect) {
+            if (!candidate || candidate.id !== id) return;
+            const {first,trail} = candidate;
+            candidate = null;
+            beginStroke(id,'touch',first,rect);
+            for (const point of trail) inkPoint(point,rect);
+        }
         function move(event) {
+            const id = event.pointerId, type = event.pointerType;
+            if (type === 'touch') {
+                if (!contacts.has(id)) return;
+                contacts.set(id,at(event));
+                if (pinch) { if (pinch.ids.includes(id)) movePinch(); return; }
+                if (touchBlocked || pointerType === 'pen') return;
+            }
+            if (drag?.id === id) { moveDrag(event); return; }
             if (!editable() || tool === 'pan') return;
+            if (type === 'pen') penUntil = performance.now() + 420;
+            if (pointer !== id && candidate?.id !== id && !(type !== 'touch' && tool === 'erase' && drawingTarget(event))) return;
             const rect = ink.getBoundingClientRect();
             if (!rect.width || !rect.height) return;
-            if (tool === 'erase') {
-                const at = xy(event,rect);
-                aim(at,event.pointerType);
-                if (pointer === event.pointerId && stroke) {
-                    const before = stroke.last;
-                    stroke.last = at;
-                    if (!samePoint(before,at)) erase(before,at,rect,event.pointerType);
-                }
-            } else if (pointer === event.pointerId && stroke) {
-                const samples = event.getCoalescedEvents?.();
-                for (const sample of samples?.length ? samples : [event]) {
-                    if (!stroke) break;
-                    penPoint(xy(sample,rect));
-                }
+            if (candidate?.id === id) {
+                const [x,y] = candidate.start;
+                if (Math.hypot(event.clientX-x,event.clientY-y) < 6 && !candidate.trail.length) return;
+                if (candidate.trail.length < 12) candidate.trail.push(xy(event,rect));
+                if (performance.now() - candidate.at >= 120) commitTouch(id,rect);
             }
+            if (pointer === id && stroke) {
+                const samples = event.getCoalescedEvents?.();
+                for (const sample of samples?.length ? samples : [event]) inkPoint(xy(sample,rect),rect);
+            } else if (type !== 'touch' && tool === 'erase' && drawingTarget(event)) aim(xy(event,rect),type);
         }
         function done(event) {
-            if (pointer !== event.pointerId) return;
-            if (event.type === 'pointerup') move(event);
-            pointerEnd();
+            const id = event.pointerId;
+            if (event.pointerType === 'pen') penUntil = performance.now() + 420;
+            if (event.type === 'pointerup' && !touchBlocked && candidate?.id === id && editable()) {
+                const rect = ink.getBoundingClientRect();
+                if (rect.width && rect.height) commitTouch(id,rect);
+            }
+            if (pointer === id) {
+                if (event.type === 'pointerup') move(event);
+                pointerEnd();
+            }
+            if (candidate?.id === id) candidate = null;
+            if (drag?.id === id) { drag = null; dragState(); }
+            if (!contacts.delete(id)) return;
+            if (pinch?.ids.includes(id)) {
+                cancelAnimationFrame(pinchFrame); pinchFrame = undefined;
+                pinch = null;
+                if (contacts.size >= 2) beginPinch();
+                else dragState();
+            }
+            if (!contacts.size) touchBlocked = false;
         }
-        ink.addEventListener('pointerdown',begin);
-        ink.addEventListener('pointermove',move);
-        ink.addEventListener('pointerup',done);
-        ink.addEventListener('pointercancel',done);
-        ink.addEventListener('lostpointercapture',done);
-        if (tip) ink.addEventListener('pointerleave',() => { tip.hidden = true; });
+        viewport.addEventListener('pointerdown',start);
+        viewport.addEventListener('pointermove',move);
+        for (const type of ['pointerup','pointercancel','lostpointercapture']) viewport.addEventListener(type,done);
+        viewport.addEventListener('pointerleave',() => { if (pointer === null) tip.hidden = true; });
+        viewport.addEventListener('wheel',event => {
+            if (!event.ctrlKey || !event.deltaY) return;
+            event.preventDefault();
+            setZoom(zoomLevel*Math.exp(clamp(-event.deltaY*.003,-.22,.22)),at(event));
+        }, {passive:false});
+        viewport.addEventListener('keydown',event => {
+            if (event.code === 'Space') { event.preventDefault(); space = true; dragState(); }
+            if (event.key === '+' || event.key === '=') { event.preventDefault(); stepZoom(1); }
+            if (event.key === '-') { event.preventDefault(); stepZoom(-1); }
+        });
+        viewport.addEventListener('keyup',event => { if (event.code === 'Space') { space = false; dragState(); } });
+        viewport.addEventListener('blur',() => { space = false; dragState(); });
+        document.addEventListener('visibilitychange',() => { if (document.hidden) { stopGestures(); stopPlayback(true); clearLabels(); clearPointers(); } });
         el('pen').addEventListener('click',() => setTool('pen'));
-        if (staff) el('eraser').addEventListener('click',() => setTool('erase'));
+        el('eraser').addEventListener('click',() => setTool('erase'));
+        el('board-laser')?.addEventListener('click',() => setTool('laser'));
         el('pan').addEventListener('click',() => setTool('pan'));
         if (staff) {
             async function act(work) {
@@ -607,6 +828,6 @@
                 });
             });
         }
-        return {position:() => ({board:data?.rev || 0,ink:cursor}),sync,reset};
+        return {position:() => ({board:data?.rev || 0,ink:cursor}),takeAim,sync,reset};
     };
 })();

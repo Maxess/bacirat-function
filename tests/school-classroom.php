@@ -126,4 +126,39 @@ blocked(fn()=>cl_live_media_peers(['participants'=>null]),502);
 blocked(fn()=>cl_media_permission(['identity'=>'student-6','permission'=>['canPublish'=>false,'can_publish'=>true]],'student-6'),502);
 check(cl_service_grant('UpdateParticipant', $room) === ['roomAdmin'=>true,'room'=>$room], 'admin RPC cannot escape current room');
 
-echo "PASS listener JWT, individual/all SFU permissions, independent mic and camera, admit/retry/revocation\n";
+$pilot = $cfg + ['screen_share'=>true];
+$s->put('lesson',$lesson['id'],$get() + ['staff'=>['teacher-1'=>'PA_Staff','admin-1'=>'PA_Admin']]);
+$screen = static fn($actor,$sid,$enabled,$opts=null)=>cl_set_screen($s,$opts??$pilot,$get(),$actor,compact('sid','enabled'),$now,$rpc);
+blocked(fn()=>$screen($teacher,'PA_Staff',true,$cfg),409);
+blocked(fn()=>cl_set_screen($s,$pilot,array_replace($get(),['camera_codec'=>'h264']),$teacher,['sid'=>'PA_Staff','enabled'=>true],$now,$rpc),409);
+blocked(fn()=>$screen($student,'PA_Pupil',true),403);
+blocked(fn()=>$screen($teacher,'PA_Wrong',true),409);
+$set($teacher,'mic',true,'teacher-1');
+$set($teacher,'camera',true,'teacher-1');
+$tracks['teacher-1'] = ['MICROPHONE','CAMERA'];
+$owned = $screen($teacher,'PA_Staff',true);
+check($owned['screen'] === ['identity'=>'teacher-1','sid'=>'PA_Staff'] && $permissions['teacher-1'] === $limit(['CAMERA','MICROPHONE','SCREEN_SHARE']),
+    'pilot grants exactly one extra video source to a confirmed moderator');
+check($tracks['teacher-1'] === ['MICROPHONE','CAMERA'] && $permissions['admin-1'] === $listener, 'no automatic screen or general publish grant');
+blocked(fn()=>$screen($admin,'PA_Admin',true),409);
+$tracks['teacher-1'][] = 'SCREEN_SHARE';
+$current = $get();
+cl_refresh_screen($current,$pilot,['teacher-1'=>$peer('teacher-1')],$now+CL_SCREEN_LEASE+1);
+check($current['screen']['until'] > $now+CL_SCREEN_LEASE+1,'active presentation holds the lease');
+$replaced = $current; $replaced['staff']['teacher-1'] = 'PA_Replaced';
+cl_refresh_screen($replaced,$pilot,['teacher-1'=>$peer('teacher-1')],$now+1);
+check(cl_screen_state($replaced) === null, 'a stale staff SID never keeps a presentation lease');
+$broken['teacher-1'] = 'ignored';
+blocked(fn()=>$screen($teacher,'PA_Staff',false),502);
+check(cl_screen_state($get()) === null && $get()['media_pending'], 'intent to revoke persists on SFU error');
+blocked(fn()=>$screen($admin,'PA_Admin',true),502);
+check($permissions['admin-1'] === $listener, 'never grant a second stream until old source is confirmed removed');
+unset($broken['teacher-1']);
+$screen($admin,'PA_Admin',true);
+check($permissions['teacher-1'] === $both && $tracks['teacher-1'] === ['MICROPHONE','CAMERA'] && $permissions['admin-1'] === $limit(['SCREEN_SHARE']),
+    'sharing moves without stopping previous independent media');
+$current=$get();
+cl_refresh_screen($current,$pilot,['admin-1'=>$peer('admin-1')],$now+CL_SCREEN_LEASE+1);
+check(cl_screen_state($current) === null && $refresh($current) && $permissions['admin-1'] === $listener,'unused presentation expires and its permit is removed');
+
+echo "PASS listener JWT, media isolation, SFU reconcile, and one opt-in screen-share video source\n";

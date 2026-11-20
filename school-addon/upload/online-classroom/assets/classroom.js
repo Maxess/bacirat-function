@@ -35,13 +35,16 @@
     const features = {mic:{label:'میکروفون',icons:['mic','mic-off'],source:2},
         camera:{label:'دوربین',icons:['camera','camera-off'],source:1}, board:{label:'نوشتن روی تخته',icons:['pen']}};
     const permissionIcons = el('permission-icons')?.content;
-    const cameraSource = lk?.Track.Source.Camera, micSource = lk?.Track.Source.Microphone;
+    const cameraSource = lk?.Track.Source.Camera, micSource = lk?.Track.Source.Microphone, screenSource = lk?.Track.Source.ScreenShare;
+    const canCaptureScreen = typeof window.navigator?.mediaDevices?.getDisplayMedia === 'function';
+    const attention = window.ClassroomAttention();
     let active = null, connecting = false, busy = false, polling = false, needsRefresh = false, permanent = false, stopped = false;
     let wanted = true, autoStart = staff, optedIntoTest = false, state = {phase:'idle', ready:null}, chatCursor = 0, seconds = {}, admitted = false;
     let pollTimer, flow = 0, retryAt = 0, attempts = 0;
-    let statusAt = 0, inkAt = Infinity, inkRead = 0, inkRetryAt = 0;
+    let statusAt = 0, inkAt = Infinity, aimAt = Infinity, inkRead = 0, inkRetryAt = 0;
     let peopleKey = '', peopleRows = new Map(), speakersKey = '', slotKey = null;
     const cameraTiles = new Map();
+    let shownScreen = null;
     let toastTimer, lastNotice = '', lastNoticeAt = -Infinity;
 
     function note(text = '') {
@@ -67,6 +70,8 @@
     }
     const maySpeak = person => allows(person, 'mic');
     const mayCamera = person => allows(person, 'camera');
+    const mayScreen = person => person?.permissions?.canPublish === true && Array.isArray(person.permissions.canPublishSources)
+        && person.permissions.canPublishSources.includes(3); // LiveKit TrackSource.SCREEN_SHARE, not SCREEN_SHARE_AUDIO.
     function granted(feature, identity) {
         const rule = state.access?.[feature];
         return (rule?.members?.[identity] ?? rule?.all) === true;
@@ -101,6 +106,16 @@
     const board = window.ClassroomBoard(root, {
         canEdit: hasAccess,
         notice: note,
+        identity:() => active?.room.localParticipant.identity,
+        authorName(id) {
+            if (student(id)) return state.profiles?.[id]?.name || '';
+            return active?.room.remoteParticipants.get(id)?.name || '';
+        },
+        onExpand:attention.expand,
+        aimSoon() {
+            aimAt = Math.min(aimAt, performance.now()+25);
+            schedulePoll();
+        },
         async send(action, data, file) {
             if (!hasAccess() || (!staff && action !== 'board-ink')) throw new PublicError('ویرایش تخته در این وضعیت مجاز نیست.');
             const link = active, local = scope(link);
@@ -274,6 +289,64 @@
         strip.hidden = !cameraTiles.size;
     }
 
+    function itsScreen(link) {
+        return link && state.screen?.identity === link.room.localParticipant.identity && state.screen.sid === link.room.localParticipant.sid;
+    }
+    function stopScreen(link) {
+        link.screenAttempt++;
+        const track = link.screenTrack;
+        link.screenTrack = null;
+        if (!track) return;
+        track.stop();
+        return link.room.localParticipant.unpublishTrack(track,true).catch(() => {});
+    }
+    async function giveBackScreen(link) {
+        stopScreen(link);
+        if (active !== link || !hasAccess() || !itsScreen(link)) return;
+        const before = scope(link);
+        try {
+            const result = await api('screen-access',{...before,enabled:false});
+            if (active === link && scope().sid === before.sid) {
+                flow++;
+                state = {...state,screen:result.screen};
+            }
+        } finally { refresh(); }
+    }
+    function renderScreen() {
+        const live = hasAccess();
+        const selected = state.screen;
+        const local = active?.room.localParticipant;
+        const mine = live && itsScreen(active);
+        if (active?.screenTrack && (!mine || !state.screenEnabled || !mayScreen(local))) stopScreen(active);
+        let person, display = null;
+        if (live && selected) {
+            person = mine ? local : active.room.remoteParticipants.get(selected.identity);
+            const pub = person?.getTrackPublication(screenSource);
+            if (person?.sid === selected.sid && mayScreen(person) && pub?.track?.kind === lk.Track.Kind.Video && !pub.isMuted
+                && (!mine || pub.track === active.screenTrack)) display = pub.track;
+        }
+        const video = el('screen-video');
+        if (shownScreen !== display) {
+            shownScreen?.detach(video);
+            display?.attach(video);
+            shownScreen = display;
+        }
+        el('screen-panel').hidden = !display;
+        if (display) put(el('screen-label'), `اشتراک صفحهٔ ${personName(person)}`);
+        if (!staff) return false;
+        const button = el('screen-toggle');
+        const show = live && state.screenEnabled === true && canCaptureScreen;
+        const sharing = !!(mine && active.screenTrack);
+        button.hidden = !show;
+        button.disabled = !show || busy || !!active?.screenBusy || (!!selected && !mine) || (!!mine && !mayScreen(local) && !sharing);
+        const label = sharing ? 'توقف اشتراک صفحه' : !!selected && !mine ? 'ارائه‌دهندهٔ دیگری در حال اشتراک است'
+            : mine ? 'انتخاب صفحه برای اشتراک' : 'آماده‌سازی اشتراک صفحه';
+        button.setAttribute('aria-label',label); button.title = label;
+        button.setAttribute('aria-pressed',String(sharing));
+        button.dataset.prepared = String(!!mine && !sharing);
+        return show;
+    }
+
     function setAccessMenu(open, restoreFocus = false) {
         const menu = el('access-menu'), btn = el('toggle-access');
         menu.hidden = !open;
@@ -354,6 +427,7 @@
         el('live-panel').hidden = !live;
         el('waiting').hidden = live;
         root.dataset.live = live ? 'yes' : 'no';
+        attention.setLive(live);
         const status = live ? 'در جریان' : connectingNow ? 'در حال اتصال' : 'اتاق انتظار';
         put(el('status'), status);
         el('status-dot').title = status;
@@ -409,7 +483,8 @@
         cam.setAttribute('aria-pressed', String(camOn));
         cam.setAttribute('aria-label', camAction); cam.title = camAction;
         el('enable-audio').hidden = !live || active.room.canPlaybackAudio;
-        root.dataset.extraControls = live && (staff || canCamera || !el('enable-audio').hidden) ? 'yes' : 'no';
+        const canShare = renderScreen();
+        root.dataset.extraControls = live && (staff || canCamera || canShare || !el('enable-audio').hidden) ? 'yes' : 'no';
         el('chat-text').disabled = !live || busy;
         el('chat-empty').hidden = chatCursor > 0;
         for (const audio of el('audio-tracks').children) audio.muted = !live;
@@ -424,15 +499,15 @@
             el('chat-text').value = '';
             board.reset();
         }
-        if (active) { active.speakers = []; stopCamera(active); }
-        admitted = false; inkAt = Infinity; inkRetryAt = 0;
+        if (active) { active.speakers = []; stopCamera(active); stopScreen(active); }
+        admitted = false; inkAt = aimAt = Infinity; inkRetryAt = 0;
         chatCursor = 0; seconds = {};
     }
     function release(link = active, warn = false) {
         if (!link || active !== link) return;
         const current = scope(link);
         active = null;
-        stopCamera(link);
+        stopCamera(link); stopScreen(link);
         clearActivity();
         flow++;
         el('audio-tracks').replaceChildren();
@@ -441,6 +516,7 @@
         render();
     }
     function pushChat(values) {
+        const messages = [];
         const log = el('chat-log');
         const anchor = log.scrollTop > 24 ? log.firstElementChild : null;
         const oldTop = anchor?.getBoundingClientRect().top;
@@ -453,21 +529,23 @@
             item.append(name,text);
             added.push(item);
             chatCursor = row.n;
+            messages.push(row);
         }
-        if (!added.length) return;
+        if (!added.length) return messages;
         log.prepend(...added.reverse());
         while (log.children.length > 120) log.lastElementChild.remove();
         el('chat-empty').hidden = true;
         // Preserve the old reading position if the pupil scrolled into the history.
         if (!anchor) log.scrollTop = 0;
         else if (anchor.parentNode === log) log.scrollTop += anchor.getBoundingClientRect().top - oldTop;
+        return messages;
     }
 
     function makeRoom() {
         return new lk.Room({
             singlePeerConnection:false, // Preserve the tested first-speaker fix; publishing does not renegotiate the receiving PC.
             audioCaptureDefaults:{channelCount:1,echoCancellation:true,noiseSuppression:true,autoGainControl:true},
-            publishDefaults:{audioPreset:{maxBitrate:24000},dtx:true,red:false,forceStereo:false},
+            publishDefaults:{audioPreset:{maxBitrate:12000},dtx:true,red:false,forceStereo:false},
         });
     }
     async function enter(getTicket, gesture = false) {
@@ -480,7 +558,8 @@
         try {
             const ticket = await getTicket();
             if (pending !== flow || !wanted || stopped || permanent) { await room.disconnect(); return; }
-            link = {room, lesson:ticket.lesson, epoch:ticket.epoch, speakers:[], cameraAttempt:0, cameraTrack:null, cameraBusy:false};
+            link = {room, lesson:ticket.lesson, epoch:ticket.epoch, speakers:[], cameraAttempt:0, cameraTrack:null, cameraBusy:false,
+                screenAttempt:0, screenTrack:null, screenBusy:false};
             active = link;
             flow++; // Ignore status requests made before this transport was installed.
             for (const event of [lk.RoomEvent.ParticipantConnected,lk.RoomEvent.ParticipantDisconnected,lk.RoomEvent.LocalTrackPublished,
@@ -498,16 +577,19 @@
                 if (track.kind === lk.Track.Kind.Audio && track.source === micSource) {
                     const node = track.attach(); node.muted = !hasAccess(); el('audio-tracks').append(node);
                 } else if (track.source === cameraSource) renderCameras();
+                else if (track.source === screenSource) renderScreen();
             });
             room.on(lk.RoomEvent.TrackUnsubscribed, track => {
                 if (track.kind === lk.Track.Kind.Audio) track.detach().forEach(node => node.remove());
                 if (active === link && track.source === cameraSource) renderCameras();
+                if (active === link && track.source === screenSource) renderScreen();
             });
             room.on(lk.RoomEvent.ParticipantPermissionsChanged, (_before, person) => {
                 if (active !== link) return;
                 if (person === room.localParticipant) {
                     if (!maySpeak(person) && person.isMicrophoneEnabled) person.setMicrophoneEnabled(false).catch(() => {});
                     if (!mayCamera(person)) stopCamera(link);
+                    if (!mayScreen(person)) stopScreen(link);
                 }
                 render();
             });
@@ -557,7 +639,7 @@
         if (!view) return;
         board.sync(view, local);
         inkRead = performance.now();
-        inkAt = inkRead + (view.more ? 45 : (view.moving ? 280 : 890) + Math.random()*90);
+        inkAt = inkRead + (view.more ? 45 : (view.moving || view.laser ? 280 : 890) + Math.random()*90);
     }
     async function poll(boardOnly) {
         if (polling || stopped || permanent) return;
@@ -568,7 +650,8 @@
         const local = connected() ? scope() : {};
         try {
             if (boardOnly) {
-                const result = await api('board-sync', {...local, ...board.position()});
+                aimAt = Infinity;
+                const result = await api('board-sync', {...local, ...board.position(), ...board.takeAim()});
                 if (captured === flow && !stopped && hasAccess() && local.sid === scope().sid) receiveBoard(result.board, local);
                 return;
             }
@@ -585,7 +668,8 @@
                 || (!state.schedule?.timed && state.schedule?.choices.length > 1)) autoStart = false;
             if (active && local.sid && scope().sid === local.sid && connected() && result.admitted === true) {
                 admitted = true; seconds = result.seconds || {};
-                render(); pushChat(result.chat);
+                render();
+                attention.snapshot(result.profiles, pushChat(result.chat), result.chatMore, active.room.localParticipant.identity);
                 receiveBoard(result.board, scope());
                 needsRefresh ||= !!result.chatMore;
             } else clearActivity();
@@ -630,7 +714,8 @@
         if (stopped || permanent || polling) return;
         const now = performance.now();
         const heartbeat = needsRefresh ? 30 : Math.max(0,statusAt-now);
-        const read = !document.hidden && hasAccess() ? Math.max(0,inkAt-now,inkRetryAt-now) : Infinity;
+        const requested = Math.min(inkAt, Math.max(aimAt,inkRead+260));
+        const read = !document.hidden && hasAccess() ? Math.max(0,requested-now,inkRetryAt-now) : Infinity;
         // One reader per tab, so a late ink response cannot undo a newer page or admission state.
         const quick = !needsRefresh && read + 100 < heartbeat;
         clearTimeout(pollTimer);
@@ -691,6 +776,69 @@
         } finally {
             link.cameraBusy = false;
             if (link === active) render();
+        }
+    });
+    if (staff) el('screen-toggle').addEventListener('click', async () => {
+        const link = active;
+        if (!hasAccess() || !state.screenEnabled || state.cameraCodec !== 'vp8' || !canCaptureScreen || link.screenBusy || busy) return;
+        if (state.screen && !itsScreen(link)) return;
+        const local = scope(link), person = link.room.localParticipant;
+        link.screenBusy = true;
+        render();
+        let raw;
+        try {
+            if (!itsScreen(link)) {
+                const result = await api('screen-access',{...local,enabled:true});
+                if (link !== active || !hasAccess() || scope().sid !== local.sid) return;
+                flow++;
+                state = {...state,screen:result.screen};
+                note('آماده است؛ دوباره دکمهٔ اشتراک را بزن و یک پنجره یا زبانه انتخاب کن.');
+                return;
+            }
+            if (link.screenTrack) { await giveBackScreen(link); return; }
+            if (!mayScreen(person)) return;
+            const attempt = ++link.screenAttempt;
+            const current = () => link === active && hasAccess() && scope().sid === local.sid && link.screenAttempt === attempt
+                && state.screenEnabled && itsScreen(link) && mayScreen(person);
+            // Only this second, explicit click may open the browser picker. No saved capture or system sound.
+            const limits = {width:{max:1280},height:{max:720},frameRate:{ideal:5,max:5}};
+            const stream = await window.navigator.mediaDevices.getDisplayMedia({video:limits,audio:false,systemAudio:'exclude',
+                selfBrowserSurface:'exclude',surfaceSwitching:'exclude'});
+            [raw] = stream.getVideoTracks();
+            for (const track of stream.getTracks()) if (track !== raw) track.stop();
+            if (!raw) throw new PublicError('مرورگر هیچ صفحه‌ای برای ارسال نداده است.');
+            if (!current()) { raw.stop(); return; }
+            raw.addEventListener('ended', () => {
+                if (link.screenTrack?.mediaStreamTrack !== raw) return;
+                giveBackScreen(link).catch(() => {}).finally(render);
+            },{once:true});
+            const oversized = () => {
+                const size = raw.getSettings();
+                return size.width > 1280 || size.height > 720 || size.frameRate > 5.1;
+            };
+            if (oversized()) await raw.applyConstraints(limits);
+            if (oversized()) throw new PublicError('مرورگر نتوانست اندازه و سرعت اشتراک را محدود کند.');
+            if (!current()) { raw.stop(); return; }
+            if (raw.readyState !== 'live') throw new PublicError('اشتراک انتخاب‌شده پیش از ارسال متوقف شد.');
+            raw.contentHint = 'detail';
+            const track = new lk.LocalVideoTrack(raw);
+            link.screenTrack = track;
+            await person.publishTrack(track,{source:screenSource,videoCodec:'vp8',simulcast:false,backupCodec:false,
+                screenShareEncoding:{maxBitrate:400000,maxFramerate:5},degradationPreference:'maintain-resolution'});
+            if (!current()) {
+                if (link.screenTrack === track) stopScreen(link);
+                else { track.stop(); await person.unpublishTrack(track,true).catch(() => {}); }
+            }
+        } catch (error) {
+            raw?.stop();
+            if (link === active && hasAccess()) {
+                await giveBackScreen(link).catch(() => {});
+                if (link === active) note(error instanceof PublicError ? error.message : error?.name === 'NotAllowedError'
+                    ? 'انتخاب صفحه لغو شد یا مرورگر اجازه نداد.' : 'اشتراک صفحه شروع نشد؛ مرورگر و اتصال را بررسی کن. (SCREEN-START)');
+            }
+        } finally {
+            link.screenBusy = false;
+            if (link === active) { refresh(); render(); }
         }
     });
     el('enable-audio').addEventListener('click', () => run(async () => {

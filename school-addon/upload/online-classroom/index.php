@@ -56,7 +56,7 @@ $panel = match ($actor['office'] ?? $actor['role'] ?? '') {
     'student'=>'student-panel.php', 'teacher'=>'teacher-panel.php', 'deputy'=>'deputy-panel.php', 'admin'=>'index.php?view=dashboard', default=>'index.php?view=login',
 };
 $roomPage = $class !== null && $errorMessage === null;
-if ($roomPage) cl_headers(true); // Camera only on the authorized classroom page; no screen capture.
+if ($roomPage) cl_headers(true, $staff && ($cfg['screen_share'] ?? false) === true);
 $pageTitle = $roomPage ? trim($schoolName . ' ' . $classLabel)
     : ($reports !== null ? 'حضور و غیاب کلاس مجازی' : 'کلاس مجازی');
 ?>
@@ -70,6 +70,7 @@ $pageTitle = $roomPage ? trim($schoolName . ' ' . $classLabel)
     <?php if ($class !== null && $errorMessage === null): ?>
     <script defer src="<?= cl_html(cl_asset('livekit-client.umd.js')) ?>"></script>
     <script defer src="<?= cl_html(cl_asset('board.js')) ?>"></script>
+    <script defer src="<?= cl_html(cl_asset('room-attention.js')) ?>"></script>
     <?php endif; ?>
     <?php if ($class !== null && $errorMessage === null): ?><script defer src="<?= cl_html(cl_asset('classroom.js')) ?>"></script><?php endif; ?>
 </head>

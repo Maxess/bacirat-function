@@ -2,12 +2,13 @@
 declare(strict_types=1);
 
 // School plugin runtime and gateway. Settings are exposed by the reviewed host overlay.
-const MPM_VERSION = '0.1.12';
+const MPM_VERSION = '0.1.13';
 const MPM_CLASSROOM_NATIVE = '0.4.0';
 const MPM_CLASSROOM_PUPIL_TRIAL = '0.4.3';
 const MPM_REGISTRY = 'mtg_plugin_registry';
 const MPM_SITE = 'mtg_plugin_site';
 const MPM_MAX_ZIP = 4 * 1024 * 1024;
+const MPM_MAX_FILES = 25; // Reviewed payload files, excluding plugin.json.
 const MPM_BELL_LABELS = [1=>'۱', 2=>'۲', 3=>'۳', 4=>'۴'];
 const MPM_CATALOG = [
     'school-classroom' => [
@@ -23,6 +24,7 @@ const MPM_CATALOG = [
         '0.4.4' => 'b4e8cf0a9a1887b00af5a4685b1b150c1ba8ab1c33704d0c593f2b8b5b31ca6a',
         '0.4.5' => '549980ae530938ce5d1544dbe790e5e26f9d965c53b5d04c30b0716d358fb96a',
         '0.4.6' => '02ccccc105d26560d3e237a3314b635a6d311fc97287ebc7305dbc691a2a1a80',
+        '0.4.7' => 'd4f639e75dd6d396a17fe46914b4d91da2a3dc8c54da12fcabae3bf4fcb86f94',
     ],
 ];
 
@@ -322,7 +324,7 @@ function mpm_manifest(string $raw, array $catalog = MPM_CATALOG): array
         throw new MpmNotice('این ZIP در فهرست نسخه‌های تأییدشده نیست یا تغییر کرده است.');
     }
     mpm_slug($slug);
-    if (($manifest['format'] ?? null) !== 1 || !is_array($manifest['files'] ?? null) || count($manifest['files']) > 24) {
+    if (($manifest['format'] ?? null) !== 1 || !is_array($manifest['files'] ?? null) || count($manifest['files']) > MPM_MAX_FILES) {
         throw new MpmNotice('قالب بسته پشتیبانی نمی‌شود.');
     }
     foreach ($manifest['files'] as $path => $sha) {
@@ -342,7 +344,7 @@ function mpm_read_package(string $path): array
     if ($zip->open($path, ZipArchive::RDONLY) !== true) throw new MpmNotice('فایل ZIP قابل خواندن نیست.');
     try {
         $stat = $zip->statName('plugin.json');
-        if ($zip->numFiles > 25 || !$stat || $stat['size'] > 16384) throw new MpmNotice('این ZIP بستهٔ قابل نصب مدیر افزونه‌ها نیست.');
+        if ($zip->numFiles > MPM_MAX_FILES + 1 || !$stat || $stat['size'] > 16384) throw new MpmNotice('این ZIP بستهٔ قابل نصب مدیر افزونه‌ها نیست.');
         $raw = $zip->getFromName('plugin.json', 16385);
         if ($raw === false) throw new MpmNotice('فهرست بسته خوانده نشد.');
         $manifest = mpm_manifest($raw);

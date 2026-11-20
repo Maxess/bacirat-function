@@ -205,7 +205,7 @@ function cl_open_lesson(ClassroomStore $s, array $ctx, array $cfg, array $class,
     $lesson['sample'] = 0;
     $lesson['last_attempt'] = 0;
     $lesson['event_received'] = false;
-    unset($lesson['camera_codec'], $lesson['media_pending']);
+    unset($lesson['camera_codec'], $lesson['media_pending'], $lesson['screen'], $lesson['screen_used']);
     // Record this generation before asking the SFU; a failed reply must not orphan it.
     ($ctx['write_runtime'])('scheduled-v2');
     $s->tx(static function () use ($s, $class, $lesson, $id) {
@@ -227,6 +227,7 @@ function cl_pause(array &$lesson, string $phase = 'paused'): void
 {
     $lesson['phase'] = $phase;
     $lesson['seen'] = $lesson['staff'] = $lesson['pulses'] = $lesson['profiles'] = [];
+    unset($lesson['screen']);
 }
 
 function cl_leave_lesson(ClassroomStore $s, array $lesson, array $actor, array $input, int $now): void
@@ -386,6 +387,7 @@ function cl_reconcile(ClassroomStore $s, array $cfg, ?array $class, array $lesso
                 $lesson['profiles_at'] = $now;
             }
             // Do not stop attendance because an individual device's media policy is still catching up.
+            cl_refresh_screen($lesson, $cfg, $peers, $now);
             $lesson['media_pending'] = !cl_sync_media($lesson, $peers, $rpc);
         }
     }
@@ -442,6 +444,77 @@ function cl_set_access(ClassroomStore $s, array $lesson, array $actor, array $bo
     return ['access'=>$lesson['access']];
 }
 
+const CL_SCREEN_LEASE = 40;
+
+function cl_screen_enabled(array $cfg, array $lesson): bool
+{
+    return ($cfg['screen_share'] ?? false) === true && ($lesson['camera_codec'] ?? null) === 'vp8';
+}
+
+function cl_screen_state(array $lesson): ?array
+{
+    $owner = $lesson['screen'] ?? null;
+    return $owner && ($lesson['staff'][$owner['identity']] ?? null) === $owner['sid']
+        ? ['identity'=>$owner['identity'],'sid'=>$owner['sid']] : null;
+}
+
+function cl_refresh_screen(array &$lesson, array $cfg, array $peers, int $now): void
+{
+    $owner = $lesson['screen'] ?? null;
+    if (!$owner) return;
+    $id = $owner['identity'];
+    $peer = $peers[$id] ?? [];
+    if (!cl_screen_enabled($cfg, $lesson) || ($lesson['staff'][$id] ?? null) !== $owner['sid'] || ($peer['sid'] ?? null) !== $owner['sid']) {
+        unset($lesson['screen']);
+        return;
+    }
+    $tracks = $peer['tracks'] ?? [];
+    foreach (is_array($tracks) ? $tracks : [] as $track) {
+        if (is_array($track) && cl_track_source($track['source'] ?? null) === 'SCREEN_SHARE') {
+            $lesson['screen']['until'] = $now + CL_SCREEN_LEASE;
+            return;
+        }
+    }
+    if ($owner['until'] <= $now) unset($lesson['screen']);
+}
+
+/** One presenter per transport. Revoke an old source before assigning a new one. */
+function cl_set_screen(ClassroomStore $s, array $cfg, array $lesson, array $actor, array $body, int $now, callable $rpc): array
+{
+    if (!cl_is_staff($actor)) throw new ClassroomError(403, 'اشتراک صفحه فقط برای دبیر یا مسئول مجاز است.');
+    $enable = $body['enabled'] ?? null;
+    if (!is_bool($enable)) throw new ClassroomError(400, 'وضعیت اشتراک صفحه معتبر نیست.');
+    if ($enable && !cl_screen_enabled($cfg, $lesson)) throw new ClassroomError(409, 'آزمایش اشتراک صفحه در این اتاق فعال نیست.');
+    $id = $actor['identity'];
+    $sid = $body['sid'] ?? null;
+    if (!cl_sid($sid) || ($lesson['staff'][$id] ?? null) !== $sid) throw new ClassroomError(409, 'ورود ارائه‌دهنده تأیید نشده است.');
+    $room = $lesson['room'];
+    $owner = cl_screen_state($lesson);
+    $mine = ['identity'=>$id,'sid'=>$sid];
+    if ($owner && $owner !== $mine) throw new ClassroomError(409, 'اشتراک صفحه در اختیار ارائه‌دهندهٔ دیگری است.');
+    if (!$enable && !$owner) return ['screen'=>null];
+    if (!$owner) unset($lesson['screen']);
+    $lesson['screen_used'] = true;
+    if (!$enable) {
+        unset($lesson['screen']);
+        // Persist denial before calling the SFU; its next presence sample can retry a failed release.
+        $s->put('lesson', $lesson['id'], $lesson);
+    }
+    $peers = cl_live_media_peers($rpc('ListParticipants', $room, ['room'=>$room]));
+    if ($enable) {
+        if (($peers[$id]['sid'] ?? null) !== $sid) throw new ClassroomError(409, 'اتصال ارائه‌دهنده عوض شده است.');
+        if (!$owner && !cl_sync_media($lesson, $peers, $rpc, true)) throw cl_media_bad_reply();
+        $lesson['screen'] = $mine + ['until'=>$now + CL_SCREEN_LEASE];
+        $s->put('lesson', $lesson['id'], $lesson);
+        $confirmed = cl_sync_media($lesson, [$id=>$peers[$id]], $rpc, true);
+        if (!$confirmed) unset($lesson['screen']);
+    } else $confirmed = cl_sync_media($lesson, $peers, $rpc, true);
+    if (!$confirmed) $lesson['media_pending'] = true;
+    $s->put('lesson', $lesson['id'], $lesson);
+    if (!$confirmed) throw cl_media_bad_reply();
+    return ['screen'=>cl_screen_state($lesson)];
+}
+
 function cl_finish_lesson(ClassroomStore $s, array $cfg, array $lesson, int $now): void
 {
     $s->tx(static function () use ($s, $cfg, $lesson, $now) {
@@ -451,7 +524,7 @@ function cl_finish_lesson(ClassroomStore $s, array $cfg, array $lesson, int $now
             $s->delete('lesson', $id);
         } else {
             $lesson['ended'] = min($now, $lesson['deadline']);
-            foreach (['sample','transport_at','room','pulses','seen','staff','deadline','last_attempt','event_received','profiles','profiles_at','access','camera_codec','media_pending'] as $key) unset($lesson[$key]);
+            foreach (['sample','transport_at','room','pulses','seen','staff','deadline','last_attempt','event_received','profiles','profiles_at','access','camera_codec','media_pending','screen','screen_used'] as $key) unset($lesson[$key]);
             $lesson['phase'] = 'finished';
             $s->put('lesson', $id, $lesson);
             $key = sprintf('%012d:%s', $lesson['created'], $id);

@@ -16,8 +16,8 @@ HOST = ROOT / 'plugin-manager'
 SRC = ROOT / 'school-addon/upload/online-classroom'
 LEGACY = ARTIFACTS / 'school-classroom-pilot-v0.1.0.zip'
 LEGACY_SHA = 'bebc35a02f57346880373a034ee493b757a8017a12812a133ab957358d9de161'
-VERSION = '0.4.6'
-MANAGER_VERSION = '0.1.12'
+VERSION = '0.4.7'
+MANAGER_VERSION = '0.1.13'
 BACI = HOST / 'baci'
 BACI_PATCH = 'baci-4.221.0-e0f3f686.patch'
 PDF_VERSION = '6.5.438'
@@ -60,7 +60,7 @@ def plugin_entries(pdf_archive):
     files = {name: (SRC / name).read_bytes() for name in (
         'index.php', 'core.php', 'api.php', 'deactivate.php', 'media.php', 'school.php', 'store.php', 'lesson.php',
         'activity.php', 'content.php', 'events.php', 'reports.php', 'notifications.php', 'job.php', 'room-view.php',
-        'assets/classroom.js', 'assets/classroom.css', 'assets/board.js',
+        'assets/classroom.js', 'assets/classroom.css', 'assets/board.js', 'assets/room-attention.js',
     )}
     if hashlib.sha256(LEGACY.read_bytes()).hexdigest() != LEGACY_SHA:
         raise ValueError('Original reviewed SDK archive is not the published v0.1.0 ZIP')
@@ -74,13 +74,14 @@ def plugin_entries(pdf_archive):
         'report_menus': {role: 'حضور و غیاب کلاس مجازی' for role in ('teacher', 'admin', 'deputy')},
         'routes': {'page': 'index.php', 'api': 'api.php', 'content': 'content.php', 'events': 'events.php', 'job': 'job.php'},
         'store': True, 'pdf_resources': 'assets/pdf-resources.zip',
-        'preserve_settings_from': ['0.2.0', '0.2.1', '0.2.2', '0.2.3', '0.3.0', '0.4.0', '0.4.1', '0.4.2', '0.4.3', '0.4.4', '0.4.5'],
+        'preserve_settings_from': ['0.2.0', '0.2.1', '0.2.2', '0.2.3', '0.3.0', '0.4.0', '0.4.1', '0.4.2', '0.4.3', '0.4.4', '0.4.5', '0.4.6'],
         'hooks': {'deactivate': 'deactivate.php'},
         'settings': [
             {'key': 'signal_url', 'type': 'wss', 'label': 'آدرس رسانه (wss://)'},
             {'key': 'api_key', 'type': 'token', 'label': 'شناسهٔ رسانه (API Key)', 'min': 12, 'max': 64},
             {'key': 'api_secret', 'type': 'secret', 'label': 'کلید خصوصی رسانه (API Secret)', 'min': 32, 'max': 128},
             {'key': 'max_participants', 'type': 'integer', 'min': 4, 'max': 60, 'default': 4, 'label': 'سقف اتصال هر اتاق، شامل دبیر/مسئول (پایلوت: ۴)'},
+            {'key': 'screen_share', 'type': 'switch', 'label': 'آزمایش اشتراک سبک صفحه (فقط دبیر و مسئول، بدون صدای سیستم)'},
             {'key': 'notify_school_bale', 'type': 'switch', 'label': 'ارسال حضور به گفت‌وگوهای خصوصی ربات بله'},
             {'key': 'notify_school_telegram', 'type': 'switch', 'label': 'ارسال حضور به گفت‌وگوهای خصوصی ربات تلگرام'},
             {'key': 'notify_school_rubika', 'type': 'switch', 'label': 'ارسال حضور به گفت‌وگوهای خصوصی ربات روبیکا'},

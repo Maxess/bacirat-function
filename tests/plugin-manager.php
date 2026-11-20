@@ -69,6 +69,7 @@ try {
     $streamed = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.4.zip';
     $compact = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.5.zip';
     $access = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.6.zip';
+    $focus = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.7.zip';
     $menus = static fn() => [file_get_contents($root . '/other-settings.php'), file_get_contents($root . '/includes/header.php')];
     $managerMenus = [$other, $header];
     expect($menus() === $managerMenus, 'initialization does not rewrite the host');
@@ -313,6 +314,16 @@ try {
         && mpm_owned_row($db,$row)['settings']===$saved && mpm_settings($db,$dir,$row)['friday_test']===$pupilGrant
         && $db->query("SELECT payload FROM `$store` WHERE bucket='reports'")->fetchColumn()==='{}',
         '0.4.5 to 0.4.6 keeps owner, attendance, settings, hours and Friday opt-in');
+    submit($db,$site,'enable');
+    denied(fn()=>mpm_install($db,$dir,$focus));
+    submit($db,$site,'disable');
+    expect(mpm_install($db,$dir,$focus), 'upgrade from access controls to the mobile board');
+    $row = mpm_row($db,$slug);
+    expect($row['version']==='0.4.7' && $row['owner']===$oldRow['owner'] && mpm_check_store($db,$row)===$store
+        && mpm_owned_row($db,$row)['settings']===$saved && mpm_settings($db,$dir,$row)['friday_test']===$pupilGrant
+        && (mpm_settings($db,$dir,$row)['screen_share'] ?? false) === false
+        && $db->query("SELECT payload FROM `$store` WHERE bucket='reports'")->fetchColumn()==='{}',
+        '0.4.6 to 0.4.7 preserves data and screen share is opt-in');
     submit($db,$site,'enable');
     submit($db,$site,'friday-test',['friday_date'=>$date,'friday_students'=>'yes']);
     expect(mpm_settings($db,$dir,$row)['friday_test']===$pupilGrant, 'saving the same pupil policy does not disrupt a test');
