@@ -12,10 +12,10 @@ try {
     $year = cl_current_year($s->db);
     $actor = cl_school_user($s->db, $_SESSION ?? [], $year);
     if (session_status() === PHP_SESSION_ACTIVE) session_write_close();
-    $class = cl_class_for($s->db, cl_classes($s->db, $year), cl_id($_GET['class'] ?? null), $actor);
-    [$doc, $file] = cl_class_lock($s, $cfg, $class['id'], static function () use ($s, $class, $actor) {
+    $class = cl_class_for($s->db, cl_classes($s->db, $year), cl_id($_GET['class'] ?? null), $actor, cl_friday_window($cfg, time()) !== null);
+    [$doc, $file] = cl_class_lock($s, $cfg, $class['id'], static function () use ($s, $cfg, $class, $actor) {
         $now = time();
-        $live = cl_check_live(cl_active($s, $class['id']), $actor, $_GET, $now);
+        $live = cl_check_live($cfg, cl_active($s, $class['id']), $actor, $_GET, $now);
         $key = $_GET['doc'] ?? null;
         $state = cl_activity($s, $live['id']);
         if (!is_string($key) || !preg_match('/^[a-f0-9]{32}$/D', $key) || !isset($state['docs'][$key])

@@ -38,7 +38,7 @@ function cl_event_apply(ClassroomStore $s, array $cfg, array $event, int $now, c
     return cl_class_lock($s, $cfg, $id, static function () use ($s, $cfg, $event, $now, $rpc, $id, $room) {
         $lesson = cl_active($s, $id);
         if (!$lesson || $lesson['room'] !== $room) return false; // Delayed/repeated events cannot affect a resumed lesson.
-        if ($lesson['phase'] === 'closing' || $now >= $lesson['deadline'] || $lesson['date'] !== cl_day($now)->format('Y-m-d')) {
+        if ($lesson['phase'] === 'closing' || cl_lesson_expired($cfg, $lesson, $now)) {
             cl_pause($lesson, 'closing');
             cl_retire_transport($s, $cfg, $lesson, $now, $rpc, $event['event'] === 'room_finished');
             return true;

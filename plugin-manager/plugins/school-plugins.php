@@ -1,8 +1,8 @@
 <?php
 declare(strict_types=1);
 
-// Native mtagbot plugin runtime and gateway. The editor is in other-settings.php.
-const MPM_VERSION = '0.1.7';
+// School plugin runtime and gateway. Settings are exposed by the reviewed host overlay.
+const MPM_VERSION = '0.1.8';
 const MPM_CLASSROOM_NATIVE = '0.4.0';
 const MPM_REGISTRY = 'mtg_plugin_registry';
 const MPM_SITE = 'mtg_plugin_site';
@@ -17,6 +17,7 @@ const MPM_CATALOG = [
         '0.3.0' => '159551bb9bba129168c6b3e3f5d4da1468e1f908e7cacb9d3f62e140fdefcb03',
         '0.4.0' => '2b355724e133cb6f10c9312673863f5e2856a5fad53a5d5214a68632106876ac',
         '0.4.1' => '878c80c685ca427514a555b0c65a23fb524e4d232d0f9a9a3e2a652bb145a0c0',
+        '0.4.2' => 'b3e0d73b6218752eb19c97a9a28fd36ee75792f4ea1ea72a44311cfc7d7e5b5c',
     ],
 ];
 
@@ -68,7 +69,7 @@ function mpm_site_path(): string
     if (PHP_SAPI === 'cli') $path = $GLOBALS['MPM_CLI_SITE_PATH'] ?? '';
     else {
         $script = (string)($_SERVER['SCRIPT_NAME'] ?? '');
-        $path = preg_replace('~/(?:other-settings\.php|plugins/school-plugins\.php)$~D', '', $script);
+        $path = preg_replace('~/(?:other-settings\.php|school-classroom-settings\.php|plugins/school-plugins\.php)$~D', '', $script);
         if ($path === $script) throw new MpmNotice('مسیر عمومی افزونه شناخته نشد.');
     }
     if (strlen($path) > 220 || !preg_match('~^(?:/[A-Za-z0-9_-][A-Za-z0-9_.-]{0,63})*$~D', $path)) {
@@ -531,12 +532,30 @@ function mpm_settings(PDO $db, string $dir, array $row): array
     return json_decode($data, true, 32, JSON_THROW_ON_ERROR);
 }
 
-function mpm_has_bell_hours(array $manifest): bool
+function mpm_has_setting(array $manifest, string $key, string $type): bool
 {
     foreach ($manifest['settings'] as $field) {
-        if ($field['key'] === 'bell_hours' && $field['type'] === 'bell-hours') return true;
+        if ($field['key'] === $key && $field['type'] === $type) return true;
     }
     return false;
+}
+
+function mpm_today(?int $now = null): DateTimeImmutable
+{
+    return (new DateTimeImmutable('@' . ($now ?? time())))->setTimezone(new DateTimeZone('Asia/Tehran'))->setTime(0, 0);
+}
+
+function mpm_friday_date(mixed $input, ?int $now = null): string
+{
+    if (!is_string($input) || !preg_match('/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/D', $input)) {
+        throw new MpmNotice('تاریخ میلادی جمعه را انتخاب کن.');
+    }
+    $today = mpm_today($now);
+    $date = DateTimeImmutable::createFromFormat('!Y-m-d', $input, $today->getTimezone());
+    if (!$date || $date->format('Y-m-d') !== $input || $date->format('w') !== '5' || $date < $today) {
+        throw new MpmNotice('روز آزمایش باید یک جمعهٔ معتبر باشد که به وقت تهران نگذشته است.');
+    }
+    return $input;
 }
 
 function mpm_bell_hours(mixed $input): array
@@ -572,8 +591,8 @@ function mpm_save_settings(PDO $db, string $dir, array $row, array $manifest, ar
     $settings = [];
     foreach ($manifest['settings'] as $field) {
         $key = $field['key'];
-        if ($field['type'] === 'bell-hours') {
-            // Editing media/notices must not change the separately saved schedule.
+        if (in_array($field['type'], ['bell-hours','friday-test'], true)) {
+            // Preserve the separately saved bell schedule and Friday opt-in.
             if (isset($previous[$key])) $settings[$key] = $previous[$key];
             continue;
         }
@@ -927,7 +946,7 @@ function mpm_post(PDO $db, ?array $site, string $origin, string $csrf): string
             return 'غیرفعال شد؛ داده‌ها و فایل‌ها حفظ شدند.' . mpm_deactivate($db, $site, $dir, $row);
         }
         $manifest = mpm_manifest_for($dir, $row);
-        if ($action === 'bell-hours' && mpm_native_release($row) && mpm_has_bell_hours($manifest)) {
+        if ($action === 'bell-hours' && mpm_native_release($row) && mpm_has_setting($manifest, 'bell_hours', 'bell-hours')) {
             // The manager lock serializes this update with room requests. Active lessons retain their saved deadline.
             $hours = mpm_bell_hours($_POST['bell_hours'] ?? null);
             $values = mpm_settings($db, $dir, $row);
@@ -935,6 +954,27 @@ function mpm_post(PDO $db, ?array $site, string $origin, string $csrf): string
             else $values['bell_hours'] = $hours;
             mpm_write_settings($db, $dir, $row, $values);
             return $hours === [] ? 'ساعت‌بندی خاموش شد؛ انتخاب زنگ از برنامهٔ امروز انجام می‌شود.' : 'ساعت زنگ‌ها ذخیره شد؛ زنگی که قبلاً باز شده ساعت پایان قبلی را حفظ می‌کند.';
+        }
+        if ($action === 'friday-test' && mpm_native_release($row) && mpm_has_setting($manifest, 'friday_test', 'friday-test')) {
+            $values = mpm_settings($db, $dir, $row);
+            if (($_POST['cancel_friday_test'] ?? null) === 'yes') {
+                unset($values['friday_test']);
+                $message = 'آزمایش لغو شد؛ ورود تازه به اتاق‌های آزمایشی بسته است.';
+            } else {
+                $date = mpm_friday_date($_POST['friday_date'] ?? null);
+                if (($values['friday_test']['date'] ?? null) !== $date) $values['friday_test'] = ['date'=>$date,'id'=>bin2hex(random_bytes(16))];
+                $message = 'آزمایش فقط برای جمعهٔ ' . $date . ' (به وقت تهران) ثبت شد.';
+            }
+            // Change admission under the same lock before attempting to retire any obsolete demo rooms.
+            mpm_write_settings($db, $dir, $row, $values);
+            if ($row['state'] === 'enabled' && mpm_owned_row($db, $row)['runtime'] !== null) {
+                try { mpm_call($db, $site, $dir, $row, $manifest, $manifest['routes']['job'], 'friday-cleanup'); }
+                catch (Throwable $error) {
+                    error_log('School classroom: Friday cleanup not confirmed (' . get_class($error) . ')');
+                    $message .= ' بستن همهٔ اتاق‌های آزمایشی تأیید نشد؛ پس از وصل‌شدن رسانه دوباره «لغو آزمایش» را بزن.';
+                }
+            }
+            return $message;
         }
         if ($action === 'settings' && is_array($_POST['settings'] ?? null) && mpm_native_release($row)) {
             if ($row['state'] !== 'disabled') throw new MpmNotice('برای تغییر تنظیمات ابتدا افزونه را غیرفعال کن.');
@@ -979,7 +1019,7 @@ function mpm_settings_visible(): bool
 }
 
 // Called before the host header. This is the only HTTP controller for manager actions.
-function mpm_prepare_settings(): array
+function mpm_prepare_settings(string $formAction = 'other-settings.php?tab=plugins'): array
 {
     header('Cache-Control: no-store, private');
     header('Referrer-Policy: same-origin');
@@ -1007,7 +1047,7 @@ function mpm_prepare_settings(): array
             if ((int)http_response_code() >= 400) return ['error'=>$notice];
             $_SESSION['mpm_flash'] = $notice;
             session_write_close();
-            header('Location: other-settings.php?tab=plugins', true, 303);
+            header('Location: ' . $formAction, true, 303);
             exit;
         }
         $notice = (string)($_SESSION['mpm_flash'] ?? '');
@@ -1019,16 +1059,16 @@ function mpm_prepare_settings(): array
     }
 }
 
-function mpm_settings_fragment(array $view): void
+function mpm_settings_fragment(array $view, string $formAction = 'other-settings.php?tab=plugins'): void
 {
     if (isset($view['error'])) { echo '<p role="alert">' . mpm_html($view['error']) . '</p>'; return; }
-    try { mpm_render_settings($view['db'], $view['site'], $view['csrf'], $view['notice']); }
+    try { mpm_render_settings($view['db'], $view['site'], $view['csrf'], $view['notice'], $formAction); }
     catch (Throwable $error) { echo '<p role="alert">تنظیمات افزونه‌ها کامل بارگیری نشد.</p>'; }
 }
 
-function mpm_render_bell_hours(string $csrf, string $slug, array $hours): void
+function mpm_render_bell_hours(string $csrf, string $slug, array $hours, string $action): void
 {
-    echo '<form class="mb-3" method="post" action="other-settings.php?tab=plugins">';
+    echo '<form class="mb-3" method="post" action="' . $action . '">';
     mpm_hidden($csrf, 'bell-hours', $slug);
     echo '<fieldset aria-describedby="mpm-bell-help"><legend>ساعت زنگ‌های کلاس مجازی</legend>'
         . '<p id="mpm-bell-help">به وقت تهران، برای همهٔ روزهای برنامهٔ هفتگی. برای زنگِ بدون کلاس هر دو خانه را خالی بگذار. اگر همه خالی باشند، ساعت‌بندی خاموش است.</p>'
@@ -1045,12 +1085,32 @@ function mpm_render_bell_hours(string $csrf, string $slug, array $hours): void
         . '<button class="btn btn-primary" type="submit">ذخیرهٔ ساعت زنگ‌ها</button></fieldset></form>';
 }
 
-function mpm_render_settings(PDO $db, ?array $site, string $csrf, string $notice): void
+function mpm_render_friday_test(string $csrf, string $slug, ?string $date, bool $enabled, string $action): void
 {
+    $today = mpm_today();
+    $day = $today->format('Y-m-d');
+    $upcoming = $today->format('w') === '5' ? $day : $today->modify('next Friday')->format('Y-m-d');
+    $selected = $date !== null && $date >= $day ? $date : $upcoming;
+    $status = $date === null ? 'تنظیم نشده' : ($date < $day ? 'پایان یافته' : (!$enabled ? 'در انتظار فعال‌سازی افزونه' : ($date === $day ? 'امروز فعال تا نیمه‌شب' : 'زمان‌بندی‌شده')));
+    echo '<section class="card mb-3" id="mpm-friday-test"><h3>آزمایش ۲۴ ساعتهٔ جمعه</h3><p role="status">وضعیت: ' . $status
+        . ($date !== null ? ' · <bdi>' . mpm_html($date) . '</bdi>' : '') . '</p>'
+        . '<p>فقط در تاریخ انتخابی، از ۰۰:۰۰ جمعه تا ۰۰:۰۰ شنبه به وقت تهران. همهٔ دبیران فعال می‌توانند در هر کلاس ثبت‌شدهٔ سال پیش‌فرض آزمایش را باز کنند یا به آن بپیوندند. دانش‌آموزان وارد آزمایش نمی‌شوند؛ برنامهٔ هفتگی، گزارش حضور و اعلان‌ها تغییر نمی‌کنند.</p>'
+        . '<form class="mb-3" method="post" action="' . $action . '">';
+    mpm_hidden($csrf, 'friday-test', $slug);
+    echo '<label>تاریخ جمعه (میلادی) <input type="date" class="form-input" dir="ltr" required name="friday_date" min="' . $day
+        . '" value="' . mpm_html($selected) . '"></label> <button type="submit" class="btn btn-primary">ثبت آزمایش برای این جمعه</button></form>'
+        . '<form method="post" action="' . $action . '">';
+    mpm_hidden($csrf, 'friday-test', $slug);
+    echo '<button type="submit" class="btn btn-outline" name="cancel_friday_test" value="yes">لغو آزمایش</button></form></section>';
+}
+
+function mpm_render_settings(PDO $db, ?array $site, string $csrf, string $notice, string $formAction = 'other-settings.php?tab=plugins'): void
+{
+    $action = mpm_html($formAction);
     echo '<h2>افزونه‌ها</h2><p class="text-muted">مدیر افزونه‌ها · نسخهٔ <bdi>' . MPM_VERSION . '</bdi> · داده‌ها در پایگاه همین سایت</p>';
     if ($notice !== '') echo '<p role="status">' . mpm_html($notice) . '</p>';
     if (!$site) {
-        echo '<section class="card mb-3"><h2>راه‌اندازی یک‌باره</h2><form method="post" action="other-settings.php?tab=plugins">';
+        echo '<section class="card mb-3"><h2>راه‌اندازی یک‌باره</h2><form method="post" action="' . $action . '">';
         mpm_hidden($csrf, 'initialize');
         echo '<p>دامنه: <bdi>' . mpm_html(mpm_origin()) . '</bdi>';
         if ($db->getAttribute(PDO::ATTR_DRIVER_NAME) === 'mysql') {
@@ -1059,7 +1119,7 @@ function mpm_render_settings(PDO $db, ?array $site, string $csrf, string $notice
         echo '</p><label><input required type="checkbox" name="confirm_test" value="yes"> این هاست و پایگاه داده آزمایشی‌اند.</label><button class="btn btn-primary" type="submit">راه‌اندازی مدیر افزونه‌ها</button></form></section>';
         return;
     }
-    echo '<section class="card mb-3"><h2>نصب یا به‌روزرسانی از ZIP</h2><form method="post" action="other-settings.php?tab=plugins" enctype="multipart/form-data">';
+    echo '<section class="card mb-3"><h2>نصب یا به‌روزرسانی از ZIP</h2><form method="post" action="' . $action . '" enctype="multipart/form-data">';
     mpm_hidden($csrf, 'install');
     echo '<label>بستهٔ تأییدشده (حداکثر ۴ مگابایت) <input type="file" name="package" accept=".zip,application/zip" required></label><button class="btn btn-primary" type="submit">نصب یا به‌روزرسانی</button></form></section>';
     $dir = mpm_private_dir($site['private_dir']);
@@ -1086,10 +1146,10 @@ function mpm_render_settings(PDO $db, ?array $site, string $csrf, string $notice
         echo '<section class="card mb-3"><h2>' . mpm_html($manifest['title'] ?? $slug) . '</h2><p>نسخهٔ ' . mpm_html($row['version']) . ' · ' . mpm_html($labels[$row['state']] ?? 'نامعتبر') . '</p>';
         $compatible = mpm_native_release($row);
         if ($manifest && $compatible && $row['state'] === 'disabled' && $runtime === null) {
-            echo '<form class="mb-3" method="post" action="other-settings.php?tab=plugins">';
+            echo '<form class="mb-3" method="post" action="' . $action . '">';
             mpm_hidden($csrf, 'settings', $slug);
             foreach ($manifest['settings'] as $field) {
-                if ($field['type'] === 'bell-hours') continue;
+                if (in_array($field['type'], ['bell-hours','friday-test'], true)) continue;
                 $key = $field['key'];
                 $name = 'settings[' . mpm_html($key) . ']';
                 $value = $values[$key] ?? '';
@@ -1109,7 +1169,10 @@ function mpm_render_settings(PDO $db, ?array $site, string $csrf, string $notice
             }
             echo '<button class="btn btn-primary" type="submit">ذخیرهٔ تنظیمات</button></form>';
         }
-        if ($manifest && $compatible && mpm_has_bell_hours($manifest)) mpm_render_bell_hours($csrf, $slug, $values['bell_hours'] ?? []);
+        if ($manifest && $compatible && mpm_has_setting($manifest, 'bell_hours', 'bell-hours')) mpm_render_bell_hours($csrf, $slug, $values['bell_hours'] ?? [], $action);
+        if ($manifest && $compatible && mpm_has_setting($manifest, 'friday_test', 'friday-test')) {
+            mpm_render_friday_test($csrf, $slug, $values['friday_test']['date'] ?? null, $row['state'] === 'enabled', $action);
+        }
         if (!$compatible && !$pending) echo '<p>این نسخهٔ قدیمی را در حالت غیرفعال به بستهٔ یکپارچهٔ کلاس ارتقا بده.</p>';
         if ($compatible && $manifest) {
             echo '<p>گیرندهٔ وب‌هوک LiveKit (در سرور رسانهٔ موجود): <br><code dir="ltr" style="overflow-wrap:anywhere">'
@@ -1120,15 +1183,15 @@ function mpm_render_settings(PDO $db, ?array $site, string $csrf, string $notice
             $enabled = $row['state'] === 'enabled';
             $retryRoom = !$enabled && $runtime !== null;
             if ($enabled || $retryRoom || $compatible) {
-                echo '<form class="mb-3" method="post" action="other-settings.php?tab=plugins">';
+                echo '<form class="mb-3" method="post" action="' . $action . '">';
                 mpm_hidden($csrf, ($enabled || $retryRoom) ? 'disable' : 'enable', $slug);
                 echo '<button class="btn btn-primary" type="submit">' . ($enabled ? 'غیرفعال‌سازی (حفظ داده)' : ($retryRoom ? 'تلاش دوباره برای بستن اتاق VPS' : 'فعال‌سازی')) . '</button></form>';
             }
-            if ($enabled && $compatible) echo '<p><a href="plugins/school-plugins.php?plugin=' . rawurlencode($slug) . '">بازکردن افزونه</a></p>';
+            if ($enabled && $compatible) echo '<p><a target="_top" href="plugins/school-plugins.php?plugin=' . rawurlencode($slug) . '">بازکردن افزونه</a></p>';
         } elseif (!$pending) {
             echo '<p>فایل‌ها یا تنظیمات قابل خواندن نیستند. حذف کامل همچنان در دسترس است.</p>';
         }
-        echo '<form class="mt-3" method="post" action="other-settings.php?tab=plugins">';
+        echo '<form class="mt-3" method="post" action="' . $action . '">';
         mpm_hidden($csrf, 'remove', $slug);
         echo '<label><input required type="checkbox" name="confirm_delete" value="yes"> حذف دائمی فایل‌ها و داده‌های همین افزونه را تأیید می‌کنم.</label><button class="btn btn-primary" type="submit">حذف کامل افزونه</button></form></section>';
     }
@@ -1148,7 +1211,8 @@ function mpm_run(): void
                 http_response_code(405);
                 throw new MpmNotice('مدیریت افزونه‌ها از تب «تنظیمات دیگر ← افزونه‌ها» انجام می‌شود.');
             }
-            header('Location: ../other-settings.php?tab=plugins', true, 303);
+            $tab = is_file(mpm_host_root() . '/school-classroom-settings.php') ? 'hub_tab' : 'tab';
+            header('Location: ../other-settings.php?' . $tab . '=plugins', true, 303);
             return;
         }
         $origin = mpm_origin();

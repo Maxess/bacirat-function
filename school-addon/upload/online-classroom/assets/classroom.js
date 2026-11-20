@@ -24,12 +24,13 @@
     const root = el('classroom');
     if (!root) return;
     const lk = window.LivekitClient;
+    const fridaySlot = 'friday-test';
     const staff = root.dataset.moderator === 'yes';
     const roomClass = Number(root.dataset.class);
     const api = (action, data = {}, options) => request(root, action, {class: roomClass, ...data}, options);
     const student = (id) => /^student-[1-9]\d{0,17}$/.test(id);
     let active = null, connecting = false, busy = false, polling = false, needsRefresh = false, permanent = false, stopped = false;
-    let wanted = true, autoStart = staff, state = {phase:'idle', ready:null}, chatCursor = 0, seconds = {}, admitted = false;
+    let wanted = true, autoStart = staff, optedIntoTest = false, state = {phase:'idle', ready:null}, chatCursor = 0, seconds = {}, admitted = false;
     let pollTimer, flow = 0, retryAt = 0, attempts = 0;
     let peopleKey = '', peopleTimers = new Map(), slotKey = null;
 
@@ -172,6 +173,7 @@
     function bellMessage() {
         const schedule = state.schedule;
         if (!schedule) return 'در حال بررسی زنگ‌های امروز…';
+        if (schedule.choices.length === 1 && schedule.choices[0].id === fridaySlot) return 'برای آزمایش، «ورود به آزمایش جمعه» را بزن. این جلسه گزارش حضور یا اعلان ندارد.';
         if (schedule.choices.length > 1) return 'زنگ موردنظر را از برنامهٔ امروز انتخاب کن.';
         if (schedule.choices.length === 1) return 'زنگ مشخص است؛ برای ورود می‌توانی «شروع زنگ» را بزنی.';
         if (schedule.next) return `زنگ بعدی: ${schedule.next} (به وقت تهران).`;
@@ -193,7 +195,9 @@
             slot.disabled = !!currentSlot || busy;
             el('open').disabled = busy || !!active || connecting || state.ready === null || permanent || phase === 'closing'
                 || phase === 'reserved' || (!currentSlot && !slot.value) || (phase === 'paused' && !state.resumable);
-            el('open').textContent = phase === 'paused' ? 'ادامهٔ زنگ' : currentSlot ? 'پیوستن به زنگ' : 'شروع زنگ';
+            const test = (currentSlot || slot.value) === fridaySlot;
+            el('open').textContent = test ? 'ورود به آزمایش جمعه' : phase === 'paused' ? 'ادامهٔ زنگ' : currentSlot ? 'پیوستن به زنگ' : 'شروع زنگ';
+            el('close').textContent = currentSlot === fridaySlot ? 'بستن اتاق آزمایشی برای همه' : 'پایان کلاس برای همه';
             el('close').hidden = !state.lesson || phase === 'reserved';
             el('close').disabled = busy || phase === 'closing';
             el('clear-floor').disabled = !live || busy;
@@ -201,7 +205,7 @@
         el('wait-title').textContent = phase === 'paused' ? 'کلاس موقتاً متوقف است' : phase === 'closing' ? 'کلاس در حال پایان است'
             : connectingNow ? 'در حال تأیید ورود…' : staff ? 'در انتظار شروع زنگ' : 'در انتظار ورود دبیر یا مسئول مدرسه';
         el('wait-message').textContent = permanent ? 'برای دسترسی دوباره صفحه را از پنل مدرسه باز کنید.'
-            : phase === 'reserved' ? 'زنگ فعلی برای این حساب مجاز نیست. پس از پایان زنگ می‌توانی جلسهٔ خودت را شروع کنی.'
+            : phase === 'reserved' ? (staff ? 'اتاق این کلاس در اختیار جلسهٔ دیگری است.' : 'اتاق این کلاس هنوز برای ورود دانش‌آموز باز نیست.')
             : state.ready === false ? 'ارتباط با سرور رسانه برقرار نیست. دسترسی موقتاً بسته است.'
             : state.callbackMissing ? 'رویداد اتصال از LiveKit تأیید نشده است. مدیر مدرسه نشانی وب‌هوک در تنظیمات افزونه را بررسی کند.'
             : phase === 'paused' ? 'تا بازگشت دبیر یا مسئول مجاز منتظر بمانید؛ شمارش حضور متوقف است.'
@@ -344,16 +348,18 @@
             syncSlots();
             if (active && (active.epoch !== state.epoch || active.lesson !== state.lesson || !result.ready
                 || !['live', ...(staff ? ['starting'] : [])].includes(state.phase))) release(active);
-            if (staff && prior.lesson && state.phase === 'idle') wanted = false;
+            if (staff && prior.lesson && state.phase === 'idle') { wanted = false; optedIntoTest = false; }
             // Observe/rejoin one lesson per entry. An old tab never starts the next lesson on its own.
-            if (state.lesson || state.phase === 'reserved' || (!state.schedule?.timed && state.schedule?.choices.length > 1)) autoStart = false;
+            if (state.lesson || state.phase === 'reserved' || state.schedule?.choices.some(choice => choice.id === fridaySlot)
+                || (!state.schedule?.timed && state.schedule?.choices.length > 1)) autoStart = false;
             if (active && local.sid && scope().sid === local.sid && connected() && result.admitted === true) {
                 admitted = true; seconds = result.seconds || {};
                 render(); pushChat(result.chat);
                 board.sync(result.board, scope());
                 needsRefresh ||= !!(result.chatMore || result.board?.more);
             } else clearActivity();
-            if (!active && !connecting && wanted && state.ready && Date.now() >= retryAt) {
+            if (!active && !connecting && wanted && state.ready && Date.now() >= retryAt
+                && (state.slot !== fridaySlot || optedIntoTest)) {
                 if (state.joinable) {
                     const info = {lesson:state.lesson,epoch:state.epoch};
                     enter(() => api('ticket',info));
@@ -361,7 +367,7 @@
                     const slot = state.slot;
                     enter(() => api('open',{slot}));
                 } else if (autoStart && state.phase === 'idle' && !document.hidden && state.schedule?.date === root.dataset.bellDate
-                    && state.schedule?.choices.length === 1) {
+                    && state.schedule?.choices.length === 1 && state.schedule.choices[0].id !== fridaySlot) {
                     autoStart = false;
                     enter(() => api('open',{slot:state.schedule.choices[0].id}));
                 }
@@ -418,8 +424,10 @@
         el('slot').addEventListener('change', render);
         el('open').addEventListener('click', () => run(async () => {
             if (state.phase === 'closing' || state.ready === null || permanent) return;
-            const slot = state.slot || Number(el('slot').value);
+            const choice = state.slot || el('slot').value;
+            const slot = choice === fridaySlot ? choice : Number(choice);
             if (!slot) return;
+            optedIntoTest = slot === fridaySlot;
             wanted = true;
             autoStart = false;
             retryAt = 0;
@@ -430,15 +438,16 @@
             await api('cut-all-mics',scope()); note('نوبت صدا از همه گرفته شد.');
         }));
         el('close').addEventListener('click', () => {
-            if (!state.lesson || !window.confirm('کلاس برای همه پایان یابد و گزارش حضور ثبت شود؟')) return;
+            const test = state.slot === fridaySlot;
+            if (!state.lesson || !window.confirm(test ? 'اتاق آزمایشی برای همه بسته شود؟ تا پایان جمعه می‌توان دوباره آن را باز کرد.' : 'کلاس برای همه پایان یابد و گزارش حضور ثبت شود؟')) return;
             run(async () => {
-                wanted = false; flow++;
+                wanted = false; optedIntoTest = false; flow++;
                 const response = api('close',{lesson:state.lesson});
                 release(active,true);
                 await response;
                 state = {phase:'idle', ready:null};
                 syncSlots();
-                note('زنگ پایان یافت؛ گزارش حضور در پنل ثبت شد.'); refresh();
+                note(test ? 'اتاق آزمایشی بسته شد؛ گزارشی ثبت نشد.' : 'زنگ پایان یافت؛ گزارش حضور در پنل ثبت شد.'); refresh();
             });
         });
     } else el('join').addEventListener('click', () => { wanted = true; retryAt = 0; note(); render(); refresh(); });

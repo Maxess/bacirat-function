@@ -1,0 +1,40 @@
+--- a/includes/header.php
++++ b/includes/header.php
+@@ -5,4 +5,7 @@
+     elseif (is_file(__DIR__ . '/perf_fallback.php')) require_once __DIR__ . '/perf_fallback.php';
+ require_once __DIR__ . '/academic_year_helpers.php';
++// Optional classroom gateway; its navigation only reads an enabled, owned installation.
++$schoolClassroomGateway = dirname(__DIR__) . '/plugins/school-plugins.php';
++if (is_file($schoolClassroomGateway)) require_once $schoolClassroomGateway;
+ // Revocation is enforced centrally in functions.php, before any request handler.
+ // v4.33.0: never let the browser cache panel pages — prevents the Back button
+@@ -297,4 +300,5 @@
+             <a href="bot-accounts.php" class="sidebar-item <?php echo basename($_SERVER['PHP_SELF']) == 'bot-accounts.php' ? 'active' : ''; ?>">اکانت‌های متصل</a>
+         <?php endif; ?>
++        <?php if (function_exists('mpm_navigation')) mpm_navigation('admin'); ?>
+         <div class="sidebar-section-title">سیستم</div>
+         <a href="other-settings.php" class="sidebar-item <?php echo in_array(basename($_SERVER['PHP_SELF']), ['other-settings.php','backups.php','activity-logs.php','migration-updater.php','desk-sync.php','db-optimizer.php','admins.php']) ? 'active' : ''; ?>">تنظیمات دیگر</a>
+@@ -312,4 +316,5 @@
+         <div class="sidebar-section-title">آزمون</div>
+         <a href="student-online-exams.php" class="sidebar-item <?php echo in_array(basename($_SERVER['PHP_SELF']), ['student-online-exams.php','online-exam-take.php','online-exam-result.php']) ? 'active' : ''; ?>">آزمون‌های مجازی من</a>
++        <?php if (function_exists('mpm_navigation')) mpm_navigation('student'); ?>
+     </aside>
+     <?php elseif (function_exists('is_teacher_logged_in') && is_teacher_logged_in()): ?>
+@@ -320,4 +325,5 @@
+         <a href="online-exams.php" class="sidebar-item <?php echo in_array(basename($_SERVER['PHP_SELF']), ['online-exams.php','online-exam-form.php','online-exam-questions.php','online-exam-monitor.php','online-exam-results.php','online-exam-grading.php','online-question-bank.php']) ? 'active' : ''; ?>">آزمون‌های مجازی (آنلاین)</a>
+         <?php require_once __DIR__ . '/school_roles.php'; ensure_school_roles_schema(); if (teacher_has_deputy($_SESSION['teacher_id'])): ?><a href="deputy-panel.php" class="sidebar-item <?php echo basename($_SERVER['PHP_SELF']) == 'deputy-panel.php' ? 'active' : ''; ?>">پنل معاونت</a><a href="attendance.php" class="sidebar-item <?php echo basename($_SERVER['PHP_SELF']) == 'attendance.php' ? 'active' : ''; ?>">حضور و غیاب</a><?php endif; if (teacher_has_counselor($_SESSION['teacher_id'])): ?><a href="counselor-panel.php" class="sidebar-item <?php echo basename($_SERVER['PHP_SELF']) == 'counselor-panel.php' ? 'active' : ''; ?>">پنل مشاور</a><?php endif; if (teacher_has_executive($_SESSION['teacher_id'])): ?><a href="executive-panel.php" class="sidebar-item <?php echo basename($_SERVER['PHP_SELF']) == 'executive-panel.php' ? 'active' : ''; ?>">معاون اجرایی</a><?php endif; ?>
++        <?php if (function_exists('mpm_navigation')) mpm_navigation(basename($_SERVER['PHP_SELF'] ?? '') === 'deputy-panel.php' ? 'deputy' : 'teacher'); ?>
+     </aside>
+     <?php endif; ?>
+--- a/includes/management_hub.php
++++ b/includes/management_hub.php
+@@ -56,4 +56,9 @@
+         } else unset($tabs['desktop-updates']);
+     }
++    // Preserve the native iframe, tab history, and permission rules for all existing sections.
++    if ($key === 'settings' && function_exists('mpm_settings_visible') && mpm_settings_visible()
++        && is_file(dirname(__DIR__) . '/school-classroom-settings.php')) {
++        $tabs['plugins'] = ['افزونه‌ها','school-classroom-settings.php?embedded=1'];
++    }
+     $requested=$_GET['hub_tab']??'';
+     $active=is_string($requested)&&isset($tabs[$requested])?$requested:array_key_first($tabs);

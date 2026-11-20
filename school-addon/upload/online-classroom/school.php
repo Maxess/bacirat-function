@@ -50,6 +50,19 @@ function cl_day(int $now): DateTimeImmutable
 }
 
 const CL_DAYS = ['یک‌شنبه','دوشنبه','سه‌شنبه','چهارشنبه','پنجشنبه','جمعه','شنبه'];
+const CL_FRIDAY_SLOT = 'friday-test';
+const CL_FRIDAY_TITLE = 'آزمایش کلاس مجازی جمعه';
+const CL_FRIDAY_HOURS = '۰۰:۰۰ تا پایان جمعه · وقت تهران';
+
+/** A single opt-in civil Friday; settings never create weekly timetable rows. */
+function cl_friday_window(array $cfg, int $now): ?array
+{
+    $plan = $cfg['friday_test'] ?? null;
+    if (!is_array($plan) || !is_string($plan['id'] ?? null) || !preg_match('/^[a-f0-9]{32}$/D', $plan['id'])) return null;
+    $day = cl_day($now);
+    if ($day->format('w') !== '5' || $day->format('Y-m-d') !== ($plan['date'] ?? null)) return null;
+    return ['id'=>$plan['id'], 'end'=>$day->modify('tomorrow')->getTimestamp(), 'label'=>CL_FRIDAY_HOURS];
+}
 
 function cl_schedule_day(string $value): ?int
 {
@@ -108,17 +121,17 @@ function cl_assigned(array $actor, string $year, int $teacher): bool
     return $actor['office'] !== null || ($actor['role'] === 'teacher' && $actor['id'] === $teacher && $actor['year'] === $year);
 }
 
-function cl_class_for(PDO $db, array $classes, int $classId, array $actor): array
+function cl_class_for(PDO $db, array $classes, int $classId, array $actor, bool $friday = false): array
 {
     $class = $classes[$classId] ?? null;
-    if (!$class || !cl_access_class($db, $class, $actor)) throw new ClassroomError(403, 'این کلاس برای حساب تو در سال پیش‌فرض در دسترس نیست.');
+    if (!$class || !cl_access_class($db, $class, $actor, $friday)) throw new ClassroomError(403, 'این کلاس برای حساب تو در سال پیش‌فرض در دسترس نیست.');
     return $class;
 }
 
-function cl_access_class(PDO $db, array $class, array $actor): bool
+function cl_access_class(PDO $db, array $class, array $actor, bool $friday = false): bool
 {
     if ($actor['role'] === 'student') return $actor['class'] === $class['key'] && $actor['year'] === $class['year'];
-    if ($actor['office']) return true;
+    if ($friday || $actor['office']) return true; // The demo only widens visibility for authenticated staff.
     if ($actor['year'] !== $class['year']) return false;
     $rows = cl_query($db, 'SELECT class_name,academic_year FROM class_schedules WHERE teacher_id=?', [$actor['id']]);
     while ($slot = $rows->fetch(PDO::FETCH_ASSOC)) if (cl_slot_class($slot, $class)) return true;

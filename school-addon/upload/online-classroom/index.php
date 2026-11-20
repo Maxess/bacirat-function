@@ -5,7 +5,7 @@ require_once __DIR__ . '/reports.php';
 
 cl_headers();
 header('Content-Type: text/html; charset=UTF-8');
-$actor = $errorMessage = $class = $reports = null;
+$actor = $errorMessage = $class = $reports = $friday = null;
 $classes = $choices = [];
 $connect = $year = '';
 $now = time();
@@ -20,7 +20,8 @@ try {
     } else {
         $year = cl_current_year($s->db);
         $actor = cl_school_user($s->db, $_SESSION ?? [], $year);
-        $classes = array_filter(cl_classes($s->db, $year), static fn($c) => cl_access_class($s->db, $c, $actor));
+        $friday = cl_is_staff($actor) && cl_friday_window($cfg, $now) !== null;
+        $classes = array_filter(cl_classes($s->db, $year), static fn($c) => cl_access_class($s->db, $c, $actor, $friday));
         if (isset($_GET['class'])) $class = $classes[cl_id($_GET['class'])] ?? throw new ClassroomError(403, 'این کلاس برای حساب تو در دسترس نیست.');
         elseif (!isset($_GET['view']) && count($classes) === 1) {
             // Use the real class URL as the canonical address of the waiting page.
@@ -84,6 +85,7 @@ $pageTitle = $reports !== null ? 'حضور و غیاب کلاس مجازی' : ($
     <?php elseif ($class === null): ?>
         <section class="card">
             <h2>کلاس‌های سال پیش‌فرض</h2>
+            <?php if ($friday): ?><p role="status">آزمایش جمعه تا نیمه‌شب تهران فعال است. کلاس را انتخاب کن؛ جلسه فقط برای دبیران و مسئولان مجاز است و گزارش یا اعلان ندارد.</p><?php endif; ?>
             <?php if (!$classes): ?><p>برای این حساب در سال جاری کلاس قابل دسترسی نیست. عضویت یا برنامهٔ هفتگی را بررسی کن.</p><?php endif; ?>
             <div class="class-grid">
             <?php foreach ($classes as $c): ?><a class="class-link" href="<?= cl_html(cl_href(['class'=>$c['id']])) ?>"><strong><?= cl_html($c['name']) ?></strong><small><?= $staff ? 'برنامه و اتاق کلاس' : 'ورود به اتاق انتظار' ?></small></a><?php endforeach; ?>
@@ -102,7 +104,7 @@ $pageTitle = $reports !== null ? 'حضور و غیاب کلاس مجازی' : ($
                     <label for="slot">زنگ‌های امروز · وقت تهران</label>
                     <div class="actions">
                     <select id="slot"><option value="">انتخاب زنگ</option>
-                        <?php foreach ($choices as $choice): ?><option value="<?= $choice['id'] ?>"><?= cl_html($choice['label']) ?></option><?php endforeach; ?>
+                        <?php foreach ($choices as $choice): ?><option value="<?= cl_html((string)$choice['id']) ?>"><?= cl_html($choice['label']) ?></option><?php endforeach; ?>
                     </select>
                     <button type="button" id="open" disabled>شروع زنگ</button><button type="button" id="close" class="danger" hidden>پایان کلاس برای همه</button>
                     </div>

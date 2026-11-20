@@ -42,8 +42,20 @@ function cl_match_transport(array $lesson, array $input): bool
     return $lesson['room'] !== null && ($input['lesson'] ?? null) === $lesson['id'] && ($input['epoch'] ?? null) === cl_epoch($lesson);
 }
 
+function cl_is_friday_test(array $lesson): bool
+{
+    return isset($lesson['test']);
+}
+
+function cl_lesson_expired(array $cfg, array $lesson, int $now): bool
+{
+    return $now >= $lesson['deadline'] || $lesson['date'] !== cl_day($now)->format('Y-m-d')
+        || (cl_is_friday_test($lesson) && (cl_friday_window($cfg, $now)['id'] ?? null) !== $lesson['test']);
+}
+
 function cl_can_lesson(array $lesson, array $actor): bool
 {
+    if (cl_is_friday_test($lesson)) return cl_is_staff($actor);
     return !cl_is_staff($actor) || cl_assigned($actor, $lesson['year'], $lesson['teacher']);
 }
 
@@ -72,9 +84,10 @@ function cl_entered(array $lesson, array $actor, mixed $sid, int $now): bool
         && ($lesson['pulses'][$id]['at'] ?? 0) >= $now - CL_PULSE_TTL;
 }
 
-function cl_check_live(?array $lesson, array $actor, array $input, int $now): array
+function cl_check_live(array $cfg, ?array $lesson, array $actor, array $input, int $now): array
 {
-    if (!$lesson || !cl_can_lesson($lesson, $actor) || !cl_lesson_live($lesson, $now) || !cl_match_transport($lesson, $input)
+    if (!$lesson || !cl_can_lesson($lesson, $actor) || cl_lesson_expired($cfg, $lesson, $now)
+        || !cl_lesson_live($lesson, $now) || !cl_match_transport($lesson, $input)
         || !cl_entered($lesson, $actor, $input['sid'] ?? null, $now)) {
         throw new ClassroomError(409, 'کلاس در حالت انتظار است یا ورودت هنوز تأیید نشده است.');
     }
@@ -107,6 +120,9 @@ function cl_staff_schedule(ClassroomStore $s, array $cfg, array $class, array $a
     $next = null;
     $soonest = PHP_INT_MAX;
     $date = cl_day($now)->format('Y-m-d');
+    if (cl_is_staff($actor) && cl_friday_window($cfg, $now) !== null) {
+        $choices[] = ['id'=>CL_FRIDAY_SLOT, 'label'=>CL_FRIDAY_TITLE . ' · ' . CL_FRIDAY_HOURS];
+    }
     foreach (cl_today_slots($s->db, $class, $actor, $now) as $slot) {
         $window = cl_bell_window($hours, $slot['period'], $now);
         if ($hours && (!$window || $now >= $window['end'])) continue;
@@ -127,17 +143,28 @@ function cl_staff_schedule(ClassroomStore $s, array $cfg, array $class, array $a
 function cl_open_lesson(ClassroomStore $s, array $ctx, array $cfg, array $class, array $actor, array $input, int $now, callable $rpc): array
 {
     if (!cl_is_staff($actor)) throw new ClassroomError(403, 'شروع کلاس فقط برای دبیر یا مسئول مجاز است.');
-    $slotId = cl_id($input['slot'] ?? null);
-    $slot = $slotId ? cl_get_slot($s->db, $class, $slotId, $now) : null;
-    if (!$slot || !cl_assigned($actor, $class['year'], $slot['teacher'])) {
-        throw new ClassroomError(403, 'برای شروع، زنگ همین کلاس از برنامهٔ امروز و دبیر مجاز آن را انتخاب کن.');
-    }
-    $assigned = cl_school_account($s->db, 'teacher', $slot['teacher'], $class['year']);
-    if (!$assigned || $assigned['year'] !== $class['year']) throw new ClassroomError(409, 'دبیرِ این زنگ برای سال پیش‌فرض فعال نیست.');
-    $date = cl_day($now)->format('Y-m-d');
-    $id = cl_lesson_id($class, $slot['period'], $date);
     $lesson = cl_active($s, $class['id']);
-    if ($lesson && ($lesson['id'] !== $id || $lesson['phase'] === 'closing' || $now >= $lesson['deadline'])) {
+    $date = cl_day($now)->format('Y-m-d');
+    $test = null;
+    $window = null;
+    if (($input['slot'] ?? null) === CL_FRIDAY_SLOT) {
+        $test = $window = cl_friday_window($cfg, $now);
+        if (!$test) throw new ClassroomError(403, 'آزمایش کلاس مجازی فقط در جمعهٔ تعیین‌شده باز است.');
+        $id = ($lesson['test'] ?? null) === $test['id'] ? $lesson['id'] : bin2hex(random_bytes(16));
+        $slot = ['id'=>CL_FRIDAY_SLOT,'period'=>'آزمایشی','subject'=>CL_FRIDAY_TITLE,'teacher'=>$actor['role'] === 'teacher' ? $actor['id'] : 0];
+        $teacherName = $actor['name'];
+    } else {
+        $slotId = cl_id($input['slot'] ?? null);
+        $slot = $slotId ? cl_get_slot($s->db, $class, $slotId, $now) : null;
+        if (!$slot || !cl_assigned($actor, $class['year'], $slot['teacher'])) {
+            throw new ClassroomError(403, 'برای شروع، زنگ همین کلاس از برنامهٔ امروز و دبیر مجاز آن را انتخاب کن.');
+        }
+        $assigned = cl_school_account($s->db, 'teacher', $slot['teacher'], $class['year']);
+        if (!$assigned || $assigned['year'] !== $class['year']) throw new ClassroomError(409, 'دبیرِ این زنگ برای سال پیش‌فرض فعال نیست.');
+        $teacherName = $assigned['name'];
+        $id = cl_lesson_id($class, $slot['period'], $date);
+    }
+    if ($lesson && ($lesson['id'] !== $id || $lesson['year'] !== $class['year'] || $lesson['phase'] === 'closing' || cl_lesson_expired($cfg, $lesson, $now))) {
         throw new ClassroomError(409, 'جلسهٔ دیگری برای این کلاس باز یا در حال بسته‌شدن است.');
     }
     if ($lesson && $lesson['room'] !== null) {
@@ -145,20 +172,23 @@ function cl_open_lesson(ClassroomStore $s, array $ctx, array $cfg, array $class,
         throw new ClassroomError(409, 'در حال بستن اتصال قبلی کلاس؛ چند لحظه صبر کن.');
     }
     if (!$lesson) {
-        if ($s->get('lesson', $id)) throw new ClassroomError(409, 'این زنگ امروز پایان یافته است.');
-        $hours = $cfg['bell_hours'] ?? [];
-        $window = cl_bell_window($hours, $slot['period'], $now);
-        if ($hours) {
-            if (!$window) throw new ClassroomError(409, 'برای این زنگ در تنظیمات کلاس مجازی ساعتی ثبت نشده است.');
-            if ($now < $window['start'] || $now >= $window['end']) {
-                throw new ClassroomError(409, 'این زنگ فقط از ' . $window['label'] . ' به وقت تهران قابل شروع است.');
+        if (!$test) {
+            if ($s->get('lesson', $id)) throw new ClassroomError(409, 'این زنگ امروز پایان یافته است.');
+            $hours = $cfg['bell_hours'] ?? [];
+            if ($hours) {
+                $window = cl_bell_window($hours, $slot['period'], $now);
+                if (!$window) throw new ClassroomError(409, 'برای این زنگ در تنظیمات کلاس مجازی ساعتی ثبت نشده است.');
+                if ($now < $window['start'] || $now >= $window['end']) {
+                    throw new ClassroomError(409, 'این زنگ فقط از ' . $window['label'] . ' به وقت تهران قابل شروع است.');
+                }
             }
         }
-        // Save the cutoff on creation. Editing tomorrow's hours does not change an ongoing or paused lesson.
+        // Save the cutoff on creation. Editing ordinary bell hours cannot change it later.
         $lesson = ['id'=>$id,'class_id'=>$class['id'],'class_name'=>$class['name'],'year'=>$class['year'],'date'=>$date,
-            'slot'=>$slotId,'period'=>$slot['period'],'subject'=>$slot['subject'],'teacher'=>$slot['teacher'],'teacher_name'=>$assigned['name'],
+            'slot'=>$slot['id'],'period'=>$slot['period'],'subject'=>$slot['subject'],'teacher'=>$slot['teacher'],'teacher_name'=>$teacherName,
             'created'=>$now,'deadline'=>$window['end'] ?? $now + CL_MAX_LESSON_SECONDS, 'bell'=>$window['label'] ?? null,
-            'active_seconds'=>0,'started'=>null,'roster'=>cl_roster($s->db, $class),'seconds'=>[], 'pulses'=>[], 'seen'=>[], 'staff'=>[], 'sample'=>0];
+            'active_seconds'=>0,'started'=>null,'roster'=>$test ? [] : cl_roster($s->db, $class),'seconds'=>[], 'pulses'=>[], 'seen'=>[], 'staff'=>[], 'sample'=>0];
+        if ($test) $lesson['test'] = $test['id'];
     }
     $lesson['room'] = $cfg['room_prefix'] . '-v4-c' . $class['id'] . '-' . bin2hex(random_bytes(12));
     $lesson['phase'] = 'starting';
@@ -212,8 +242,8 @@ function cl_joinable(array $lesson, array $actor, int $now): bool
 
 function cl_ticket(array $cfg, ?array $lesson, array $actor, array $input, int $now): array
 {
-    if (!$lesson || !cl_can_lesson($lesson, $actor) || !cl_match_transport($lesson, $input)
-        || !cl_joinable($lesson, $actor, $now)) {
+    if (!$lesson || !cl_can_lesson($lesson, $actor) || cl_lesson_expired($cfg, $lesson, $now)
+        || !cl_match_transport($lesson, $input) || !cl_joinable($lesson, $actor, $now)) {
         throw new ClassroomError(409, 'در انتظار اتصال دبیر یا مسئول مجاز هستیم.');
     }
     $token = cl_join_ticket($cfg, $lesson['room'], $actor, min(35, $lesson['deadline'] - $now), $now);
@@ -295,13 +325,15 @@ function cl_retire_transport(ClassroomStore $s, array $cfg, array $lesson, int $
 // Called under the per-class lock. A single sample serves all polling tabs in that room.
 function cl_reconcile(ClassroomStore $s, array $cfg, ?array $class, array $lesson, int $now, callable $rpc): ?array
 {
-    $slot = null;
-    if ($class && $class['year'] === $lesson['year'] && $lesson['date'] === cl_day($now)->format('Y-m-d') && $now < $lesson['deadline']) {
+    $test = cl_is_friday_test($lesson);
+    $valid = $class !== null && $class['year'] === $lesson['year'] && !cl_lesson_expired($cfg, $lesson, $now);
+    if ($valid && !$test) {
         $slot = cl_get_slot($s->db, $class, $lesson['slot'], $now);
+        $valid = $slot && $slot['teacher'] === $lesson['teacher'] && $slot['subject'] === $lesson['subject']
+            && cl_period_key($slot['period']) === cl_period_key($lesson['period']);
     }
     $closingNow = false;
-    if (!$slot || $slot['teacher'] !== $lesson['teacher'] || $slot['subject'] !== $lesson['subject']
-        || cl_period_key($slot['period']) !== cl_period_key($lesson['period'])) {
+    if (!$valid) {
         $closingNow = $lesson['phase'] !== 'closing';
         cl_pause($lesson, 'closing');
     }
@@ -332,9 +364,9 @@ function cl_reconcile(ClassroomStore $s, array $cfg, ?array $class, array $lesso
         [$role, $pk] = explode('-', $identity, 2);
         if ($role === 'student') { $students[] = (int)$pk; continue; }
         $account = cl_school_account($s->db, $role, cl_id($pk), $lesson['year']);
-        if ($account && cl_assigned($account, $lesson['year'], $lesson['teacher'])) $staff[$identity] = true;
+        if ($account && cl_can_lesson($lesson, $account)) $staff[$identity] = true;
     }
-    $roster = cl_roster($s->db, $class, $students);
+    $roster = $test ? [] : cl_roster($s->db, $class, $students);
     if (count($observed) !== count($staff) + count($roster)) cl_pause($lesson);
     else {
         $lesson['roster'] += $roster;
@@ -350,7 +382,7 @@ function cl_finish_lesson(ClassroomStore $s, array $cfg, array $lesson, int $now
     $s->tx(static function () use ($s, $cfg, $lesson, $now) {
         $id = $lesson['id'];
         $s->delete('active', (string)$lesson['class_id']);
-        if ($lesson['started'] === null) {
+        if (cl_is_friday_test($lesson) || $lesson['started'] === null) {
             $s->delete('lesson', $id);
         } else {
             $lesson['ended'] = min($now, $lesson['deadline']);

@@ -60,7 +60,7 @@ function fixture(staff, autoSlot = 0) {
             const input=JSON.parse(opt.body); assert.equal(input.class,22); requests.push(input);
             let reply={ok:true};
             if(input.action==='status'){
-                const phased = srv.phase==='idle' ? {phase:'idle'} : {phase:srv.phase,slot:11, lesson:srv.lesson,epoch:srv.epoch,resumable:srv.resumable,subject:'ریاضی',period:'زنگ یک'};
+                const phased = srv.phase==='idle' ? {phase:'idle'} : {phase:srv.phase,slot:srv.slot ?? 11, lesson:srv.lesson,epoch:srv.epoch,resumable:srv.resumable,subject:'ریاضی',period:'زنگ یک'};
                 reply={...reply,ready:srv.ready,...phased,joinable:srv.phase==='live'||(staff&&srv.phase==='starting'&&srv.staffCanJoin)};
                 if (staff && srv.phase==='idle') reply.schedule=srv.schedule;
                 if(input.sid && srv.phase==='live' && input.epoch===srv.epoch) Object.assign(reply,{admitted:true,seconds:srv.seconds,chat:[],board:{rev:1}});
@@ -179,4 +179,29 @@ test('a waiting tab left open overnight does not auto-start the following day', 
     await f.time(); await f.time();
     assert.equal(f.elements.slot.value,'13');
     assert.equal(f.requests.filter(r=>r.action==='open').length,0);
+});
+
+
+test('Friday test requires a click on both idle and running rooms and has no report message', async()=>{
+    const slot='friday-test';
+    const f=fixture(true,slot);
+    f.srv.slot=slot;
+    await f.time(); await f.time();
+    assert.equal(f.requests.filter(r=>r.action==='open').length,0);
+    assert.equal(f.elements.slot.value,slot);
+    assert.match(f.elements.open.textContent,/آزمایش جمعه/);
+    await f.elements.open.click();
+    assert.equal(f.requests.find(r=>r.action==='open').slot,slot);
+    f.srv.phase='live'; await f.time();
+    assert.equal(f.elements['live-panel'].hidden,false);
+    await f.elements.close.click(); await f.time();
+    assert.match(f.elements.notice.textContent,/گزارشی ثبت نشد/);
+    assert.equal(f.requests.filter(r=>r.action==='open').length,1);
+
+    const arriving=fixture(true,slot); arriving.srv.slot=slot; arriving.srv.phase='live';
+    await arriving.time(); await arriving.time();
+    assert.equal(arriving.room,undefined);
+    assert.equal(arriving.requests.filter(r=>r.action==='ticket').length,0);
+    await arriving.elements.open.click();
+    assert.equal(arriving.requests.find(r=>r.action==='open').slot,slot);
 });

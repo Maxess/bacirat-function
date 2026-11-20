@@ -107,7 +107,7 @@ $b=$open($other,12,$t,$classes[20]);
 $r=$a['room']; $r2=$b['room'];
 must($a['phase']==='starting' && $r!==$r2 && !$a['started'], 'staff enters before pupils');
 denied(409,fn()=>cl_ticket($cfg,$a,$student,$bind($a,'PA_Student'),$t));
-denied(409,fn()=>cl_check_live($a,$teacher,$bind($a,'PA_Teacher'),$t));
+denied(409,fn()=>cl_check_live($cfg,$a,$teacher,$bind($a,'PA_Teacher'),$t));
 $ticket = cl_ticket($cfg,$a,$teacher,$bind($a,'PA_Teacher'),$t);
 must($ticket['epoch'] === cl_epoch($a), 'staff ticket before media is live; no independent watcher');
 $raw = json_encode(['event'=>'room_started','room'=>['name'=>$r]]);
@@ -132,14 +132,14 @@ $sample(20,$t+6,$classes[20]);
 $a = $sample(10,$t+6,$first);
 must($a['phase']==='live' && $a['active_seconds']===0, 'verified staff and no time counted in wait');
 cl_ticket($cfg,$a,$student,$bind($a,'PA_Student'),$t+6);
-denied(409,fn()=>cl_check_live($a,$student,$bind($a,'PA_Fake'),$t+6));
-denied(409,fn()=>cl_check_live($a,$other,$bind($a,'PA_Teacher'),$t+6));
+denied(409,fn()=>cl_check_live($cfg,$a,$student,$bind($a,'PA_Fake'),$t+6));
+denied(409,fn()=>cl_check_live($cfg,$a,$other,$bind($a,'PA_Teacher'),$t+6));
 $pulse(10,$student,'PA_Student',$t+8);
 $pulse(10,$manager,'PA_Manager',$t+8);
 $wire($r,$teacherWire+$studentWire+$managerWire);
 $sample(10,$t+9,$first);
 $active=cl_active($s,10);
-cl_check_live($active,$student,$bind($active,'PA_Student'),$t+9);
+cl_check_live($cfg,$active,$student,$bind($active,'PA_Student'),$t+9);
 cl_chat($s,$active,$student,'<b>متن است</b>',$t+9);
 denied(429,fn()=>cl_chat($s,$active,$student,'spam',$t+10));
 $stroke=['tool'=>'pen','color'=>'#0055aa','size'=>4,'points'=>[[420,200],[9000,9800]]];
@@ -168,7 +168,7 @@ $event('participant_left',$r,$t+15,'admin-3','PA_Manager');
 $a=cl_active($s,10);
 must($a['room'] === null && !isset($sfus[$r]) && $a['phase']==='paused' && $a['active_seconds']===6
     && cl_active($s,20)['phase']==='live' && isset($sfus[$r2]), 'signed leave closes only this room without any browser request or watcher');
-denied(409,fn()=>cl_check_live($a,$student,$bind($a,'PA_Student'),$t+15));
+denied(409,fn()=>cl_check_live($cfg,$a,$student,$bind($a,'PA_Student'),$t+15));
 denied(409,fn()=>cl_ticket($cfg,$a,$student,$bind($a,'PA_Student'),$t+15));
 $a2=$open($teacher,11,$t+19);
 $r3=$a2['room'];
@@ -302,7 +302,7 @@ $lateTicket = cl_ticket($revised,$liveBell,$student,$bind($liveBell,'PA_Student'
 $claims = json_decode(base64_decode(strtr(explode('.',$lateTicket['token'])[1],'-_','+/')), true, 16, JSON_THROW_ON_ERROR);
 must($claims['exp'] === $end, 'signed listener token expires no later than the bell');
 denied(409,fn()=>cl_ticket($revised,$liveBell,$student,$bind($liveBell,'PA_Student'),$end));
-denied(409,fn()=>cl_check_live($liveBell,$student,$bind($liveBell,'PA_Student'),$end));
+denied(409,fn()=>cl_check_live($cfg,$liveBell,$student,$bind($liveBell,'PA_Student'),$end));
 must(cl_reconcile($s,$revised,$first,$liveBell,$end,$rpc) === null && !isset($sfus[$back]), 'at the exclusive end, retire the room and finalize the report');
 must(cl_report_detail($s,$teacher,$firstBell['id'])['ended'] === $end, 'report uses the stored end time');
 denied(409,fn()=>$timedOpen($teacher,99,$end));
@@ -315,5 +315,59 @@ must(!cl_active($s,10) && !isset($sfus[$secondRoom]) && cl_report_detail($s,$oth
 $fourth = strtotime('2026-11-25T06:50:00Z');
 must(array_column($at($teacher,$fourth)['choices'],'id') === [74], 'fourth bell maps to the normalized school period number');
 must(!$at($teacher,$fourth+2700)['choices'], 'bell end is exclusive, even if it was never opened');
+// A one-day pilot is independent of bell hours, timetable assignments and official attendance.
+$fri = strtotime('2026-11-19T20:30:00Z'); // Friday 00:00 in Tehran, still Thursday in UTC.
+$sat = strtotime('2026-11-20T20:30:00Z');
+$trial = $cfg + ['friday_test'=>['date'=>'2026-11-20','id'=>str_repeat('e',32)],
+    'bell_hours'=>[1=>['start'=>'08:30','end'=>'09:15']]];
+$priorYear = cl_school_user($db, ['teacher_id'=>4], $year);
+$normalReportRows = $s->rows('reports', 100);
+$pendingRows = $s->rows('host-pending', 100);
+$beforeSchedule = $db->query('SELECT * FROM class_schedules ORDER BY id')->fetchAll(PDO::FETCH_ASSOC);
+$trialOpen = fn($actor,$class,$instant)=>cl_open_lesson($s,$ctx,$trial,$class,$actor,['slot'=>CL_FRIDAY_SLOT],$instant,$rpc);
+must(cl_friday_window($trial,$fri-1) === null && cl_friday_window($trial,$fri)['end'] === $sat && $sat-$fri === 86400,
+    'Tehran midnight, not browser/UTC date, controls the full Friday');
+must(cl_friday_window($trial,$sat) === null && cl_friday_window($trial,$fri+7*86400) === null, 'no Saturday spill or weekly repetition');
+must(cl_friday_window(['friday_test'=>['date'=>'2026-11-21','id'=>str_repeat('e',32)]],$sat) === null, 'invalid day fails closed at runtime');
+must(!cl_access_class($db,$classes[20],$priorYear) && cl_access_class($db,$classes[20],$priorYear,true)
+    && !cl_access_class($db,$classes[20],$student,true), 'all active teachers are eligible during the pilot, not pupils in other classes');
+must(array_column(cl_staff_schedule($s,$trial,$classes[20],$priorYear,$fri)['choices'],'id') === [CL_FRIDAY_SLOT], 'no bell assignment required');
+denied(403,fn()=>$trialOpen($priorYear,$classes[20],$fri-1));
+denied(403,fn()=>$trialOpen($student,$first,$fri));
+$demo = $trialOpen($priorYear,$first,$fri);
+$parallel = $trialOpen($other,$classes[20],$fri+1);
+must($parallel['room'] !== $demo['room'] && $parallel['deadline'] === $sat && $demo['roster'] === [], 'one independent test per class and no pupil roster');
+must($trialOpen($teacher,$first,$fri+2)['id'] === $demo['id'], 'another teacher joins the same classroom, not a second room');
+denied(409,fn()=>cl_ticket($trial,$demo,$student,$bind($demo,'PA_Student'),$fri+2));
+$demoToken = cl_ticket($trial,$demo,$teacher,$bind($demo,'PA_Teacher'),$fri+2);
+must($demoToken['lesson'] === $demo['id'], 'ticket for another active teacher');
+cl_event_apply($s,$trial,['event'=>'room_started','room'=>['name'=>$demo['room']]],$fri+1,$rpc);
+$wire($demo['room'],['teacher-4'=>'PA_StaffOld','teacher-1'=>'PA_Teacher']);
+$pulse(10,$priorYear,'PA_StaffOld',$fri+3); $pulse(10,$teacher,'PA_Teacher',$fri+3);
+$liveDemo = cl_reconcile($s,$trial,$first,cl_active($s,10),$fri+3,$rpc);
+must(cl_check_live($trial,$liveDemo,$teacher,$bind($liveDemo,'PA_Teacher'),$fri+3)['phase'] === 'live', 'both teachers become admitted after the verified event and presence');
+denied(409,fn()=>cl_check_live($cfg,$liveDemo,$teacher,$bind($liveDemo,'PA_Teacher'),$fri+3));
+denied(409,fn()=>cl_ticket($cfg,$liveDemo,$teacher,$bind($liveDemo,'PA_Teacher'),$fri+3));
+cl_close_lesson($s,$trial,$liveDemo,$fri+4,$rpc);
+must(!$s->get('lesson',$demo['id']) && !cl_active($s,10),'manual close purges the practice instance');
+$later = $trialOpen($teacher,$first,$sat-2);
+must($later['id'] !== $demo['id'] && $later['deadline'] === $sat, 'reopens with a fresh identity well beyond the normal two-hour limit');
+$lastToken = explode('.',cl_ticket($trial,$later,$teacher,$bind($later,'PA_Teacher'),$sat-1)['token']);
+must(cl_event_json($lastToken[1])['exp'] === $sat, 'last ticket is clipped to the midnight cutoff');
+denied(409,fn()=>cl_ticket($trial,$later,$teacher,$bind($later,'PA_Teacher'),$sat));
+must(cl_reconcile($s,$trial,$first,$later,$sat,$rpc) === null && !isset($sfus[$later['room']]), 'midnight ends the demo');
+cl_event_apply($s,$cfg,['event'=>'participant_left','room'=>['name'=>$parallel['room']]],$fri+5,$rpc);
+must(!cl_active($s,20) && !isset($sfus[$parallel['room']]), 'revoking Friday also closes an in-flight practice via signed event reconciliation');
+must($s->rows('reports',100) === $normalReportRows && $s->rows('host-pending',100) === $pendingRows
+    && $db->query('SELECT * FROM class_schedules ORDER BY id')->fetchAll(PDO::FETCH_ASSOC) === $beforeSchedule,
+    'the demo never publishes reports, sends notices or modifies school scheduling');
+// A real Friday lesson keeps its original assignment and cannot be preempted by the pilot.
+$db->exec("INSERT INTO class_schedules (id,teacher_id,class_name,academic_year,day_of_week,period_num,subject_name) VALUES (990,1,'هفتم1','1405/1406','جمعه','زنگ 1','درس رسمی جمعه')");
+$morning = $fri+8*3600+35*60;
+$real = cl_open_lesson($s,$ctx,$trial,$first,$teacher,['slot'=>990],$morning,$rpc);
+must(!cl_is_friday_test($real) && $real['deadline'] === $fri+9*3600+15*60, 'the weekly bell and its deadline remain ordinary even during a Friday pilot');
+denied(409,fn()=>cl_ticket($trial,$real,$priorYear,$bind($real,'PA_StaffOld'),$morning));
+denied(409,fn()=>$trialOpen($priorYear,$first,$morning));
+cl_close_lesson($s,$trial,$real,$morning+1,$rpc);
 if ($mysql) foreach ([$table,'academic_years','settings','classes','students','teachers','admins','class_schedules','bale_bot_users','telegram_bot_users'] as $name) $db->exec("DROP TABLE `$name`");
-echo "PASS calendar, access roles, configured bell windows, native events, trusted presence, waiting/resume, reports, board/chat and conditional school bot delivery\n";
+echo "PASS calendar, access roles, Friday practice, configured bell windows, native events, trusted presence, waiting/resume, reports, board/chat and conditional school bot delivery\n";

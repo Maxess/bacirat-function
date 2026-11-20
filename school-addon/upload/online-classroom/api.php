@@ -19,11 +19,25 @@ cl_json_reply(static function (): array {
     $s = cl_store();
     $year = cl_current_year($s->db);
     $actor = cl_school_user($s->db, $session, $year);
-    $class = cl_class_for($s->db, cl_classes($s->db, $year), cl_id($body['class'] ?? null), $actor);
+    $class = cl_classes($s->db, $year)[cl_id($body['class'] ?? null)] ?? throw new ClassroomError(403, 'این کلاس برای حساب تو در دسترس نیست.');
     $rpc = static fn(string $method, string $room, array $data): array => cl_rpc($cfg, $room, $method, $data);
     return cl_class_lock($s, $cfg, $class['id'], static function () use ($s, $context, $cfg, $class, $actor, $body, $action, $rpc, $isUpload) {
         $now = time();
         $lesson = cl_active($s, $class['id']);
+        $expiredTest = $lesson && cl_is_friday_test($lesson) && cl_lesson_expired($cfg, $lesson, $now);
+        if (!cl_access_class($s->db, $class, $actor, cl_friday_window($cfg, $now) !== null)) {
+            // A teacher in a demo-only class can trigger retirement at midnight, but never read or rejoin it.
+            if ($action === 'status' && $expiredTest && cl_is_staff($actor) && cl_match_transport($lesson, $body)) {
+                try { cl_reconcile($s, $cfg, $class, $lesson, $now, $rpc); }
+                catch (ClassroomError $error) { error_log('School classroom: expired demo close not confirmed'); }
+            }
+            throw new ClassroomError(403, 'این کلاس برای حساب تو در دسترس نیست.');
+        }
+        if ($expiredTest && $action !== 'status') {
+            cl_close_lesson($s, $cfg, $lesson, $now, $rpc);
+            $lesson = null;
+            if ($action !== 'open') throw new ClassroomError(409, 'مهلت این جلسهٔ آزمایشی پایان یافته است.');
+        }
         if ($action === 'status') {
             $idle = static function (bool $ready) use ($s, $cfg, $class, $actor): array {
                 $result = ['phase'=>'idle', 'ready'=>$ready];
@@ -31,8 +45,9 @@ cl_json_reply(static function (): array {
                 return $result;
             };
             if (!$lesson) return $idle(true);
+            $isTest = cl_is_friday_test($lesson);
             $allowedRole = $lesson['year'] === $class['year'] && cl_can_lesson($lesson, $actor);
-            if ($allowedRole) $lesson = cl_touch($s, $lesson, $actor, $body, $now);
+            if ($allowedRole && !$expiredTest) $lesson = cl_touch($s, $lesson, $actor, $body, $now);
             $ready = true;
             try { $lesson = cl_reconcile($s, $cfg, $class, $lesson, $now, $rpc); }
             catch (ClassroomError $error) {
@@ -40,19 +55,20 @@ cl_json_reply(static function (): array {
                 $ready = false; $lesson = cl_active($s, $class['id']);
             }
             if (!$lesson) {
-                if (function_exists('mpm_classroom_delivery_after_response')) mpm_classroom_delivery_after_response();
+                if (!$isTest && function_exists('mpm_classroom_delivery_after_response')) mpm_classroom_delivery_after_response();
                 return $idle($ready);
             }
             if (!$allowedRole) return ['phase'=>'reserved','ready'=>$ready];
             $now = time(); // A slow SFU call must not extend a previously captured sample's validity.
-            $live = $ready && cl_lesson_live($lesson, $now);
-            $phase = $live ? 'live' : ($lesson['phase'] === 'live' ? 'paused' : $lesson['phase']);
+            $expired = cl_lesson_expired($cfg, $lesson, $now);
+            $live = $ready && !$expired && cl_lesson_live($lesson, $now);
+            $phase = $expired ? 'closing' : ($live ? 'live' : ($lesson['phase'] === 'live' ? 'paused' : $lesson['phase']));
             $allowed = $live && cl_match_transport($lesson, $body) && cl_entered($lesson, $actor, $body['sid'] ?? null, $now);
             $result = ['phase'=>$phase,'ready'=>$ready, 'lesson'=>$lesson['id'], 'epoch'=>cl_epoch($lesson),
                 'callbackMissing'=>$lesson['phase'] === 'paused' && empty($lesson['event_received']),
                 'period'=>$lesson['period'], 'subject'=>$lesson['subject'], 'slot'=>$lesson['slot'], 'bell'=>$lesson['bell'] ?? null, 'admitted'=>$allowed,
-                'joinable'=>$ready && cl_joinable($lesson, $actor, $now),
-                'resumable'=>$ready && $lesson['phase'] === 'paused' && $lesson['room'] === null];
+                'joinable'=>$ready && !$expired && cl_joinable($lesson, $actor, $now),
+                'resumable'=>$ready && !$expired && $lesson['phase'] === 'paused' && $lesson['room'] === null];
             if ($allowed) $result += ['seconds'=>$lesson['seconds']] + cl_activity_sync($s, $lesson, $actor, $body);
             return $result;
         }
@@ -79,10 +95,10 @@ cl_json_reply(static function (): array {
             if (!cl_is_staff($actor)) throw new ClassroomError(403, 'پایان کلاس فقط برای دبیر یا مسئول مجاز است.');
             if (!$lesson || ($body['lesson'] ?? null) !== $lesson['id']) throw new ClassroomError(409, 'این زنگ دیگر باز نیست.');
             cl_close_lesson($s, $cfg, $lesson, $now, $rpc);
-            if (function_exists('mpm_classroom_delivery_after_response')) mpm_classroom_delivery_after_response();
+            if (!cl_is_friday_test($lesson) && function_exists('mpm_classroom_delivery_after_response')) mpm_classroom_delivery_after_response();
             return [];
         }
-        $lesson = cl_check_live($lesson, $actor, $body, $now);
+        $lesson = cl_check_live($cfg, $lesson, $actor, $body, $now);
         if ($action === 'chat') {
             cl_chat($s, $lesson, $actor, $body['text'] ?? null, $now);
             return [];

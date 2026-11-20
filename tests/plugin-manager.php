@@ -64,6 +64,7 @@ try {
     $scheduled = __DIR__ . '/../artifacts/school-classroom-plugin-v0.3.0.zip';
     $native = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.0.zip';
     $timed = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.1.zip';
+    $friday = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.2.zip';
     $menus = static fn() => [file_get_contents($root . '/other-settings.php'), file_get_contents($root . '/includes/header.php')];
     $managerMenus = [$other, $header];
     expect($menus() === $managerMenus, 'initialization does not rewrite the host');
@@ -234,6 +235,41 @@ try {
     submit($db, $site, 'bell-hours', ['bell_hours'=>[1=>['start'=>'','end'=>'']]]);
     expect(mpm_settings($db, $dir, $row) === $nativeSettings, 'clear all bell hours without changing other settings');
     submit($db, $site, 'bell-hours', ['bell_hours'=>$hours]);
+    $today = mpm_today();
+    $date = ($today->format('w') === '5' ? $today : $today->modify('next Friday'))->format('Y-m-d');
+    denied(fn()=>submit($db, $site, 'friday-test', ['friday_date'=>$date]));
+    denied(fn()=>mpm_install($db, $dir, $friday));
+    submit($db, $site, 'disable');
+    $saved = mpm_owned_row($db, $row)['settings'];
+    expect(mpm_install($db, $dir, $friday), 'upgrade the timed classroom to the Baci-compatible pilot');
+    $row = mpm_row($db, $slug);
+    expect($row['version']==='0.4.2' && mpm_check_store($db,$row)===$store && mpm_owned_row($db,$row)['settings']===$saved,
+        'Baci update preserves reports, keys and four bell times; Friday is still opt-in');
+    submit($db, $site, 'enable');
+    foreach ([[], '2026-11-31', '2020-11-20', $today->modify('next Thursday')->format('Y-m-d')] as $invalid) {
+        denied(fn()=>submit($db,$site,'friday-test',['friday_date'=>$invalid]));
+        expect(mpm_owned_row($db,$row)['settings']===$saved,'invalid or expired Friday does not change configuration');
+    }
+    $_POST = ['csrf'=>'wrong','action'=>'friday-test','slug'=>$slug,'friday_date'=>$date];
+    denied(fn()=>mpm_post($db,$site,$site['origin'],'fixture-form-token'));
+    expect(http_response_code()===403, 'only the manager CSRF form can opt in');
+    http_response_code(200);
+    submit($db,$site,'friday-test',['friday_date'=>$date]);
+    $consent = mpm_settings($db,$dir,$row)['friday_test'];
+    expect($consent['date']===$date && preg_match('/^[a-f0-9]{32}$/D',$consent['id']) === 1, 'single validated civil date with a generation ID');
+    submit($db,$site,'friday-test',['friday_date'=>$date]);
+    expect(mpm_settings($db,$dir,$row)['friday_test']===$consent, 'same date saves without changing the active grant');
+    submit($db,$site,'disable');
+    submit($db,$site,'settings',['settings'=>$mediaInput + ['friday_test'=>[]]]);
+    expect(mpm_settings($db,$dir,$row) === $nativeSettings+['bell_hours'=>$hours,'friday_test'=>$consent], 'ordinary settings cannot overwrite the date or bell hours');
+    submit($db,$site,'enable');
+    ob_start(); mpm_render_settings($db,$site,'fixture','', 'school-classroom-settings.php?embedded=1'); $pilotUi=ob_get_clean();
+    expect(str_contains($pilotUi,'action="school-classroom-settings.php?embedded=1"') && str_contains($pilotUi,'id="mpm-friday-test"') && !str_contains($pilotUi,$consent['id']), 'Baci same-origin hub forms and no generation ID in HTML');
+    submit($db,$site,'friday-test',['cancel_friday_test'=>'yes']);
+    expect(mpm_settings($db,$dir,$row) === $nativeSettings+['bell_hours'=>$hours], 'early cancellation preserves all normal settings');
+    submit($db,$site,'friday-test',['friday_date'=>$date]);
+    expect(mpm_settings($db,$dir,$row)['friday_test']['id']!==$consent['id'], 're-enabling cannot restore a canceled room');
+    submit($db,$site,'friday-test',['cancel_friday_test'=>'yes']);
     foreach (['student','teacher','admin','deputy'] as $role) expect(isset(mpm_menu_items($db, $dir, $role)[$slug]), 'upgraded release shown in every menu');
     $_SESSION = ['student_id' => 1];
     $_GET = ['class'=>22];
@@ -293,7 +329,7 @@ try {
         expect(!mpm_table_exists($db, $table) && !mpm_row($db, $slug) && !file_exists(mpm_path($dir, $attempt)), 'aborted install recoverable despite partially applied DDL');
         foreach (['classes', 'students', 'admins', 'settings', 'academic_years', MPM_REGISTRY, MPM_SITE] as $fixtureTable) $db->exec("DROP TABLE `$fixtureTable`");
     }
-    echo strtoupper($db->getAttribute(PDO::ATTR_DRIVER_NAME)) . " PASS native gateway, private files, guarded migration, bell-hours settings, active menu state and scoped purge\n";
+    echo strtoupper($db->getAttribute(PDO::ATTR_DRIVER_NAME)) . " PASS native gateway, private files, guarded migration, bell-hours/Friday settings, active menu state and scoped purge\n";
 } finally {
     mpm_remove_tree($work);
 }
