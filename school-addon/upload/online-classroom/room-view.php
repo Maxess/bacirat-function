@@ -142,18 +142,21 @@ function cl_room_icon(string $name): string
                     <button type="button" id="board-zoom" class="zoom-value" dir="ltr" aria-label="بازنشانی بزرگ‌نمایی به ۱۰۰ درصد" title="بازنشانی بزرگ‌نمایی">۱۰۰٪</button>
                     <button type="button" id="board-zoom-in" class="icon-button" aria-label="بزرگ‌نمایی تخته" title="بزرگ‌نمایی"><?= cl_room_icon('plus') ?></button>
                     <button type="button" id="board-expand" class="icon-button" aria-label="نمای بزرگ تخته" aria-pressed="false" title="نمای بزرگ تخته"><?= cl_room_icon('expand') . cl_room_icon('shrink') ?></button>
-                    <details id="wake-control" class="wake-control">
-                        <summary class="icon-button" aria-label="تنظیم روشن‌ماندن صفحه" title="تنظیم روشن‌ماندن صفحه"><?= cl_room_icon('wake') ?></summary>
+                    <?php if ($actor['role'] === 'teacher'): ?>
+                    <details id="wake-control" class="wake-control" hidden>
+                        <summary class="icon-button" aria-label="تنظیم روشن‌ماندن صفحهٔ کلاس" title="تنظیم روشن‌ماندن صفحهٔ کلاس"><?= cl_room_icon('wake') ?></summary>
                         <div class="wake-menu">
-                            <label for="wake-mode">روشن‌ماندن صفحه</label>
-                            <select id="wake-mode" aria-describedby="wake-status">
+                            <label for="wake-mode">روشن‌ماندن صفحه در این زنگ</label>
+                            <select id="wake-mode" aria-describedby="wake-help wake-status">
                                 <option value="live">تا وقتی کلاس در جریان است</option>
                                 <option value="idle">رهاسازی بعد از ۵ دقیقه بدون تعامل</option>
-                                <option value="system">طبق تنظیمات دستگاه</option>
+                                <option value="system">طبق تنظیمات هر دستگاه</option>
                             </select>
+                            <p id="wake-help">برای همهٔ زبانه‌های قابل‌دیدن این زنگ. زمان خاموشی یا قفل را خود دستگاه تعیین می‌کند.</p>
                             <p id="wake-status" role="status"></p>
                         </div>
                     </details>
+                    <?php endif; ?>
                 </div>
             </div>
             <?php if ($staff): ?>
@@ -172,6 +175,9 @@ function cl_room_icon(string $name): string
                         <canvas id="board-ink" aria-label="نوشته‌های روی تخته"></canvas>
                         <span id="eraser-tip" class="eraser-tip" aria-hidden="true" hidden></span>
                         <div id="board-writers" class="board-writers" aria-hidden="true"></div>
+                        <svg class="laser-trails" viewBox="0 0 10000 10000" preserveAspectRatio="none" aria-hidden="true" focusable="false">
+                            <g id="board-laser-remote-trail"></g><g id="board-laser-local-trail"></g>
+                        </svg>
                         <span id="board-laser-remote" class="laser-dot" aria-hidden="true" hidden></span>
                         <span id="board-laser-local" class="laser-dot" aria-hidden="true" hidden></span>
                     </div></div>

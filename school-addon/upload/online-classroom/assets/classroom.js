@@ -37,7 +37,7 @@
     const permissionIcons = el('permission-icons')?.content;
     const cameraSource = lk?.Track.Source.Camera, micSource = lk?.Track.Source.Microphone, screenSource = lk?.Track.Source.ScreenShare;
     const canCaptureScreen = typeof window.navigator?.mediaDevices?.getDisplayMedia === 'function';
-    const attention = window.ClassroomAttention();
+    const attention = window.ClassroomAttention(changeWake);
     let active = null, connecting = false, busy = false, polling = false, needsRefresh = false, permanent = false, stopped = false;
     let wanted = true, autoStart = staff, optedIntoTest = false, state = {phase:'idle', ready:null}, chatCursor = 0, seconds = {}, admitted = false;
     let pollTimer, flow = 0, retryAt = 0, attempts = 0;
@@ -159,6 +159,19 @@
             } finally { refresh(); }
         });
     }
+    function changeWake(mode) {
+        if (!hasAccess() || state.wakeControl !== true) return;
+        return run(async () => {
+            const link = active, local = scope(link);
+            try {
+                const result = await api('set-wake', {...local, mode});
+                if (active !== link || !hasAccess() || scope().sid !== local.sid) return;
+                flow++; // An older status response cannot put back the previous wake setting.
+                state = {...state, wakeMode:result.wakeMode};
+            } finally { refresh(); }
+        });
+    }
+
     function personButton(identity, feature) {
         const btn = document.createElement('button');
         btn.type = 'button'; btn.className = 'icon-button';
@@ -427,7 +440,7 @@
         el('live-panel').hidden = !live;
         el('waiting').hidden = live;
         root.dataset.live = live ? 'yes' : 'no';
-        attention.setLive(live);
+        attention.setLive(live, state.wakeMode, state.wakeControl === true, busy);
         const status = live ? 'در جریان' : connectingNow ? 'در حال اتصال' : 'اتاق انتظار';
         put(el('status'), status);
         el('status-dot').title = status;
@@ -635,9 +648,9 @@
         }
     }
 
-    function receiveBoard(view, local) {
+    function receiveBoard(view, local, requestedAt) {
         if (!view) return;
-        board.sync(view, local);
+        board.sync(view, local, requestedAt);
         inkRead = performance.now();
         inkAt = inkRead + (view.more ? 45 : (view.moving || view.laser ? 280 : 890) + Math.random()*90);
     }
@@ -648,11 +661,12 @@
         if (!boardOnly) needsRefresh = false;
         const captured = flow;
         const local = connected() ? scope() : {};
+        const requestedAt = performance.now();
         try {
             if (boardOnly) {
                 aimAt = Infinity;
                 const result = await api('board-sync', {...local, ...board.position(), ...board.takeAim()});
-                if (captured === flow && !stopped && hasAccess() && local.sid === scope().sid) receiveBoard(result.board, local);
+                if (captured === flow && !stopped && hasAccess() && local.sid === scope().sid) receiveBoard(result.board, local, requestedAt);
                 return;
             }
             const result = await api('status', {...local, chat:chatCursor, ...board.position()});
@@ -670,7 +684,7 @@
                 admitted = true; seconds = result.seconds || {};
                 render();
                 attention.snapshot(result.profiles, pushChat(result.chat), result.chatMore, active.room.localParticipant.identity);
-                receiveBoard(result.board, scope());
+                receiveBoard(result.board, scope(), requestedAt);
                 needsRefresh ||= !!result.chatMore;
             } else clearActivity();
             if (!active && !connecting && wanted && state.ready && Date.now() >= retryAt

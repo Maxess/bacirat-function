@@ -444,6 +444,36 @@ function cl_set_access(ClassroomStore $s, array $lesson, array $actor, array $bo
     return ['access'=>$lesson['access']];
 }
 
+const CL_WAKE_MODES = ['live', 'idle', 'system'];
+
+function cl_wake_mode(array $lesson): string
+{
+    $mode = $lesson['wake_mode'] ?? null;
+    return in_array($mode, CL_WAKE_MODES, true) ? $mode : 'live';
+}
+
+function cl_wake_control(array $lesson, array $actor): bool
+{
+    // This is a teaching choice for this bell, not a per-device preference or a global admin setting.
+    return $actor['role'] === 'teacher' && $actor['id'] === ($lesson['teacher'] ?? 0);
+}
+
+function cl_set_wake(ClassroomStore $s, array $lesson, array $actor, array $body): array
+{
+    if (!cl_wake_control($lesson, $actor)) throw new ClassroomError(403, 'این تنظیم فقط در اختیار دبیر همین زنگ است.');
+    $mode = $body['mode'] ?? null;
+    if (!in_array($mode, CL_WAKE_MODES, true)) throw new ClassroomError(400, 'حالت روشن‌ماندن صفحه معتبر نیست.');
+    $sid = $body['sid'] ?? null;
+    if (!cl_match_transport($lesson, $body) || !cl_sid($sid) || ($lesson['staff'][$actor['identity']] ?? null) !== $sid) {
+        throw new ClassroomError(409, 'اتصال دبیر عوض شده است؛ دوباره وارد کلاس شو.');
+    }
+    if ($mode !== cl_wake_mode($lesson)) {
+        $lesson['wake_mode'] = $mode;
+        $s->put('lesson', $lesson['id'], $lesson);
+    }
+    return ['wakeMode'=>$mode];
+}
+
 const CL_SCREEN_LEASE = 40;
 
 function cl_screen_enabled(array $cfg, array $lesson): bool
@@ -524,7 +554,7 @@ function cl_finish_lesson(ClassroomStore $s, array $cfg, array $lesson, int $now
             $s->delete('lesson', $id);
         } else {
             $lesson['ended'] = min($now, $lesson['deadline']);
-            foreach (['sample','transport_at','room','pulses','seen','staff','deadline','last_attempt','event_received','profiles','profiles_at','access','camera_codec','media_pending','screen','screen_used'] as $key) unset($lesson[$key]);
+            foreach (['sample','transport_at','room','pulses','seen','staff','deadline','last_attempt','event_received','profiles','profiles_at','access','camera_codec','media_pending','screen','screen_used','wake_mode'] as $key) unset($lesson[$key]);
             $lesson['phase'] = 'finished';
             $s->put('lesson', $id, $lesson);
             $key = sprintf('%012d:%s', $lesson['created'], $id);

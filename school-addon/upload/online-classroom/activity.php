@@ -9,6 +9,8 @@ const CL_INK_POINTS = 96;
 const CL_INK_BATCH = 6;
 const CL_INK_TARGETS = 32;
 const CL_INK_CUE_SECONDS = 1.1; // A fresh delta can arrive on the approximately one-second idle read.
+const CL_LASER_POINTS = 20;
+const CL_LASER_TTL_MS = 1200;
 
 function cl_activity(ClassroomStore $s, string $lesson): array
 {
@@ -92,9 +94,16 @@ function cl_board_view(ClassroomStore $s, string $id, array $actor, array $input
     $write = $lesson !== null && cl_may_write($lesson, $actor);
     $laser = $state['laser'] ?? null;
     $aim = null;
-    if ($lesson && $laser && $laser['rev'] === $state['rev'] && $laser['epoch'] === cl_epoch($lesson)
-        && ($lesson['staff'][$laser['by']] ?? null) === $laser['sid'] && $laser['at'] > $now - 1.15) {
-        $aim = ['by'=>$laser['by'], 'xy'=>$laser['xy'], 'ttl'=>(int)(1150 - 1000 * ($now - $laser['at']))];
+    if ($lesson && isset($laser['points']) && $laser['rev'] === $state['rev'] && $laser['epoch'] === cl_epoch($lesson)
+        && ($lesson['staff'][$laser['by']] ?? null) === $laser['sid']) {
+        $remaining = CL_LASER_TTL_MS - max(0, (int)(1000 * ($now - $laser['at'])));
+        if ($remaining > 0) {
+            $points = [];
+            foreach ($laser['points'] as [$x, $y, $age]) {
+                if ($age < $remaining) $points[] = [$x, $y, $remaining - $age];
+            }
+            if ($points) $aim = ['by'=>$laser['by'], 'points'=>$points];
+        }
     }
     return ['doc'=>$doc, 'page'=>$state['page'], 'rev'=>$state['rev'], 'cursor'=>$cursor, 'more'=>$cursor < $clock,
         'reset'=>$reset, 'write'=>$write, 'owner'=>$write ? cl_ink_prefix($id, $actor['identity']) : null,
@@ -148,24 +157,38 @@ function cl_ink_input(array $lesson, array $actor, array $body): array
     return $body;
 }
 
-/** A single expiring point on the current page. Reuse the admitted reader request and state row. */
-function cl_board_read(ClassroomStore $s, array $lesson, array $actor, array $body): array
+/** One bounded snapshot of the current sweep, not an append-only history. */
+function cl_board_read(ClassroomStore $s, array $lesson, array $actor, array $body, ?float $receivedAt = null): array
 {
     $id = $lesson['id'];
     $state = cl_activity($s, $id);
     if (array_key_exists('aim', $body)) {
         if (!cl_is_staff($actor)) throw new ClassroomError(403, 'نشانگر ارائه فقط برای دبیر یا مسئول مجاز است.');
-        $point = $body['aim'];
-        if (!is_array($point) || !array_is_list($point) || count($point) !== 2 || !is_int($point[0]) || !is_int($point[1])
-            || min($point) < 0 || max($point) > 10000) throw new ClassroomError(400, 'مختصات نشانگر معتبر نیست.');
+        $points = $body['aim'];
+        if (!is_array($points) || !array_is_list($points) || !$points || count($points) > CL_LASER_POINTS) {
+            throw new ClassroomError(400, 'مسیر نشانگر معتبر نیست.');
+        }
+        $older = CL_LASER_TTL_MS - 1;
+        foreach ($points as $point) {
+            if (!is_array($point) || !array_is_list($point) || count($point) !== 3
+                || !is_int($point[0]) || !is_int($point[1]) || !is_int($point[2])
+                || min($point) < 0 || max($point[0], $point[1]) > 10000 || $point[2] > $older) {
+                throw new ClassroomError(400, 'مختصات یا زمان مسیر نشانگر معتبر نیست.');
+            }
+            $older = $point[2];
+        }
         $sid = $body['sid'] ?? null;
         if (!cl_sid($sid) || ($lesson['staff'][$actor['identity']] ?? null) !== $sid) {
             throw new ClassroomError(409, 'اتصال ارائه‌دهنده عوض شده است.');
         }
         $now = microtime(true);
-        if (($body['board'] ?? null) === $state['rev'] && ($state['laser']['at'] ?? 0) <= $now - .18) {
+        // A request waiting for the classroom lock does not get a fresh pointer lifetime.
+        $delay = max(0, (int)ceil(($now - ($receivedAt ?? $now)) * 1000));
+        if (($body['board'] ?? null) === $state['rev'] && $older + $delay < CL_LASER_TTL_MS
+            && ($state['laser']['at'] ?? 0) <= $now - .18) {
+            $points = array_map(static fn(array $point): array => [$point[0], $point[1], $point[2] + $delay], $points);
             $state['laser'] = ['by'=>$actor['identity'], 'sid'=>$sid, 'epoch'=>cl_epoch($lesson),
-                'rev'=>$state['rev'], 'xy'=>$point, 'at'=>$now];
+                'rev'=>$state['rev'], 'points'=>$points, 'at'=>$now];
             $s->put('activity', $id, $state); // Overwrite; no event, ink row, attachment or recording.
         }
     }

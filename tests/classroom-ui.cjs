@@ -33,8 +33,8 @@ function fixture(staff, autoSlot = 0) {
     const choice = (id, label) => ({id, label});
     elements.classroom.dataset = { moderator:staff?'yes':'no',api:'/fixture',csrf:'session',class:'22',bellDate:date,content:'/content?class=22' };
     const requests=[], scheduled=new Map(), boards=[];
-    let timerSeq=0, now=0, lastRoom, cameraAttempts=0, boardConfig, aim;
-    const captures=[], publications=[];
+    let timerSeq=0, now=0, lastRoom, cameraAttempts=0, boardConfig, aim, wakeChoice;
+    const captures=[], publications=[], wakeStates=[];
     const id=staff?'teacher-1':'student-1';
     const srv={phase:'idle',lesson:'lesson-11',epoch:'epoch-A',ready:true, staffCanJoin:false,seconds:{'student-1':9,'student-2':21},
         hidden:false, chat:[], moving:false, cameraCodec:'vp8',access:{},profiles:{'student-1':{name:'آزمایشی',photo:false},'student-2':{name:'دوم',photo:false}}, schedule:{date, timed:false, choices:autoSlot ? [choice(autoSlot,'ریاضی')] : [choice(11,'ریاضی'),choice(12,'علوم')], next:null}};
@@ -82,7 +82,7 @@ function fixture(staff, autoSlot = 0) {
                     getSettings(){return {width:1280,height:720,frameRate:5};}};
                 return {getVideoTracks:()=>[raw],getTracks:()=>[raw]};
             }}},
-            ClassroomAttention:()=>({setLive(){},snapshot(){},expand(){}}),
+            ClassroomAttention:choose=>{wakeChoice=choose;return {setLive(...args){wakeStates.push(args);},snapshot(){},expand(){}};},
             ClassroomBoard:(_,config)=>{boardConfig=config;return {position:()=>({board:0,ink:0}),takeAim:()=>{
                 const value=aim; aim=null; return value ? {aim:value} : {};
             },sync:(...p)=>boards.push(p),reset:()=>boards.push('reset')};}},
@@ -102,10 +102,12 @@ function fixture(staff, autoSlot = 0) {
                 if (!staff && phased.lesson) reply.attendance=srv.attendance ?? srv.seconds[id] ?? 0;
                 if(input.sid && srv.phase==='live' && input.epoch===srv.epoch) {
                     Object.assign(reply,{admitted:true,seconds:srv.seconds,chat:srv.chat,board:{rev:1,moving:srv.moving,write:srv.write},
-                        cameraCodec:srv.cameraCodec,profiles:srv.profiles,screen:srv.screen || null});
+                        cameraCodec:srv.cameraCodec,profiles:srv.profiles,screen:srv.screen || null,
+                        wakeMode:srv.wakeMode || 'live',wakeControl:staff && srv.wakeControl !== false});
                     if (staff) Object.assign(reply,{screenEnabled:!!srv.screenEnabled,access:structuredClone(srv.access),members:Object.fromEntries([lastRoom.localParticipant,
                         ...lastRoom.remoteParticipants.values()].map(p=>[p.identity,p.sid]))});
                 }
+                if (srv.afterStatus) await srv.afterStatus();
             } else if (input.action==='board-sync') {
                 if (srv.phase==='live' && input.epoch===srv.epoch) reply.board={rev:1,moving:srv.moving,write:srv.write};
                 else { status=409; reply={ok:false}; }
@@ -125,6 +127,9 @@ function fixture(staff, autoSlot = 0) {
                     change(p.identity,{canPublish:!!sources.length,canPublishSources:sources});
                 }
                 reply.access=structuredClone(srv.access);
+            } else if(input.action==='set-wake') {
+                if (!staff || srv.wakeControl === false) { status=403; reply={ok:false}; }
+                else { srv.wakeMode=input.mode; reply.wakeMode=input.mode; }
             } else if(input.action==='screen-access') {
                 const p=lastRoom.localParticipant;
                 const src=p.permissions.canPublishSources.filter(x=>x!==3);
@@ -154,7 +159,7 @@ function fixture(staff, autoSlot = 0) {
         now=target;
     }
     function controls(identity){return elements.people.children.find(row=>row.dataset.identity===identity).querySelectorAll('button');}
-    return {elements,srv,requests,boards,captures,publications,time,status,change,controls,fixtureVideo,advance,aim(point){aim=point;boardConfig.aimSoon();},get cameraAttempts(){return cameraAttempts;},get room(){return lastRoom;}};
+    return {elements,srv,requests,boards,captures,publications,wakeStates,chooseWake:mode=>wakeChoice(mode),time,status,change,controls,fixtureVideo,advance,aim(point){aim=point;boardConfig.aimSoon();},get cameraAttempts(){return cameraAttempts;},get room(){return lastRoom;}};
 }
 
 test('student waits without media, auto enters and sees attendance only for pupils, then waits again',async()=>{
@@ -369,15 +374,46 @@ test('board reads speed up while writing without renewing the full heartbeat or 
 });
 
 
-test('a laser point queued during a status read rides the next board-only request and does not create an idle stream',async()=>{
+test('lesson wake policy is read by pupils and only changed through a confirmed, bound teacher request',async()=>{
+    const pupil=fixture(false); pupil.srv.phase='live'; await pupil.time(); await pupil.time();
+    assert.deepEqual(pupil.wakeStates.at(-1),[true,'live',false,false]);
+    pupil.srv.wakeMode='system'; await pupil.status();
+    assert.deepEqual(pupil.wakeStates.at(-1),[true,'system',false,false]);
+    await pupil.chooseWake('live'); assert.equal(pupil.requests.some(r=>r.action==='set-wake'),false);
+    pupil.srv.phase='paused'; await pupil.status(); assert.equal(pupil.wakeStates.at(-1)[0],false);
+    const teacher=fixture(true); teacher.srv.phase='live'; await teacher.time(); await teacher.time();
+    assert.deepEqual(teacher.wakeStates.at(-1),[true,'live',true,false]);
+    await teacher.chooseWake('idle');
+    assert.deepEqual(teacher.requests.find(r=>r.action==='set-wake'),{
+        action:'set-wake',class:22,lesson:'lesson-11',epoch:'epoch-A',sid:'PA_teacher-1',mode:'idle',
+    });
+    assert.deepEqual(teacher.wakeStates.at(-1),[true,'idle',true,false]);
+    teacher.srv.wakeControl=false; await teacher.status(); await teacher.chooseWake('live');
+    assert.equal(teacher.requests.filter(r=>r.action==='set-wake').length,1);
+});
+
+test('a status response captured before the teacher save cannot restore an older wake mode',async()=>{
+    const f=fixture(true); f.srv.phase='live'; await f.time(); await f.time();
+    let release;
+    const started=new Promise(resolve=>{
+        f.srv.afterStatus=()=>new Promise(done=>{ release=done; resolve(); });
+    });
+    const old=f.status(); await started;
+    f.srv.afterStatus=null;
+    await f.chooseWake('system');
+    release(); await old;
+    assert.deepEqual(f.wakeStates.at(-1),[true,'system',true,false]);
+});
+
+test('a laser trail queued during a status read rides the next board-only request and does not create an idle stream',async()=>{
     const f=fixture(true); f.srv.phase='live'; await f.time(); await f.time();
     let calls=0;
-    f.srv.beforeStatus=()=>{ calls++; if(calls===1){f.aim([111,222]); f.aim([333,444]);} };
+    f.srv.beforeStatus=()=>{ calls++; if(calls===1){f.aim([[111,222,0]]); f.aim([[333,444,0]]);} };
     await f.status();
     assert.equal(f.requests.filter(r=>r.aim).length,0,'status requests are not laser mutations');
     const before=f.requests.length;
     await f.advance(450);
-    assert.deepEqual(f.requests.slice(before).map(r=>[r.action,r.aim]), [['board-sync',[333,444]]]);
+    assert.deepEqual(f.requests.slice(before).map(r=>[r.action,r.aim]), [['board-sync',[[333,444,0]]]]);
     await f.advance(400);
     assert.equal(f.requests.length,before+1,'no continual fast polls for an idle point');
 });

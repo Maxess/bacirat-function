@@ -1,6 +1,5 @@
 (() => {
     'use strict';
-    const preference = 'baci-classroom-wake-mode';
     const modes = ['live','idle','system'];
     const idleLimit = 5 * 60 * 1000;
     const isPupil = id => typeof id === 'string' && /^student-[1-9]\d{0,17}$/.test(id);
@@ -11,7 +10,7 @@
         return units.length > 30 ? units.slice(0,29).join('') + '…' : line;
     }
 
-    window.ClassroomAttention = () => {
+    window.ClassroomAttention = changeMode => {
         const el = id => document.getElementById(id);
         const modeField = el('wake-mode'), status = el('wake-status'), control = el('wake-control');
         const wake = window.isSecureContext ? window.navigator?.wakeLock : null;
@@ -22,18 +21,12 @@
         ];
         let mode = 'live', live = false, expanded = false, known = null, chatReady = false;
         let lastInput = Date.now(), idleTimer, lock, pending = false, generation = 0, blockedUntil = 0, wanted = false;
-        try {
-            const saved = window.localStorage.getItem(preference);
-            if (modes.includes(saved)) mode = saved;
-        } catch (_) {} // Choices still work for the current page if storage is disabled.
-        modeField.value = mode;
-        modeField.disabled = !supported;
-
         function release(sentinel) { if (sentinel && !sentinel.released) sentinel.release().catch(() => {}); }
         function indicator(now) {
+            if (!control) return;
             const held = !!lock && !lock.released;
             control.dataset.awake = String(held);
-            const text = !supported ? 'این مرورگر روشن‌ماندن صفحه را به کلاس واگذار نمی‌کند.'
+            const text = !supported ? 'مرورگر این دستگاه قفل بیداری ندارد؛ انتخاب دبیر همچنان به دستگاه‌های سازگار می‌رسد.'
                 : !live || document.hidden ? 'فقط در زنگ فعال و زبانهٔ قابل‌دیدن.'
                 : mode === 'system' ? 'زمان خاموشی را تنظیمات دستگاه تعیین می‌کند.'
                 : mode === 'idle' && now - lastInput >= idleLimit ? 'توقف پس از ۵ دقیقه؛ برای ادامه صفحه را لمس کن.'
@@ -45,14 +38,14 @@
         function reconcile(tryRequest = false) {
             const now = Date.now();
             const left = idleLimit - (now - lastInput);
-            const eligible = live && !document.hidden && mode !== 'system';
+            const eligible = supported && live && !document.hidden && mode !== 'system';
             if ((!eligible || mode !== 'idle') && idleTimer !== undefined) {
                 clearTimeout(idleTimer); idleTimer = undefined;
             }
             if (eligible && mode === 'idle' && left > 0 && idleTimer === undefined) {
                 idleTimer = setTimeout(() => { idleTimer = undefined; reconcile(); }, left);
             }
-            const next = supported && eligible && (mode !== 'idle' || left > 0);
+            const next = eligible && (mode !== 'idle' || left > 0);
             if (next !== wanted) { wanted = next; generation++; tryRequest = true; }
             if (!wanted && lock) { const old = lock; lock = null; release(old); }
             if (wanted && !lock && !pending && tryRequest && now >= blockedUntil) {
@@ -75,7 +68,7 @@
             indicator(now);
         }
         function activity(event) {
-            if (!event.isTrusted || !live || document.hidden || mode === 'system') return;
+            if (!supported || !event.isTrusted || !live || document.hidden || mode === 'system') return;
             lastInput = Date.now();
             // Don't do DOM work on each coalesced drawing sample while the existing lease holds.
             if (lock && idleTimer !== undefined) return;
@@ -85,11 +78,11 @@
         for (const event of ['pointerdown','pointermove','wheel','keydown','input']) {
             document.addEventListener(event, activity, {capture:true,passive:true});
         }
-        modeField.addEventListener('change', () => {
-            if (!modes.includes(modeField.value)) return;
-            mode = modeField.value; lastInput = Date.now(); blockedUntil = 0;
-            try { window.localStorage.setItem(preference, mode); } catch (_) {}
-            reconcile(true);
+        modeField?.addEventListener('change', () => {
+            const next = modeField.value;
+            if (control.hidden || modeField.disabled || !modes.includes(next)) { modeField.value = mode; return; }
+            // Apply only the acknowledged lesson state, never a locally saved choice.
+            if (next !== mode) changeMode(next);
         });
 
         const canNotify = () => live && expanded && !document.hidden;
@@ -122,12 +115,19 @@
 
         reconcile();
         return {
-            setLive(value) {
-                if (live === value) return;
-                live = value;
+            setLive(value, requested, teacherMayChoose = false, saving = false) {
+                const nextMode = value && modes.includes(requested) ? requested : 'live';
+                if (control) {
+                    control.hidden = !value || !teacherMayChoose;
+                    if (control.hidden && control.open) control.open = false;
+                    modeField.disabled = control.hidden || saving;
+                    if (modeField.value !== nextMode) modeField.value = nextMode;
+                }
+                if (live === value && mode === nextMode) return;
+                live = value; mode = nextMode;
                 if (live) { lastInput = Date.now(); blockedUntil = 0; }
                 else { known = null; chatReady = false; clearToasts(); }
-                reconcile();
+                reconcile(true);
             },
             expand(value) { expanded = value; if (!expanded) clearToasts(); },
             snapshot(profiles, messages, more, self) {

@@ -70,6 +70,7 @@ try {
     $compact = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.5.zip';
     $access = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.6.zip';
     $focus = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.7.zip';
+    $trail = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.8.zip';
     $menus = static fn() => [file_get_contents($root . '/other-settings.php'), file_get_contents($root . '/includes/header.php')];
     $managerMenus = [$other, $header];
     expect($menus() === $managerMenus, 'initialization does not rewrite the host');
@@ -324,6 +325,16 @@ try {
         && (mpm_settings($db,$dir,$row)['screen_share'] ?? false) === false
         && $db->query("SELECT payload FROM `$store` WHERE bucket='reports'")->fetchColumn()==='{}',
         '0.4.6 to 0.4.7 preserves data and screen share is opt-in');
+    submit($db,$site,'enable');
+    denied(fn()=>mpm_install($db,$dir,$trail));
+    submit($db,$site,'disable');
+    expect(mpm_install($db,$dir,$trail), 'upgrade to teacher-managed wake and laser trails');
+    $row = mpm_row($db,$slug);
+    expect($row['version']==='0.4.8' && $row['owner']===$oldRow['owner'] && mpm_check_store($db,$row)===$store
+        && mpm_owned_row($db,$row)['settings']===$saved && mpm_settings($db,$dir,$row)['friday_test']===$pupilGrant
+        && (mpm_settings($db,$dir,$row)['screen_share'] ?? false) === false
+        && $db->query("SELECT payload FROM `$store` WHERE bucket='reports'")->fetchColumn()==='{}',
+        '0.4.7 to 0.4.8 conserves data, configuration and the opt-in flag');
     submit($db,$site,'enable');
     submit($db,$site,'friday-test',['friday_date'=>$date,'friday_students'=>'yes']);
     expect(mpm_settings($db,$dir,$row)['friday_test']===$pupilGrant, 'saving the same pupil policy does not disrupt a test');

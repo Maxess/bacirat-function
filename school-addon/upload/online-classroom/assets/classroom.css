@@ -225,11 +225,12 @@ caption { font-weight: 700; text-align: start; margin: 0 0 .45rem; }
 .ink-writer[data-left=true] { transform: translate(calc(-100% - .4rem), calc(-100% - .3rem)); }
 .ink-writer[data-below=true] { transform: translate(.4rem,.4rem); }
 .ink-writer[data-left=true][data-below=true] { transform: translate(calc(-100% - .4rem),.4rem); }
-.ink-writer.fading, .laser-dot.fading { opacity: 0; }
+.ink-writer.fading { opacity: 0; }
+.laser-trails { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.laser-trails line { stroke: #ff403b; stroke-width: 4px; stroke-linecap: round; vector-effect: non-scaling-stroke; }
 .laser-dot { position: absolute; pointer-events: none; width: .54rem; height: .54rem; border-radius: 50%;
     transform: translate(-50%,-50%); background: #ff403b; border: 1px solid #ffe3d8;
-    box-shadow: 0 0 0 .19rem #ff322b49, 0 0 .58rem #ff322bb0; transition: opacity 230ms ease; }
-#board-laser-remote:not([hidden]) { transition: left 95ms linear, top 95ms linear, opacity 230ms ease; }
+    box-shadow: 0 0 0 .19rem #ff322b49, 0 0 .58rem #ff322bb0; }
 #board-laser[aria-pressed=true] { color: #ff9d8e; }
 
 .board-stage.editable:not(.pan) #board-ink { cursor: crosshair; }
@@ -356,5 +357,5 @@ body:has(.board-card.expanded) { overflow: hidden; }
     .board-toolbar :is(.icon-button,.zoom-value) { min-block-size: 2.75rem; }
 }
 @media (prefers-reduced-motion: reduce) {
-    .ink-writer, .laser-dot, #board-laser-remote:not([hidden]) { transition: none; }
+    .ink-writer { transition: none; }
 }

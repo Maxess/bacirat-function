@@ -2,7 +2,7 @@
 declare(strict_types=1);
 
 // School plugin runtime and gateway. Settings are exposed by the reviewed host overlay.
-const MPM_VERSION = '0.1.13';
+const MPM_VERSION = '0.1.14';
 const MPM_CLASSROOM_NATIVE = '0.4.0';
 const MPM_CLASSROOM_PUPIL_TRIAL = '0.4.3';
 const MPM_REGISTRY = 'mtg_plugin_registry';
@@ -25,6 +25,7 @@ const MPM_CATALOG = [
         '0.4.5' => '549980ae530938ce5d1544dbe790e5e26f9d965c53b5d04c30b0716d358fb96a',
         '0.4.6' => '02ccccc105d26560d3e237a3314b635a6d311fc97287ebc7305dbc691a2a1a80',
         '0.4.7' => 'd4f639e75dd6d396a17fe46914b4d91da2a3dc8c54da12fcabae3bf4fcb86f94',
+        '0.4.8' => '495ea3133cbbc74f5f51c90133c67f5c38ab74f1a328493bd52406ca2c68ff34',
     ],
 ];
 

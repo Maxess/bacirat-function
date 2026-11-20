@@ -75,7 +75,8 @@ cl_json_reply(static function (): array {
             if ($actor['role'] === 'student') $result['attendance'] = $lesson['seconds'][$actor['identity']] ?? 0;
             if ($allowed) {
                 $result += ['seconds'=>$lesson['seconds'], 'profiles'=>array_intersect_key($lesson['profiles'] ?? [], $lesson['seen']),
-                    'cameraCodec'=>$lesson['camera_codec'] ?? null, 'screen'=>cl_screen_enabled($cfg, $lesson) ? cl_screen_state($lesson) : null]
+                    'cameraCodec'=>$lesson['camera_codec'] ?? null, 'screen'=>cl_screen_enabled($cfg, $lesson) ? cl_screen_state($lesson) : null,
+                    'wakeMode'=>cl_wake_mode($lesson), 'wakeControl'=>cl_wake_control($lesson, $actor)]
                     + cl_activity_sync($s, $lesson, $actor, $body);
                 if (cl_is_staff($actor)) $result += ['access'=>$lesson['access'] ?? [], 'members'=>$lesson['seen'],
                     'mediaPending'=>($lesson['media_pending'] ?? false) === true, 'screenEnabled'=>cl_screen_enabled($cfg, $lesson)];
@@ -111,7 +112,7 @@ cl_json_reply(static function (): array {
         $lesson = cl_check_live($cfg, $lesson, $actor, $body, $now);
         if ($action === 'board-sync') {
             // Drawing latency is independent of the slower presence/attendance poll.
-            return ['board'=>cl_board_read($s, $lesson, $actor, $body)];
+            return ['board'=>cl_board_read($s, $lesson, $actor, $body, $_SERVER['REQUEST_TIME_FLOAT'] ?? null)];
         }
         if ($action === 'chat') {
             cl_chat($s, $lesson, $actor, $body['text'] ?? null, $now);
@@ -119,6 +120,7 @@ cl_json_reply(static function (): array {
         }
         if ($action === 'board-ink') return cl_board_action($s, $lesson, cl_ink_input($lesson, $actor, $body), $action);
         if (!cl_is_staff($actor)) throw new ClassroomError(403, 'این عملیات فقط برای دبیر یا مسئول مجاز است.');
+        if ($action === 'set-wake') return cl_set_wake($s, $lesson, $actor, $body);
         if ($action === 'screen-access') return cl_set_screen($s, $cfg, $lesson, $actor, $body, $now, $rpc);
         if ($action === 'set-access') return cl_set_access($s, $lesson, $actor, $body, $now, $rpc);
         if ($action === 'upload' && $isUpload) return cl_upload($s, $lesson, $body, $_FILES['file'] ?? []);

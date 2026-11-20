@@ -38,7 +38,7 @@ function fixture({staff=true,reducedMotion=false}={}) {
     }
     const window = { addEventListener(){}, confirm:()=>true, matchMedia:()=>({matches:reducedMotion}) };
     vm.runInNewContext(script, {
-        document:{getElementById:el,createElement:tag=>el(`${tag}-${++seq}`),addEventListener(){}}, window, crypto:webcrypto, performance:{now:()=>time},
+        document:{getElementById:el,createElement:tag=>el(`${tag}-${++seq}`),createElementNS:(_,tag)=>el(`${tag}-${++seq}`),addEventListener(){}}, window, crypto:webcrypto, performance:{now:()=>time},
         requestAnimationFrame(fn){const id=++seq;frames.set(id,fn);return id;}, cancelAnimationFrame:id=>frames.delete(id),
         setTimeout(fn,ms){const id=++seq;timers.set(id,{at:time+ms,fn});return id;}, clearTimeout:id=>timers.delete(id),
     });
@@ -53,8 +53,8 @@ function fixture({staff=true,reducedMotion=false}={}) {
         },
         explain: e=>e.message,
     });
-    function sync(ops=[], extras={}, scope={lesson:'L',epoch:'E',sid:'PA_staff'}) {
-        board.sync({rev:1,reset:false,doc:null,page:1,docs:[],cursor:0,ops,...extras}, scope);
+    function sync(ops=[], extras={}, scope={lesson:'L',epoch:'E',sid:'PA_staff'}, requestedAt) {
+        board.sync({rev:1,reset:false,doc:null,page:1,docs:[],cursor:0,ops,...extras}, scope, requestedAt);
     }
     async function flush() {
         const next = [...timers.entries()].sort((a,b)=>a[1].at-b[1].at)[0];
@@ -273,14 +273,49 @@ test('fresh remote author label follows the revealed tip, fades quickly, and can
     assert.deepEqual(root.children,[],'history stays unlabelled');
 });
 
-test('the presenter laser coalesces into one existing read and is never written as ink',async()=>{
+test('a laser sweep coalesces into one existing reader request and is never written as ink',async()=>{
     const f=fixture(); f.sync();
-    f.el('board-laser').fire('click'); f.draw('pointerdown',200,200); f.draw('pointermove',600,300); f.draw('pointerup',600,300);
-    assert.deepEqual(structuredClone(f.board.takeAim()),{aim:[6000,6000]});
+    f.el('board-laser').fire('click'); f.draw('pointerdown',200,200);
+    f.frame(50); f.draw('pointermove',400,170);
+    f.frame(50); f.draw('pointermove',600,300); f.draw('pointerup',600,300);
+    assert.deepEqual(structuredClone(f.board.takeAim()),{aim:[[2000,4000,100],[4000,3400,50],[6000,6000,0]]});
     assert.deepEqual(structuredClone(f.board.takeAim()),{});
+    f.frame(16); assert.equal(f.el('board-laser-local-trail').children.length,2);
+    f.draw('pointerdown',250,100); f.draw('pointerup',250,100); f.frame(16);
+    assert.equal(f.el('board-laser-local-trail').children.length,0,'do not connect independent gestures');
+    assert.deepEqual(structuredClone(f.board.takeAim()),{aim:[[2500,2000,16]]});
+    f.frame(1200); assert.equal(f.el('board-laser-local').hidden,true);
     await f.flush(); assert.deepEqual(f.calls,[]); assert.deepEqual(f.display.paths,[]);
-    const pupil=fixture({staff:false}); pupil.sync([],{laser:{by:'teacher-1',xy:[6000,6000],ttl:600}});
-    const laser=pupil.el('board-laser-remote'); assert.equal(laser.hidden,false); assert.equal(laser.style.left,'60%');
-    await pupil.flush(); assert.equal(laser.classList.contains('fading'),true);
-    pupil.sync([],{rev:2,reset:true}); assert.equal(laser.hidden,true);
+});
+
+test('remote trail fades oldest-first and never survives a board revision or transport',()=>{
+    const pupil=fixture({staff:false}); pupil.sync();
+    const dot=pupil.el('board-laser-remote'), trail=pupil.el('board-laser-remote-trail');
+    const cue={by:'teacher-1',points:[[1100,2400,150],[3300,5800,450],[6000,6000,800]]};
+    pupil.sync([],{laser:cue}); pupil.frame(12);
+    assert.equal(dot.hidden,false); assert.equal(dot.style.left,'60%');
+    assert.deepEqual(trail.children.map(l=>[l.x1,l.y1,l.x2,l.y2]),[[1100,2400,3300,5800],[3300,5800,6000,6000]]);
+    const [a,b]=trail.children;
+    assert.ok(Number(a.style.opacity)<Number(b.style.opacity));
+    pupil.frame(150); assert.equal(trail.children.length,1); assert.equal(trail.children[0].x1,3300);
+    pupil.frame(645); assert.equal(dot.hidden,true); assert.deepEqual(trail.children,[]);
+    pupil.sync([],{laser:cue},undefined,0); pupil.frame(30);
+    assert.equal(dot.hidden,true,'a slow response does not revive a past trail');
+    pupil.sync([],{laser:cue}); pupil.frame(30);
+    pupil.sync([],{rev:2,reset:true}); assert.equal(dot.hidden,true); assert.deepEqual(trail.children,[]);
+    pupil.sync([],{rev:2,laser:cue}); pupil.frame(30);
+    pupil.sync([],{rev:2},{lesson:'L2',epoch:'E',sid:'PA_new'}); assert.equal(dot.hidden,true); assert.deepEqual(trail.children,[]);
+});
+
+
+test('fast movement is bounded and unsent laser samples expire without refreshing the reader',()=>{
+    const f=fixture(); f.sync(); f.el('board-laser').fire('click'); f.draw('pointerdown',200,200);
+    for (let n=1;n<=125;n++) { f.frame(10); f.draw('pointermove',200+n*2,200+n); }
+    const {aim}=f.board.takeAim();
+    assert.equal(aim.length,20); assert.deepEqual(Array.from(aim.at(-1)),[4500,6500,0]);
+    assert.ok(aim.every(([, , age],i)=>age>=0 && age<1200 && (i===0 || age<=aim[i-1][2])));
+    f.draw('pointermove',500,270); f.frame(860); assert.deepEqual(structuredClone(f.board.takeAim()),{});
+    f.draw('pointermove',600,300); f.access(false);
+    assert.deepEqual(structuredClone(f.board.takeAim()),{});
+    f.board.reset(); assert.equal(f.el('board-laser-local').hidden,true);
 });

@@ -19,8 +19,10 @@
         let drag = null, pointerType = '', candidate = null, pinch = null, pinchFrame, touchBlocked = false, penUntil = 0, space = false;
         const contacts = new Map();
         const writers = el('board-writers'), labels = new Map();
-        const localLaser = el('board-laser-local'), remoteLaser = el('board-laser-remote');
-        let aimPending = null, localFade, remoteFade;
+        const laserTtl = 1200, laserLimit = 20, laserSampleMs = 48; // Wire limits match activity.php.
+        const laserTrail = side => ({dot:el(`board-laser-${side}`), layer:el(`board-laser-${side}-trail`), samples:[], lines:[]});
+        const localLaser = laserTrail('local'), remoteLaser = laserTrail('remote');
+        let aimPending = null, laserFrame;
         let library, job, rendering, imageLoad, imageFile;
         const staff = root.dataset.moderator === 'yes';
         const url = value => new URL(value, document.baseURI).href;
@@ -275,23 +277,64 @@
             sent = sent.filter(entry => entry.until === null || entry.until > cursor);
             return before !== sent.length;
         }
-        function fadeDot(node) { node.classList.add('fading'); }
-        function pointDot(node, point) { locate(node,point); node.hidden = false; node.classList.remove('fading'); }
-        function clearPointers() {
-            aimPending = null; clearTimeout(localFade); clearTimeout(remoteFade);
-            localLaser.hidden = remoteLaser.hidden = true;
+        function clearTrail(trail) {
+            trail.samples = [];
+            if (trail.lines.length) trail.layer.replaceChildren();
+            trail.lines = [];
+            trail.head = null;
+            trail.dot.hidden = true;
         }
-        function showRemoteLaser(aim) {
-            clearTimeout(remoteFade);
-            if (!aim || aim.by === options.identity() || document.hidden) { remoteLaser.hidden = true; return; }
-            pointDot(remoteLaser,aim.xy);
-            remoteFade = setTimeout(() => fadeDot(remoteLaser), Math.max(0,aim.ttl - 215));
+        function drawTrail(trail, now) {
+            if (!trail.samples.length) return false;
+            while (trail.samples[0]?.[2] <= now) trail.samples.shift();
+            if (!trail.samples.length) { clearTrail(trail); return false; }
+            const {samples,lines,layer,dot} = trail;
+            const head = last(samples);
+            if (trail.head !== head) { trail.head = head; locate(dot,head); }
+            dot.hidden = false;
+            dot.style.opacity = String(Math.min(1,(head[2]-now)/320));
+            // Each segment loses opacity with its own age, so the tail fades before the tip.
+            for (let i = 1; i < samples.length; i++) {
+                const a = samples[i-1], b = samples[i];
+                let line = lines[i-1];
+                if (!line) {
+                    const node = document.createElementNS('http://www.w3.org/2000/svg','line');
+                    layer.append(node);
+                    lines.push(line = {node});
+                }
+                if (line.from !== a || line.to !== b) {
+                    line.node.setAttribute('x1', a[0]); line.node.setAttribute('y1', a[1]);
+                    line.node.setAttribute('x2', b[0]); line.node.setAttribute('y2', b[1]);
+                    line.from = a; line.to = b;
+                }
+                line.node.style.opacity = String(Math.min(1,(a[2]-now)/(laserTtl-300)));
+            }
+            while (lines.length >= samples.length) lines.pop().node.remove();
+            return true;
+        }
+        function animateLaser() {
+            if (laserFrame !== undefined || document.hidden) return;
+            laserFrame = requestAnimationFrame(now => {
+                laserFrame = undefined;
+                const local = drawTrail(localLaser, now), remote = drawTrail(remoteLaser, now);
+                if (local || remote) animateLaser();
+            });
+        }
+        function clearPointers() {
+            aimPending = null;
+            cancelAnimationFrame(laserFrame); laserFrame = undefined;
+            clearTrail(localLaser); clearTrail(remoteLaser);
+        }
+        function showRemoteLaser(aim, requestedAt) {
+            if (!aim?.points?.length || aim.by === options.identity() || document.hidden) { clearTrail(remoteLaser); return; }
+            const now = performance.now();
+            // Conservatively spend the read's round-trip time from the cue, so delayed replies never replay it.
+            remoteLaser.samples = aim.points.filter(([, , left]) => requestedAt+left > now)
+                .map(([x,y,left]) => [x,y,requestedAt+left]);
+            if (remoteLaser.samples.length) animateLaser();
+            else clearTrail(remoteLaser);
         }
         function pointerEnd() {
-            if (stroke?.mode === 'laser') {
-                clearTimeout(localFade);
-                localFade = setTimeout(() => fadeDot(localLaser), 410);
-            }
             pointer = null; pointerType = ''; stroke = null; candidate = null;
             tip.hidden = true;
         }
@@ -458,7 +501,7 @@
             el('page-prev').disabled = !ready || n <= 1;
             el('page-next').disabled = !ready || n >= pages;
         }
-        function sync(next, scope) {
+        function sync(next, scope, requestedAt = performance.now()) {
             if (!next) return;
             const rival = transport && (transport.lesson !== scope.lesson || transport.epoch !== scope.epoch || transport.sid !== scope.sid);
             const resetPage = next.reset || !data || next.rev !== data.rev || rival;
@@ -482,7 +525,7 @@
             for (const [id,cue] of labels) if (removed.has(cue.id)) {
                 clearTimeout(cue.timer); cue.label.remove(); labels.delete(id);
             }
-            showRemoteLaser(next.laser);
+            showRemoteLaser(next.rev < targetRev ? null : next.laser, requestedAt);
             if (changedPaper) {
                 // Do not briefly show a page from the previous document during parsing.
                 fit(1600,1000);
@@ -533,7 +576,8 @@
         el('board-expand').addEventListener('click', () => setExpanded(!card.classList.contains('expanded')));
         card.addEventListener('keydown', e => {
             if (e.key !== 'Escape') return;
-            if (el('wake-control').open) { el('wake-control').open = false; el('wake-control').querySelector('summary').focus(); }
+            const wakeControl = el('wake-control');
+            if (wakeControl?.open) { wakeControl.open = false; wakeControl.querySelector('summary').focus(); }
             else setExpanded(false);
         });
         zoom.addEventListener('click', () => setZoom(1));
@@ -590,15 +634,24 @@
             if (changed) { redraw(); scheduleWrite(); }
         }
         function laserPoint(point) {
-            clearTimeout(localFade);
-            pointDot(localLaser,point);
+            const now = performance.now(), samples = localLaser.samples;
+            while (samples[0]?.[2] <= now) samples.shift();
+            const end = [...point, now+laserTtl];
+            // Retain the start of even a very short sweep; replace its newest point within each sample interval.
+            if (samples.length >= 2 && end[2] - samples[samples.length-2][2] < laserSampleMs) samples[samples.length-1] = end;
+            else { samples.push(end); if (samples.length > laserLimit) samples.shift(); }
             if (!aimPending) options.aimSoon();
-            aimPending = {point, at:performance.now(), rev:data.rev};
+            aimPending = {at:now, rev:data.rev};
+            animateLaser();
         }
         function takeAim() {
             const item = aimPending;
             aimPending = null;
-            return staff && editable() && item?.rev === data.rev && performance.now()-item.at <= 850 ? {aim:item.point} : {};
+            const now = performance.now();
+            if (!staff || !editable() || item?.rev !== data.rev || now-item.at > 850) return {};
+            const points = localLaser.samples.filter(([, , expires]) => expires > now)
+                .map(([x,y,expires]) => [x,y,Math.max(0,Math.floor(now + laserTtl - expires))]);
+            return points.length ? {aim:points} : {};
         }
         function beginStroke(id, type, point, rect, mode = tool) {
             if (!editable() || pointer !== null || mode === 'pan' || (mode === 'pen' && !queuedSlot())) return;
@@ -609,6 +662,7 @@
                 if (type === 'touch') stroke.erasures = new Set();
                 aim(point,type); erase(point,point,rect,type);
             } else if (mode === 'laser') {
+                localLaser.samples = []; // A new gesture must never bridge to the end of the previous one.
                 laserPoint(point);
             } else {
                 const raw = Array.from(crypto.getRandomValues(new Uint8Array(16)), n => n.toString(16).padStart(2,'0')).join('');
@@ -659,7 +713,7 @@
             const ids = [...contacts.keys()].slice(0,2), sample = pair(ids);
             pinch = {ids, level:zoomLevel, distance:sample.distance, anchor:relative(sample.point), zooming:false};
             drag = null; touchBlocked = true;
-            abandonUnsentTouch(); pointerEnd(); aimPending = null; dragState();
+            abandonUnsentTouch(); pointerEnd(); aimPending = null; clearTrail(localLaser); dragState();
         }
         function movePinch() {
             if (pinchFrame !== undefined) return;
@@ -787,7 +841,7 @@
             async function act(work) {
                 if (!editable()) return;
                 const stamp = generation;
-                busy = true; pointerEnd(); toolState();
+                busy = true; pointerEnd(); aimPending = null; clearTrail(localLaser); toolState();
                 try {
                     // Commit the last drawn points on this page before changing the revision.
                     while (stamp === generation && options.canEdit() && (writing || pending.length)) await (writing || write());
