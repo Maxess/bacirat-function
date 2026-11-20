@@ -13,23 +13,24 @@ class Element {
     addEventListener(k,v) { this.handlers[k] = v; }
     setAttribute(k,v) { this[k] = v; }
     append(...items) { this.children.push(...items); }
+    prepend(...items) { this.children.unshift(...items); }
     replaceChildren(...items) { this.children = items; }
     querySelectorAll(tag) { return this.children.flatMap(child => [...(child.tag === tag ? [child] : []), ...child.querySelectorAll(tag)]); }
-    async click() { if (!this.disabled && !this.hidden) await this.handlers.click(); }
+    async click() { if (!this.disabled && !this.hidden) await this.handlers.click({}); }
 }
 function fixture(staff, autoSlot = 0) {
-    const elements = Object.fromEntries(['classroom','status','lecture-title','notice','mic-feedback','people','live-panel','waiting','wait-title','wait-message',
-        'audio-tracks','chat-log','chat-form','chat-text','leave','microphone','enable-audio','microphone-label','practice-badge','people-count',
+    const elements = Object.fromEntries(['classroom','status','status-dot','notice','mic-feedback','people','live-panel','waiting','wait-title','wait-message',
+        'audio-tracks','chat-log','chat-form','chat-text','leave','microphone','enable-audio','microphone-label','people-count',
         'toggle-people','toggle-chat','people-panel','chat-panel','chat-empty',
-        ...(staff ? ['slot','open','close','clear-floor','staff-start'] : ['join','attendance-label','attendance-time'])].map(id => [id,new Element(id)]));
+        ...(staff ? ['slot','open','close','clear-floor','staff-start'] : ['join','attendance','attendance-time'])].map(id => [id,new Element(id)]));
     const date='2026-11-18';
     const choice = (id, label) => ({id, label});
     elements.classroom.dataset = { moderator:staff?'yes':'no',api:'/fixture',csrf:'session',class:'22',bellDate:date };
     const requests=[], scheduled=new Map(), boards=[];
-    let timerSeq=0, lastRoom;
+    let timerSeq=0, now=0, lastRoom;
     const id=staff?'teacher-1':'student-1';
     const srv={phase:'idle',lesson:'lesson-11',epoch:'epoch-A',ready:true, staffCanJoin:false,seconds:{'student-1':9,'student-2':21},
-        hidden:false, schedule:{date, timed:false, choices:autoSlot ? [choice(autoSlot,'ریاضی')] : [choice(11,'ریاضی'),choice(12,'علوم')], next:null}};
+        hidden:false, chat:[], moving:false, schedule:{date, timed:false, choices:autoSlot ? [choice(autoSlot,'ریاضی')] : [choice(11,'ریاضی'),choice(12,'علوم')], next:null}};
     const person = (identity) => ({identity, name:identity, sid:`PA_${identity}`, permissions:listener, micCalls:[], isMicrophoneEnabled:false,
         async setMicrophoneEnabled(value) {
             this.micCalls.push(value);
@@ -56,18 +57,22 @@ function fixture(staff, autoSlot = 0) {
     vm.runInNewContext(script, {
         window:{isSecureContext:true,LivekitClient:lk,addEventListener(){},confirm:()=>true,ClassroomBoard:()=>({position:()=>({board:0,ink:0}),sync:(...p)=>boards.push(p),reset:()=>boards.push('reset')})},
         document:{getElementById:id=>elements[id],createElement:tag=>new Element(tag),addEventListener(){},get hidden(){return srv.hidden;}},
-        setTimeout(fn,ms){const t=++timerSeq; scheduled.set(t,{fn,ms});return t;}, clearTimeout:t=>scheduled.delete(t), AbortController,
+        performance:{now:()=>now},
+        setTimeout(fn,ms){const t=++timerSeq; scheduled.set(t,{fn,at:now+ms});return t;}, clearTimeout:t=>scheduled.delete(t), AbortController,
         async fetch(url,opt){
             assert.equal(url,'/fixture'); assert.equal(opt.headers['X-Classroom-CSRF'],'session');
             const input=JSON.parse(opt.body); assert.equal(input.class,22); requests.push(input);
-            let reply={ok:true};
+            let reply={ok:true}, status=200;
             if(input.action==='status'){
                 const phased = ['idle','reserved'].includes(srv.phase) ? {phase:srv.phase} : {phase:srv.phase,slot:srv.slot ?? 11, lesson:srv.lesson,epoch:srv.epoch,resumable:srv.resumable,subject:'ریاضی',period:'زنگ یک'};
                 reply={...reply,ready:srv.ready,...phased,joinable:srv.phase==='live'||(staff&&srv.phase==='starting'&&srv.staffCanJoin)};
                 if (staff && srv.phase==='idle') reply.schedule=srv.schedule;
                 if (!staff && srv.phase==='idle' && srv.practiceAvailable) reply.practiceAvailable=true;
                 if (!staff && phased.lesson) reply.attendance=srv.attendance ?? srv.seconds[id] ?? 0;
-                if(input.sid && srv.phase==='live' && input.epoch===srv.epoch) Object.assign(reply,{admitted:true,seconds:srv.seconds,chat:[],board:{rev:1}});
+                if(input.sid && srv.phase==='live' && input.epoch===srv.epoch) Object.assign(reply,{admitted:true,seconds:srv.seconds,chat:srv.chat,board:{rev:1,moving:srv.moving}});
+            } else if (input.action==='board-sync') {
+                if (srv.phase==='live' && input.epoch===srv.epoch) reply.board={rev:1,moving:srv.moving};
+                else { status=409; reply={ok:false}; }
             } else if(input.action==='open'||input.action==='ticket') {
                 if (input.action === 'open' && srv.phase !== 'live') srv.phase = 'starting';
                 Object.assign(reply,{url:'wss://media.example.test',token:'opaque',lesson:srv.lesson,epoch:srv.epoch});
@@ -77,16 +82,21 @@ function fixture(staff, autoSlot = 0) {
             else if(input.action==='close') {
                 srv.phase='idle'; srv.schedule={...srv.schedule, choices:srv.schedule.choices.filter(n=>n.id!==11)};
             }
-            return {ok:true,json:async()=>reply};
+            return {ok:status===200,status,json:async()=>reply};
         },
     });
     async function time() {
-        const next=[...scheduled.entries()].sort((a,b)=>a[1].ms-b[1].ms)[0];
-        if(next){scheduled.delete(next[0]);await next[1].fn();}
+        const next=[...scheduled.entries()].sort((a,b)=>a[1].at-b[1].at)[0];
+        if(next){scheduled.delete(next[0]);now=next[1].at;await next[1].fn();}
         await new Promise(resolve=>setImmediate(resolve));
     }
+    async function status() {
+        const before = requests.filter(r=>r.action==='status').length;
+        for (let i=0;i<12 && requests.filter(r=>r.action==='status').length===before;i++) await time();
+        assert.ok(requests.filter(r=>r.action==='status').length>before, 'status heartbeat is not starved');
+    }
     function controls(identity){return elements.people.children.find(row=>row.children[0].children[1].textContent.startsWith(identity)).querySelectorAll('button');}
-    return {elements,srv,requests,boards,time,change,controls,get room(){return lastRoom;}};
+    return {elements,srv,requests,boards,time,status,change,controls,get room(){return lastRoom;}};
 }
 
 test('student waits without media, auto enters and sees attendance only for pupils, then waits again',async()=>{
@@ -95,15 +105,18 @@ test('student waits without media, auto enters and sees attendance only for pupi
     assert.equal(f.requests.some(r=>r.action==='ticket'),false);
     f.srv.phase='live'; await f.time(); await f.time();
     assert.equal(f.room.options.singlePeerConnection,false); assert.equal(f.elements['live-panel'].hidden,false);
-    assert.deepEqual(f.elements.people.querySelectorAll('bdi').map(n=>n.textContent),['00:00:09','00:00:21']);
+    assert.deepEqual(f.elements.people.querySelectorAll('bdi').map(n=>n.textContent),['00:00','00:00']);
+    assert.equal(f.elements.people.children[0].className,'person-self');
+    assert.deepEqual(f.elements.people.children[0].children[0].children.slice(1,3).map(n=>n.textContent), ['student-1','شما']);
+    assert.ok(f.elements.people.children.slice(1).every(n=>n.className!=='person-self'));
     assert.deepEqual(f.room.localParticipant.micCalls,[]); assert.equal(f.elements.microphone.disabled,true);
     f.change('student-1',mic); assert.deepEqual(f.room.localParticipant.micCalls,[]);
     await f.elements.microphone.click(); assert.equal(f.room.localParticipant.isMicrophoneEnabled,true);
-    const first=f.room; f.srv.phase='paused'; await f.time();
+    const first=f.room; f.srv.phase='paused'; await f.status();
     assert.equal(f.elements['live-panel'].hidden,true); assert.equal(first.state,'disconnected'); assert.equal(f.elements.microphone.disabled,true);
     assert.ok(f.boards.includes('reset'));
-    assert.equal(f.elements['attendance-time'].textContent, '00:00:09');
-    assert.match(f.elements['attendance-label'].textContent, /متوقف/);
+    assert.equal(f.elements['attendance-time'].textContent, '00:00');
+    assert.match(f.elements.attendance.title, /متوقف/);
     f.srv.epoch='epoch-B'; f.srv.phase='live'; await f.time(); await f.time();
     assert.notEqual(first,f.room); assert.equal(f.elements['live-panel'].hidden,false);
     assert.equal(f.elements.microphone.disabled,true); assert.deepEqual(f.room.localParticipant.micCalls,[]);
@@ -217,26 +230,55 @@ test('opted-in pupil waits for the teacher, sees a server-timed demo, and return
     const f = fixture(false);
     f.srv.slot='friday-test'; f.srv.attendance=0; f.srv.practiceAvailable=true;
     await f.time(); await f.time();
-    assert.equal(f.elements['attendance-time'].textContent,'00:00:00');
+    assert.equal(f.elements['attendance-time'].textContent,'00:00');
     assert.match(f.elements['wait-message'].textContent,/آزمایش جمعه/);
     f.srv.phase='starting'; await f.time();
     assert.equal(f.requests.some(r=>r.action==='ticket'),false);
-    f.srv.phase='live'; f.srv.attendance=15;
+    f.srv.phase='live'; f.srv.attendance=75;
     await f.time(); await f.time();
-    assert.equal(f.elements['attendance-time'].textContent,'00:00:15');
-    assert.equal(f.elements['attendance-label'].textContent,'حضور آزمایشی');
+    assert.equal(f.elements['attendance-time'].textContent,'00:01');
+    assert.equal(f.elements.attendance.title,'مدت حضور آزمایشی');
     assert.equal(f.elements['live-panel'].hidden,false);
     assert.equal(f.elements['people-count'].textContent,'۳');
     await f.elements['toggle-chat'].click();
     assert.equal(f.elements['chat-panel'].hidden,true);
     await f.elements['toggle-chat'].click();
     assert.equal(f.elements['chat-panel'].hidden,false);
-    f.srv.phase='paused'; await f.time(); await f.time();
-    assert.equal(f.elements['attendance-time'].textContent,'00:00:15');
+    f.srv.phase='paused'; await f.status();
+    assert.equal(f.elements['attendance-time'].textContent,'00:01');
     assert.equal(f.elements['waiting'].hidden,false);
     assert.equal(f.elements['toggle-chat'].disabled,true);
-    f.srv.phase='live'; f.srv.epoch='epoch-B'; f.srv.attendance=18;
+    f.srv.phase='live'; f.srv.epoch='epoch-B'; f.srv.attendance=138;
     await f.time(); await f.time();
-    assert.equal(f.elements['attendance-time'].textContent,'00:00:18');
+    assert.equal(f.elements['attendance-time'].textContent,'00:02');
     assert.equal(f.requests.filter(r=>r.action==='ticket').length,2);
+});
+
+
+test('chat prepends new batches in newest-first order and ignores repeats', async()=>{
+    const f=fixture(false); f.srv.phase='live';
+    f.srv.chat=[{n:1,by:'Teacher',text:'اول'},{n:2,by:'Student',text:'دوم'}];
+    await f.time(); await f.time();
+    const entries=()=>f.elements['chat-log'].children.map(n=>n.children[1].textContent);
+    assert.deepEqual(entries(), ['دوم','اول']);
+    f.srv.chat.push({n:3,by:'Teacher',text:'سوم'});
+    await f.status(); await f.status();
+    assert.deepEqual(entries(), ['سوم','دوم','اول']);
+    assert.equal(f.requests.filter(r=>r.action==='status').at(-1).chat,3);
+});
+
+test('board reads speed up while writing without renewing the full heartbeat or reading while hidden', async()=>{
+    const f=fixture(false); f.srv.phase='live'; f.srv.moving=true;
+    await f.time(); await f.time();
+    const before=f.requests.length;
+    await f.time(); await f.time(); await f.time();
+    assert.deepEqual(f.requests.slice(before).map(r=>r.action), ['board-sync','board-sync','board-sync']);
+    assert.ok(f.requests.slice(before).every(r=>r.sid==='PA_student-1' && !Object.hasOwn(r,'chat')));
+    f.srv.hidden=true;
+    await f.time(); await f.time();
+    assert.deepEqual(f.requests.slice(-2).map(r=>r.action), ['status','status']);
+    await f.elements.leave.click();
+    assert.equal(f.room.state,'disconnected');
+    assert.equal(f.requests.at(-1).action,'leave');
+    assert.deepEqual(f.requests.filter(r=>r.action==='close'), []);
 });

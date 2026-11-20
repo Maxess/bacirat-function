@@ -35,6 +35,7 @@
     let active = null, connecting = false, busy = false, polling = false, needsRefresh = false, permanent = false, stopped = false;
     let wanted = true, autoStart = staff, optedIntoTest = false, state = {phase:'idle', ready:null}, chatCursor = 0, seconds = {}, admitted = false;
     let pollTimer, flow = 0, retryAt = 0, attempts = 0;
+    let statusAt = 0, inkAt = Infinity, inkRead = 0, inkRetryAt = 0;
     let peopleKey = '', peopleTimers = new Map(), slotKey = null;
 
     function note(text = '') {
@@ -58,7 +59,7 @@
     }
     function duration(value) {
         const n = Math.max(0, Number(value) || 0);
-        return [Math.floor(n / 3600), Math.floor(n % 3600 / 60), n % 60].map(v => String(v).padStart(2,'0')).join(':');
+        return [Math.floor(n / 3600), Math.floor(n % 3600 / 60)].map(v => String(v).padStart(2,'0')).join(':');
     }
     function microphoneFailure(local, enabling, error) {
         const capture = enabling ? local?.lastMicrophoneError : null;
@@ -83,13 +84,22 @@
         canEdit: () => staff && hasAccess(),
         async send(action, data, file) {
             if (!hasAccess() || !staff) throw new PublicError('تخته در حالت انتظار قابل ویرایش نیست.');
-            if (file) {
-                const form = new FormData();
-                for (const [k,v] of Object.entries({class:roomClass, ...scope(), ...data})) form.set(k,String(v));
-                form.set('file', file);
-                await request(root, 'upload', form, {multipart:true});
-            } else await api(action, {...scope(), ...data});
-            refresh();
+            const link = active, local = scope(link);
+            let reply;
+            try {
+                if (file) {
+                    const form = new FormData();
+                    for (const [k,v] of Object.entries({class:roomClass, ...local, ...data})) form.set(k,String(v));
+                    form.set('file', file);
+                    reply = await request(root, 'upload', form, {multipart:true});
+                } else reply = await api(action, {...local, ...data});
+                return reply;
+            } finally {
+                if (active === link && local.sid === scope().sid && hasAccess()) {
+                    inkAt = Math.min(inkAt, Math.max(performance.now()+30, inkRead+(action==='board-ink' ? 245 : 65)));
+                    schedulePoll();
+                }
+            }
         },
         explain: e => e instanceof PublicError ? e.message : 'پردازش فایل یا ارتباط با تخته کامل نشد.',
     });
@@ -136,8 +146,13 @@
                 avatar.textContent = Array.from(String(person.name || person.identity))[0] || '·';
                 avatar.setAttribute('aria-hidden', 'true');
                 const allowed = maySpeak(person);
-                name.textContent = (person.name || person.identity) + (local === person ? ' (شما)' : '') + (allowed ? ' · نوبت صدا' : '');
+                name.textContent = (person.name || person.identity) + (allowed ? ' · نوبت صدا' : '');
                 line.append(avatar, name);
+                if (local === person) {
+                    li.className = 'person-self';
+                    const self = document.createElement('span'); self.className = 'self-tag'; self.textContent = 'شما';
+                    line.append(self);
+                }
                 if (student(person.identity)) {
                     const timer = document.createElement('bdi'); timer.className = 'duration';
                     timer.setAttribute('aria-label','مدت حضور ثبت‌شده');
@@ -195,19 +210,19 @@
         el('live-panel').hidden = !live;
         el('waiting').hidden = live;
         root.dataset.live = live ? 'yes' : 'no';
-        put(el('status'), live ? 'در جریان' : connectingNow ? 'در حال اتصال' : 'اتاق انتظار');
+        const status = live ? 'در جریان' : connectingNow ? 'در حال اتصال' : 'اتاق انتظار';
+        put(el('status'), status);
+        el('status-dot').title = status;
         const practice = state.slot === fridaySlot;
-        el('practice-badge').hidden = !practice && !state.practiceAvailable;
-        put(el('lecture-title'), state.subject
-            ? [state.subject, practice ? null : state.period, state.bell].filter(Boolean).join(' · ')
-            : el('lecture-title').dataset.original);
         for (const id of panels) el(`toggle-${id}`).disabled = !live;
         if (!staff) {
-            put(el('attendance-time'), duration(state.attendance));
-            const label = practice ? 'حضور آزمایشی' : 'مدت حضور شما';
-            put(el('attendance-label'), live ? label : `${label} · متوقف`);
+            const total = duration(state.attendance);
+            put(el('attendance-time'), total);
+            const label = practice ? 'مدت حضور آزمایشی' : 'مدت حضور شما';
+            const hint = live ? label : `${label} · متوقف`;
+            el('attendance').title = hint;
+            el('attendance-time').setAttribute('aria-label', `${hint}: ${total} (ساعت و دقیقه)`);
         }
-        el('leave').hidden = staff ? (!wanted && !active) : !wanted;
         if (staff) {
             const slot = el('slot');
             const currentSlot = state.slot || 0;
@@ -217,7 +232,9 @@
                 || phase === 'reserved' || (!currentSlot && !slot.value) || (phase === 'paused' && !state.resumable);
             const test = (currentSlot || slot.value) === fridaySlot;
             el('open').textContent = test ? 'ورود به آزمایش جمعه' : phase === 'paused' ? 'ادامهٔ زنگ' : currentSlot ? 'پیوستن به زنگ' : 'شروع زنگ';
-            el('close').textContent = currentSlot === fridaySlot ? 'بستن اتاق آزمایشی برای همه' : 'پایان کلاس برای همه';
+            const end = currentSlot === fridaySlot ? 'بستن اتاق آزمایشی برای همه' : 'پایان کلاس برای همه';
+            el('close').setAttribute('aria-label', end);
+            el('close').title = end;
             el('close').hidden = !state.lesson || phase === 'reserved';
             el('close').disabled = busy || phase === 'closing';
             el('clear-floor').disabled = !live || busy;
@@ -254,7 +271,7 @@
             el('chat-text').value = '';
             board.reset();
         }
-        admitted = false;
+        admitted = false; inkAt = Infinity; inkRetryAt = 0;
         chatCursor = 0; seconds = {};
     }
     function release(link = active, warn = false) {
@@ -270,18 +287,25 @@
     }
     function pushChat(values) {
         const log = el('chat-log');
-        const end = log.scrollHeight - log.clientHeight - log.scrollTop < 45;
+        const anchor = log.scrollTop > 24 ? log.firstElementChild : null;
+        const oldTop = anchor?.getBoundingClientRect().top;
+        const added = [];
         for (const row of values || []) {
             if (row.n <= chatCursor) continue;
             const item = document.createElement('li');
             const name = document.createElement('bdi'); name.className = 'chat-by'; name.textContent = row.by;
             const text = document.createElement('span'); text.className = 'chat-text'; text.textContent = row.text;
-            item.append(name,text); log.append(item);
+            item.append(name,text);
+            added.push(item);
             chatCursor = row.n;
         }
-        while (log.children.length > 120) log.firstElementChild.remove();
-        el('chat-empty').hidden = chatCursor > 0;
-        if (end) log.scrollTop = log.scrollHeight;
+        if (!added.length) return;
+        log.prepend(...added.reverse());
+        while (log.children.length > 120) log.lastElementChild.remove();
+        el('chat-empty').hidden = true;
+        // Preserve the old reading position if the pupil scrolled into the history.
+        if (!anchor) log.scrollTop = 0;
+        else if (anchor.parentNode === log) log.scrollTop += anchor.getBoundingClientRect().top - oldTop;
     }
 
     function makeRoom() {
@@ -364,12 +388,25 @@
         }
     }
 
-    async function poll() {
+    function receiveBoard(view, local) {
+        if (!view) return;
+        board.sync(view, local);
+        inkRead = performance.now();
+        inkAt = inkRead + (view.more ? 45 : (view.moving ? 280 : 890) + Math.random()*90);
+    }
+    async function poll(boardOnly) {
         if (polling || stopped || permanent) return;
-        polling = true; needsRefresh = false;
+        boardOnly &&= hasAccess() && !document.hidden;
+        polling = true;
+        if (!boardOnly) needsRefresh = false;
         const captured = flow;
         const local = connected() ? scope() : {};
         try {
+            if (boardOnly) {
+                const result = await api('board-sync', {...local, ...board.position()});
+                if (captured === flow && !stopped && hasAccess() && local.sid === scope().sid) receiveBoard(result.board, local);
+                return;
+            }
             const result = await api('status', {...local, chat:chatCursor, ...board.position()});
             if (captured !== flow || stopped) return;
             const prior = state;
@@ -384,8 +421,8 @@
             if (active && local.sid && scope().sid === local.sid && connected() && result.admitted === true) {
                 admitted = true; seconds = result.seconds || {};
                 render(); pushChat(result.chat);
-                board.sync(result.board, scope());
-                needsRefresh ||= !!(result.chatMore || result.board?.more);
+                receiveBoard(result.board, scope());
+                needsRefresh ||= !!result.chatMore;
             } else clearActivity();
             if (!active && !connecting && wanted && state.ready && Date.now() >= retryAt
                 && (!staff || state.slot !== fridaySlot || optedIntoTest)) {
@@ -403,6 +440,12 @@
             }
         } catch (error) {
             if (captured !== flow || stopped) return;
+            if (boardOnly) {
+                // A full status read decides admission; do not let a busy ink read renew or tear down a lease.
+                inkRetryAt = performance.now()+2200;
+                needsRefresh = true;
+                return;
+            }
             release(active, true);
             clearActivity();
             state = {...state, ready:false, phase:state.lesson ? 'paused' : 'idle', resumable:false};
@@ -410,15 +453,28 @@
             if (permanent) wanted = false;
             note(error instanceof PublicError ? error.message : 'ارتباط با سایت قطع است؛ تا بازگشت اتصال، کلاس در انتظار می‌ماند.');
         } finally {
-            polling = false; render();
-            if (!stopped && !permanent) pollTimer = setTimeout(poll, needsRefresh ? 50 : (active || connecting ? 1900 : 3400) + Math.random()*270);
+            polling = false;
+            if (!boardOnly) {
+                statusAt = performance.now() + (active || connecting ? 1900 : 3400) + Math.random()*270;
+                render();
+            }
+            schedulePoll();
         }
+    }
+    function schedulePoll() {
+        if (stopped || permanent || polling) return;
+        const now = performance.now();
+        const heartbeat = needsRefresh ? 30 : Math.max(0,statusAt-now);
+        const read = !document.hidden && hasAccess() ? Math.max(0,inkAt-now,inkRetryAt-now) : Infinity;
+        // One reader per tab, so a late ink response cannot undo a newer page or admission state.
+        const quick = !needsRefresh && read + 100 < heartbeat;
+        clearTimeout(pollTimer);
+        pollTimer = setTimeout(() => poll(quick), quick ? read : heartbeat);
     }
     function refresh() {
         if (stopped || permanent) return;
-        if (polling) { needsRefresh = true; return; }
-        clearTimeout(pollTimer);
-        pollTimer = setTimeout(poll, 30);
+        needsRefresh = true;
+        schedulePoll();
     }
 
     for (const id of panels) {
@@ -455,8 +511,11 @@
             await api('chat', {...scope(), text:field.value}); field.value = ''; refresh();
         });
     });
-    el('leave').addEventListener('click', () => {
-        wanted = false; flow++; release(active,true); clearActivity(); render(); refresh();
+    el('leave').addEventListener('click', event => {
+        if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+        // The single exit goes back to the school panel without ending the lesson for everyone.
+        wanted = false; stopped = true; flow++; clearTimeout(pollTimer);
+        release(active,true);
     });
     if (staff) {
         el('slot').addEventListener('change', render);
@@ -492,7 +551,6 @@
     window.addEventListener('pagehide', () => { stopped = true; clearTimeout(pollTimer); release(active,true); });
     window.addEventListener('pageshow', event => { if (event.persisted) { stopped = false; refresh(); } });
     document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
-    el('lecture-title').dataset.original = el('lecture-title').textContent;
     if (!lk || !window.isSecureContext) {
         permanent = true;
         note('برای ورود به رسانه به مرورگر سازگار، بستهٔ کامل کلاس و HTTPS معتبر نیاز است.');

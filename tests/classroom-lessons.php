@@ -143,20 +143,77 @@ cl_check_live($cfg,$active,$student,$bind($active,'PA_Student'),$t+9);
 cl_chat($s,$active,$student,'<b>متن است</b>',$t+9);
 denied(429,fn()=>cl_chat($s,$active,$student,'spam',$t+10));
 $stroke=['tool'=>'pen','color'=>'#0055aa','size'=>4,'points'=>[[420,200],[9000,9800]]];
-cl_board_action($s,$active,['board'=>1,'strokes'=>[$stroke]],'board-ink');
+$ink = static fn(array $ops, int $rev = 1) => cl_board_action($s,$active,['board'=>$rev,'strokes'=>$ops],'board-ink');
+$view = static fn(int $rev, int $cursor = 0) => cl_board_view($s,$active['id'],$student,['board'=>$rev,'ink'=>$cursor],cl_activity($s,$active['id']));
+must($ink([$stroke])['ink']===1, 'existing ink format still accepted');
+$legacy = $stroke+['id'=>'old-00000001'];
 $sync=cl_activity_sync($s,$active,$student,[]);
-must($sync['board']['ops']==[$stroke] && $sync['chat'][0]['text']==='<b>متن است</b>' && !$sync['board']['docs'], 'newcomer gets available page and chat as plain text');
-must(cl_activity_sync($s,$active,$student,['board'=>1,'ink'=>1,'chat'=>1])['board']['ops']===[], 'incremental ink updates');
-denied(400,fn()=>cl_board_action($s,$active,['board'=>1,'strokes'=>[array_replace($stroke,['points'=>[[99000,1]]])]],'board-ink'));
+must($sync['board']['ops']==[$legacy] && $sync['chat'][0]['text']==='<b>متن است</b>' && !$sync['board']['docs'], 'newcomer gets available page and chat as plain text');
+must($view(1,1)['ops']===[], 'incremental legacy ink updates');
+denied(400,fn()=>$ink([array_replace($stroke,['points'=>[[99000,1]]])]));
+
+$long=[];
+for ($i=0;$i<155;$i++) $long[]=[100+25*$i,3000+$i];
+$pen = ['tool'=>'pen','id'=>str_repeat('a',32),'size'=>6,'color'=>'#00aaff'];
+$early = $pen+['points'=>array_slice($long,0,24)];
+$next = $pen+['points'=>array_slice($long,23,41)];
+$lastPart = $pen+['points'=>array_slice($long,63)];
+$startTick = $ink([$early])['ink'];
+must($startTick===25 && $view(1,1)['ops']==[$early], 'reader sees first part immediately without a finished gesture');
+$middleTick = $ink([$next])['ink'];
+$layer = cl_layer($s,$active['id'],cl_activity($s,$active['id']));
+must($middleTick===65 && $layer['seq']===2 && $layer['clock']===65,
+    'streamed pen extends the tail row without spending another whole operation');
+must($view(1,$startTick)['ops']==[$next] && $view(1,$middleTick)['ops']===[], 'cursor inside compacted row receives only new points and its anchor');
+$endTick = $ink([$lastPart])['ink'];
+must($endTick===157 && $view(1,$middleTick)['ops']==[$lastPart], 'long stroke spills into another row under the same id');
+$pixel = ['tool'=>'erase','size'=>18,'color'=>'#ffffff','points'=>[[1200,2100],[1370,2140]]];
+$erase = ['tool'=>'erase-stroke','targets'=>[$pen['id'],$legacy['id']]];
+$eraseTick = $ink([$pixel,$erase])['ink'];
+must($view(1,$endTick)['ops']==[$pixel,$erase], 'whole-stroke tombstone is independent of ordered legacy erase masks');
+denied(400,fn()=>$ink([$early,['tool'=>'erase-stroke','targets'=>['other-page:bad']]]));
+denied(400,fn()=>$ink([['tool'=>'erase-stroke','targets'=>array_fill(0,CL_INK_TARGETS+1,$pen['id'])]]));
+must($view(1,$eraseTick)['ops']===[], 'invalid batch does not write any prefix');
+$afterErase = $pen+['points'=>[$long[154],[4100,3180]]];
+$ink([$afterErase]);
+$blank = $view(1)['ops'];
+must($blank==[$legacy,$pen+['points'=>array_slice($long,0,64)],$lastPart,$pixel,$erase,$afterErase],
+    'new readers replay compacted geometry, legacy mask and tombstones even if a peer was still drawing');
+
 $meta=cl_activity($s,$a['id']); $doc=str_repeat('1',32); $meta['docs'][$doc]=['id'=>$doc,'pages'=>2317,'name'=>'test.pdf','bytes'=>256,'mime'=>'application/pdf'];
 $s->put('activity',$a['id'],$meta);
-cl_board_action($s,$active,['board'=>1,'doc'=>$doc,'page'=>2317],'board-page');
-$sync=cl_activity_sync($s,$active,$student,['board'=>1,'ink'=>1]);
-must($sync['board']['page']===2317 && $sync['board']['reset'] && $sync['board']['cursor']===0, 'arbitrary PDF page and independent strokes');
-cl_board_action($s,$active,['board'=>2,'doc'=>null,'page'=>1],'board-page');
-must(cl_activity_sync($s,$active,$student,[])['board']['ops']==[$stroke], 'return to separately annotated page');
-cl_board_action($s,$active,['board'=>3],'board-clear');
-must(cl_activity_sync($s,$active,$student,['board'=>3,'ink'=>1])['board']['cursor']===0, 'erase only drawing layer');
+must(cl_board_action($s,$active,['board'=>1,'doc'=>$doc,'page'=>2317],'board-page')===['boardRev'=>2], 'page switch acknowledges a new revision');
+$sync=$view(1,$eraseTick);
+must($sync['page']===2317 && $sync['reset'] && $sync['cursor']===0, 'arbitrary PDF page and independent strokes');
+denied(409,fn()=>$ink([$erase]));
+$ink([$early], 2);
+must($view(2)['ops']==[$early], 'the tombstone is confined to its original layer');
+cl_board_action($s,$active,['board'=>2],'board-clear');
+must($view(2)['cursor']===0 && $view(2)['doc']['id']===$doc && $view(2)['page']===2317, 'clear only ink and keep PDF and page');
+cl_board_action($s,$active,['board'=>3,'doc'=>null,'page'=>1],'board-page');
+must($view(4)['ops']===$blank, 'return to separately annotated page');
+cl_board_action($s,$active,['board'=>4],'board-clear');
+must($view(4,$eraseTick)['cursor']===0 && cl_activity($s,$active['id'])['ink_ops']===0, 'clear resets cursor and subtracts rows, not ticks');
+
+// Board reads page by row count, not by cursor distance, including when chunks create gaps.
+for ($i=0;$i<121;$i++) $ink([array_replace($early,['id'=>sprintf('%032x',$i)])],5);
+$window = $view(5);
+must(count($window['ops'])===120 && $window['more'] && $window['cursor']===120*24, 'bounded read of compact rows');
+$remainder = $view(5,$window['cursor']);
+must(count($remainder['ops'])===1 && !$remainder['more'] && $remainder['cursor']===121*24, 'gap-aware cursor drains the remainder');
+// Force both caps near capacity, then check rollback after an in-row merge and a new row.
+$budget = cl_activity($s,$active['id']); $layer = cl_layer($s,$active['id'],$budget);
+$budgetKey = cl_layer_key($budget); $layerBucket = 'layers:' . $active['id'];
+$s->put('activity',$active['id'],array_replace($budget,['ink_ops'=>11999]));
+$s->put($layerBucket,$budgetKey,array_replace($layer,['seq'=>1599]));
+$extension = array_replace($remainder['ops'][0],['points'=>[$long[23],$long[24]]]);
+denied(409,fn()=>$ink([$extension,$early,$early],5));
+$rolledBack = $view(5,$window['cursor']);
+must($rolledBack['ops']===$remainder['ops'] && $rolledBack['cursor']===$remainder['cursor'],
+    'overflow rolls back the replaced tail and entire transaction');
+$s->put('activity',$active['id'],$budget);
+$s->put($layerBucket,$budgetKey,$layer);
+cl_board_action($s,$active,['board'=>5],'board-clear');
 
 $pulse(10,$student,'PA_Student',$t+11);
 $wire($r,$studentWire+$managerWire);

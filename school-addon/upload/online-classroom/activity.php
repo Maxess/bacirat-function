@@ -5,6 +5,9 @@ require_once __DIR__ . '/lesson.php';
 const CL_FILE_LIMIT = 16 * 1024 * 1024;
 const CL_LESSON_FILE_LIMIT = 48 * 1024 * 1024;
 const CL_CHAT_LIMIT = 120;
+const CL_INK_POINTS = 96;
+const CL_INK_BATCH = 6;
+const CL_INK_TARGETS = 32;
 
 function cl_activity(ClassroomStore $s, string $lesson): array
 {
@@ -40,7 +43,7 @@ function cl_layer_key(array $state): string
 function cl_layer(ClassroomStore $s, string $lesson, array $state): array
 {
     $key = cl_layer_key($state);
-    // Fixed bucket per lesson; layer IDs change on erase and are not user inputs.
+    // Layer identifiers depend only on the server-selected document and page.
     return $s->get('layers:' . $lesson, $key) ?? ['key'=>substr(hash('sha256', $key), 0, 16), 'seq'=>0];
 }
 
@@ -50,19 +53,41 @@ function cl_activity_sync(ClassroomStore $s, array $lesson, array $actor, array 
     $state = cl_activity($s, $id);
     $n = cl_id($input['chat'] ?? null);
     $chat = $n !== $state['messages'] ? array_values($s->rows('chat:' . $id, 40, cl_seq($n))) : [];
-    $layer = cl_layer($s, $id, $state);
-    $position = cl_id($input['ink'] ?? null);
-    $reset = ($input['board'] ?? null) !== $state['rev'] || $position > $layer['seq'];
-    if ($reset) $position = 0;
-    $ops = $position < $layer['seq'] ? array_values($s->rows('ink:' . $id . ':' . $layer['key'], 120, cl_seq($position))) : [];
-    $cursor = $position + count($ops);
-    $doc = $state['doc'] === null ? null : $state['docs'][$state['doc']];
     return ['chat'=>$chat, 'chatMore'=>($chat ? $chat[array_key_last($chat)]['n'] : $n) < $state['messages'],
-        'board'=>['doc'=>$doc, 'page'=>$state['page'], 'rev'=>$state['rev'], 'cursor'=>$cursor, 'more'=>$cursor < $layer['seq'],
-            'reset'=>$reset, 'ops'=>$ops, 'docs'=>cl_is_staff($actor) ? array_values($state['docs']) : []]];
+        'board'=>cl_board_view($s, $id, $actor, $input, $state)];
 }
 
-function cl_board_action(ClassroomStore $s, array $lesson, array $input, string $action): void
+function cl_board_view(ClassroomStore $s, string $id, array $actor, array $input, array $state): array
+{
+    $layer = cl_layer($s, $id, $state);
+    $clock = $layer['clock'] ?? $layer['seq']; // Older rows are one tick each.
+    $position = cl_id($input['ink'] ?? null);
+    $reset = ($input['board'] ?? null) !== $state['rev'] || $position > $clock;
+    if ($reset) $position = 0;
+    $cursor = $position;
+    $ops = [];
+    if ($position < $clock) {
+        foreach ($s->rows('ink:' . $id . ':' . $layer['key'], 120, cl_seq($position)) as $end => $op) {
+            $cursor = (int)$end;
+            if ($op['tool'] === 'pen') {
+                if (!isset($op['id'])) $op['id'] = 'old-' . cl_seq($cursor);
+                else {
+                    // A reader may already have part of the tail row. Send only its extension,
+                    // with the last shared point to join the two pieces without a gap.
+                    $offset = count($op['points']) - ($cursor - $position) - 1;
+                    if ($offset > 0) $op['points'] = array_slice($op['points'], $offset);
+                }
+            }
+            $ops[] = $op;
+        }
+    }
+    $doc = $state['doc'] === null ? null : $state['docs'][$state['doc']];
+    return ['doc'=>$doc, 'page'=>$state['page'], 'rev'=>$state['rev'], 'cursor'=>$cursor, 'more'=>$cursor < $clock,
+        'reset'=>$reset, 'ops'=>$ops, 'moving'=>($layer['changed_at'] ?? 0) > microtime(true) - 1.6,
+        'docs'=>cl_is_staff($actor) ? array_values($state['docs']) : []];
+}
+
+function cl_board_action(ClassroomStore $s, array $lesson, array $input, string $action): array
 {
     $id = $lesson['id'];
     $state = cl_activity($s, $id);
@@ -72,47 +97,94 @@ function cl_board_action(ClassroomStore $s, array $lesson, array $input, string 
         $page = cl_id($input['page'] ?? null);
         if (!$page || ($doc !== null && (!is_string($doc) || !isset($state['docs'][$doc])))
             || $page > ($doc === null ? 1 : $state['docs'][$doc]['pages'])) throw new ClassroomError(400, 'صفحه یا فایل تخته معتبر نیست.');
-        if ($doc === $state['doc'] && $page === $state['page']) return;
-        $state['doc'] = $doc;
-        $state['page'] = $page;
-        $state['rev']++;
-        $s->put('activity', $id, $state);
-        return;
+        if ($doc !== $state['doc'] || $page !== $state['page']) {
+            $state['doc'] = $doc;
+            $state['page'] = $page;
+            $state['rev']++;
+            $s->put('activity', $id, $state);
+        }
+        return ['boardRev'=>$state['rev']];
     }
     $layer = cl_layer($s, $id, $state);
     if ($action === 'board-clear') {
+        $state['rev']++;
         $s->tx(static function () use ($s, $id, $state, $layer) {
             $s->delete('ink:' . $id . ':' . $layer['key']);
             $s->delete('layers:' . $id, cl_layer_key($state));
-            $state['rev']++;
             $state['ink_ops'] -= $layer['seq'];
             $s->put('activity', $id, $state);
         });
-        return;
+        return ['boardRev'=>$state['rev']];
     }
     $items = $input['strokes'] ?? null;
-    if (!is_array($items) || !array_is_list($items) || !$items || count($items) > 6) throw new ClassroomError(400, 'مسیر قلم معتبر نیست.');
-    if ($layer['seq'] + count($items) > 1600 || $state['ink_ops'] + count($items) > 12000) {
-        throw new ClassroomError(409, 'فضای خطوط تخته پر شده است؛ لایهٔ این صفحه را پاک کن یا صفحه را عوض کن.');
-    }
+    if (!is_array($items) || !array_is_list($items) || !$items || count($items) > CL_INK_BATCH) throw new ClassroomError(400, 'مسیر قلم معتبر نیست.');
     $strokes = [];
     foreach ($items as $item) {
         if (!is_array($item)) throw new ClassroomError(400, 'مسیر قلم معتبر نیست.');
-        $tool = $item['tool'] ?? null; $color = $item['color'] ?? null; $size = $item['size'] ?? null; $points = $item['points'] ?? null;
+        $tool = $item['tool'] ?? null;
+        if ($tool === 'erase-stroke') {
+            $targets = $item['targets'] ?? null;
+            if (!is_array($targets) || !array_is_list($targets) || !$targets || count($targets) > CL_INK_TARGETS) {
+                throw new ClassroomError(400, 'فهرست خطوط پاک‌کن معتبر نیست.');
+            }
+            foreach ($targets as $target) {
+                if (!is_string($target) || !preg_match('/^(?:[0-9a-f]{32}|old-[0-9]{8})$/D', $target)) {
+                    throw new ClassroomError(400, 'شناسهٔ خط معتبر نیست.');
+                }
+            }
+            $strokes[] = ['tool'=>$tool, 'targets'=>array_values(array_unique($targets))];
+            continue;
+        }
+        $color = $item['color'] ?? null; $size = $item['size'] ?? null; $points = $item['points'] ?? null;
         if (!in_array($tool, ['pen','erase'], true) || !is_string($color) || !preg_match('/^#[0-9a-f]{6}$/iD', $color)
             || !is_int($size) || $size < 1 || $size > 36 || !is_array($points) || !array_is_list($points)
-            || count($points) < 1 || count($points) > 96) throw new ClassroomError(400, 'تنظیم قلم یا مسیر آن معتبر نیست.');
+            || count($points) < 1 || count($points) > CL_INK_POINTS) throw new ClassroomError(400, 'تنظیم قلم یا مسیر آن معتبر نیست.');
         foreach ($points as $pt) {
             if (!is_array($pt) || !array_is_list($pt) || count($pt) !== 2 || !is_int($pt[0]) || !is_int($pt[1])
                 || min($pt) < 0 || max($pt) > 10000) throw new ClassroomError(400, 'مختصات قلم بیرون از تخته است.');
         }
-        $strokes[] = ['tool'=>$tool, 'size'=>$size, 'color'=>$color, 'points'=>$points];
+        $op = ['tool'=>$tool, 'size'=>$size, 'color'=>$color, 'points'=>$points];
+        if (array_key_exists('id', $item)) {
+            if ($tool !== 'pen' || !is_string($item['id']) || !preg_match('/^[0-9a-f]{32}$/D', $item['id'])) {
+                throw new ClassroomError(400, 'شناسهٔ خط معتبر نیست.');
+            }
+            $op['id'] = $item['id'];
+        }
+        $strokes[] = $op;
     }
-    $s->tx(static function () use ($s, $id, $state, $layer, $strokes) {
-        foreach ($strokes as $stroke) $s->put('ink:' . $id . ':' . $layer['key'], cl_seq(++$layer['seq']), $stroke);
+    return $s->tx(static function () use ($s, $id, $state, $layer, $strokes) {
+        $bucket = 'ink:' . $id . ':' . $layer['key'];
+        $clock = $layer['clock'] ?? $layer['seq'];
+        $tail = $clock && isset($strokes[0]['id']) ? $s->get($bucket, cl_seq($clock)) : null;
+        $added = 0;
+        foreach ($strokes as $op) {
+            $ticks = isset($op['id']) ? count($op['points']) : 1;
+            // Coalesce time-based packets into bounded rows, but never across another
+            // gesture or an erasure. Small, slow packets do not exhaust the page budget.
+            if (isset($op['id'], $tail['id']) && $op['id'] === $tail['id'] && $op['color'] === $tail['color'] && $op['size'] === $tail['size']
+                && $tail['points'][array_key_last($tail['points'])] === $op['points'][0]
+                && count($tail['points']) + $ticks - 1 <= CL_INK_POINTS) {
+                if ($ticks === 1) continue;
+                $s->delete($bucket, cl_seq($clock));
+                $op['points'] = array_merge($tail['points'], array_slice($op['points'], 1));
+                $ticks--;
+            } else {
+                $added++;
+                if ($layer['seq'] + $added > 1600 || $state['ink_ops'] + $added > 12000) {
+                    throw new ClassroomError(409, 'فضای خطوط تخته پر شده است؛ نوشته‌های این صفحه را پاک کن یا صفحه را عوض کن.');
+                }
+            }
+            $clock += $ticks;
+            $s->put($bucket, cl_seq($clock), $op);
+            $tail = $op;
+        }
+        $layer['clock'] = $clock;
+        $layer['seq'] += $added;
+        $layer['changed_at'] = microtime(true);
+        $state['ink_ops'] += $added;
         $s->put('layers:' . $id, cl_layer_key($state), $layer);
-        $state['ink_ops'] += count($strokes);
-        $s->put('activity', $id, $state);
+        if ($added) $s->put('activity', $id, $state);
+        return ['ink'=>$clock];
     });
 }
 
@@ -133,7 +205,7 @@ function cl_lesson_dir(string $id, bool $create): ?string
     return $path;
 }
 
-function cl_upload(ClassroomStore $s, array $lesson, array $input, array $file): void
+function cl_upload(ClassroomStore $s, array $lesson, array $input, array $file): array
 {
     $state = cl_activity($s, $lesson['id']);
     if (cl_id($input['board'] ?? null) !== $state['rev']) throw new ClassroomError(409, 'صفحهٔ تخته تغییر کرده است؛ دوباره امتحان کن.');
@@ -172,6 +244,7 @@ function cl_upload(ClassroomStore $s, array $lesson, array $input, array $file):
     $state['rev']++;
     try { $s->put('activity', $lesson['id'], $state); }
     catch (Throwable $error) { @unlink($target); throw $error; }
+    return ['boardRev'=>$state['rev']];
 }
 
 function cl_clear_activity(ClassroomStore $s, string $id): void

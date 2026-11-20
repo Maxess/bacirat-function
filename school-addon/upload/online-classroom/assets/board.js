@@ -10,7 +10,11 @@
         const zoomSteps = [.75, 1, 1.25, 1.5, 2, 2.5];
         const percentage = new Intl.NumberFormat('fa-IR', {style:'percent'});
         let zoomLevel = 1;
-        let data = null, transport = null, cursor = 0, ops = [], draft = [], stroke = null, pointer = null;
+        let data = null, transport = null, cursor = 0, ops = [], stroke = null, pointer = null;
+        let pending = [], sent = [], writing = null, writeTimer, generation = 0, targetRev = 0;
+        const removed = new Set(), bounds = new WeakMap();
+        const packetSize = 96, eraseSize = 32, batchSize = 6, queueLimit = 48, writeDelay = 175;
+        const tip = el('eraser-tip');
         let tool = 'pen', busy = false, renderVersion = 0, documentVersion = 0, docKey = '', docsKey = '';
         let drag = null;
         let library, job, rendering, imageLoad, imageFile;
@@ -128,16 +132,112 @@
             }
             context.restore();
         }
+        const samePoint = (a, b) => a[0] === b[0] && a[1] === b[1];
+        const last = list => list[list.length - 1];
+        const drafts = () => [...sent.flatMap(entry => entry.ops), ...pending];
+        function collectRemoved(hidden, list) {
+            for (const op of list) if (op.tool === 'erase-stroke') for (const id of op.targets) hidden.add(id);
+            return hidden;
+        }
+        function paintVisible(op, hidden) {
+            if (op.tool !== 'erase-stroke' && !hidden.has(op.id)) paint(op);
+        }
         function redraw() {
+            const draft = drafts();
+            const hidden = collectRemoved(new Set(removed), draft);
             context.clearRect(0,0,ink.width,ink.height);
-            for (const op of ops) paint(op);
-            for (const op of draft) paint(op);
-            if (stroke) paint(stroke);
+            for (const op of ops) paintVisible(op, hidden);
+            for (const op of draft) paintVisible(op, hidden);
+        }
+        function receive(incoming) {
+            collectRemoved(removed, incoming);
+            for (const op of incoming) {
+                const tail = last(ops);
+                if (op.tool === 'pen' && tail?.tool === 'pen' && tail.id === op.id && op.id && tail.color === op.color && tail.size === op.size
+                    && samePoint(last(tail.points), op.points[0]) && tail.points.length + op.points.length - 1 <= packetSize) {
+                    ops[ops.length - 1] = {...tail, points:[...tail.points, ...op.points.slice(1)]};
+                } else ops.push(op);
+            }
+        }
+        function prune() {
+            const before = sent.length;
+            sent = sent.filter(entry => entry.until === null || entry.until > cursor);
+            return before !== sent.length;
         }
         function pointerEnd() {
             const previous = pointer;
             pointer = null; stroke = null;
+            if (tip) tip.hidden = true;
             if (previous !== null && ink.hasPointerCapture?.(previous)) ink.releasePointerCapture(previous);
+        }
+        function wipeInk() {
+            generation++;
+            clearTimeout(writeTimer); writeTimer = undefined;
+            ops = []; pending = []; sent = [];
+            removed.clear(); targetRev = 0; cursor = 0; pointerEnd();
+        }
+        function editable() { return !!data && !busy && data.rev >= targetRev && options.canEdit(); }
+        function queuedSlot() {
+            if (pending.length + sent.reduce((count, entry) => count + entry.ops.length, 0) < queueLimit) return true;
+            message('همگام‌سازی تخته عقب افتاده است؛ لحظه‌ای صبر کن.');
+            pointerEnd();
+            return false;
+        }
+        function scheduleWrite() {
+            if (writing || writeTimer !== undefined || !pending.length || busy || !options.canEdit()) return;
+            writeTimer = setTimeout(write, writeDelay);
+        }
+        function write() {
+            clearTimeout(writeTimer); writeTimer = undefined;
+            if (writing || !data || !pending.length || !options.canEdit()) return writing;
+            const stamp = generation;
+            const entry = {ops:pending.splice(0,batchSize), until:null};
+            sent.push(entry);
+            writing = options.send('board-ink',{board:data.rev,strokes:entry.ops}).then(reply => {
+                if (stamp !== generation) return;
+                entry.until = reply.ink;
+                if (prune()) redraw();
+            }).catch(error => {
+                if (stamp !== generation) return;
+                // An unknown or rejected prefix must not be linked to later points.
+                pending = []; sent = sent.filter(row => row !== entry);
+                pointerEnd(); redraw(); message(options.explain(error));
+            }).finally(() => { writing = null; scheduleWrite(); });
+            return writing;
+        }
+        function area(op) {
+            if (!bounds.has(op)) {
+                let x0 = 10000, y0 = 10000, x1 = 0, y1 = 0;
+                for (const [x,y] of op.points) { x0 = Math.min(x0,x); y0 = Math.min(y0,y); x1 = Math.max(x1,x); y1 = Math.max(y1,y); }
+                bounds.set(op, [x0,y0,x1,y1]);
+            }
+            return bounds.get(op);
+        }
+        function distance2(p, a, b, sx, sy) {
+            const dx = (b[0]-a[0])*sx, dy = (b[1]-a[1])*sy;
+            const x = (p[0]-a[0])*sx, y = (p[1]-a[1])*sy;
+            const t = Math.max(0, Math.min(1, (x*dx+y*dy)/(dx*dx+dy*dy || 1)));
+            return (x-t*dx)**2 + (y-t*dy)**2;
+        }
+        function crosses(a, b, c, d) {
+            const sign = (p, q, r) => Math.sign((q[0]-p[0])*(r[1]-p[1]) - (q[1]-p[1])*(r[0]-p[0]));
+            return sign(a,b,c)*sign(a,b,d) <= 0 && sign(c,d,a)*sign(c,d,b) <= 0
+                && [0,1].every(i => Math.max(Math.min(a[i],b[i]),Math.min(c[i],d[i])) <= Math.min(Math.max(a[i],b[i]),Math.max(c[i],d[i])));
+        }
+        function touches(op, a, b, r, radius) {
+            const sx = r.width / 10000, sy = r.height / 10000;
+            const reach = radius + Math.min(r.width,r.height)*op.size/1100;
+            const [x0,y0,x1,y1] = area(op);
+            if (Math.max(a[0],b[0])+reach/sx < x0 || Math.min(a[0],b[0])-reach/sx > x1
+                || Math.max(a[1],b[1])+reach/sy < y0 || Math.min(a[1],b[1])-reach/sy > y1) return false;
+            const hit = reach*reach, p = op.points;
+            if (p.length === 1) return distance2(p[0],a,b,sx,sy) <= hit;
+            for (let i = 1; i < p.length; i++) {
+                const c = p[i-1], d = p[i];
+                if (crosses(a,b,c,d) || distance2(a,c,d,sx,sy) <= hit || distance2(b,c,d,sx,sy) <= hit
+                    || distance2(c,a,b,sx,sy) <= hit || distance2(d,a,b,sx,sy) <= hit) return true;
+            }
+            return false;
         }
         async function show(view, scope, reload) {
             if (reload) clearDocument();
@@ -195,7 +295,9 @@
         }
         function toolState() {
             if (!staff) return;
-            const ready = !!data && options.canEdit() && !busy;
+            const ready = editable();
+            stage.classList.toggle('erasing',ready && tool === 'erase');
+            if (!ready) tip.hidden = true;
             const pages = data?.doc?.pages || 1;
             const n = data?.page || 1;
             for (const id of ['pen','eraser','pan','ink-color','ink-size','board-clear','board-file','board-doc','page-number','page-go']) el(id).disabled = !ready;
@@ -207,21 +309,23 @@
         }
         function sync(next, scope) {
             if (!next) return;
-            const rival = transport && (transport.epoch !== scope.epoch || transport.sid !== scope.sid);
+            const rival = transport && (transport.lesson !== scope.lesson || transport.epoch !== scope.epoch || transport.sid !== scope.sid);
             const resetPage = next.reset || !data || next.rev !== data.rev || rival;
             const reloadDoc = rival || (next.doc?.id || '') !== docKey;
             const changedPaper = !data || reloadDoc || next.page !== data.page;
-            if (resetPage) { ops = []; draft = []; cursor = 0; pointerEnd(); }
+            if (resetPage) wipeInk();
             transport = scope;
             data = next;
             cursor = next.cursor;
-            if (next.ops.length) ops.push(...next.ops);
+            const dropped = prune();
+            receive(next.ops);
+            if (removed.has(stroke?.style?.id)) pointerEnd();
             if (changedPaper) {
                 // Do not briefly show a page from the previous document during parsing.
                 fit(1600,1000);
                 show(next,scope,reloadDoc);
-            } else if (resetPage || (next.ops.length && (draft.length || stroke))) redraw();
-            else for (const op of next.ops) paint(op);
+            } else if (resetPage || dropped || (next.ops.length && (pending.length || sent.length || next.ops.some(op => op.tool === 'erase-stroke')))) redraw();
+            else for (const op of next.ops) paintVisible(op, removed);
             const caption = next.doc ? `${next.doc.name} · صفحهٔ ${next.page} از ${next.doc.pages}` : 'تختهٔ آزاد · همگام';
             if (el('board-caption').textContent !== caption) el('board-caption').textContent = caption;
             if (staff) {
@@ -241,7 +345,7 @@
         }
         function reset() {
             data = transport = null;
-            cursor = 0; ops = []; draft = []; pointerEnd(); clearDocument();
+            wipeInk(); clearDocument();
             stage.classList.remove('has-document');
             fit(1600,1000);
             setZoom(1, false);
@@ -250,7 +354,7 @@
         }
         function setExpanded(expand) {
             card.classList.toggle('expanded',expand);
-            for (const node of root.querySelectorAll('.room-top, .session-strip, .room-side')) node.inert = expand;
+            for (const node of root.querySelectorAll('.room-top, .staff-actions, .room-side')) node.inert = expand;
             const btn = el('board-expand');
             btn.setAttribute('aria-pressed',String(expand));
             btn.setAttribute('aria-label', expand ? 'بازگشت به کلاس' : 'نمای بزرگ تخته');
@@ -273,73 +377,122 @@
                 files.hidden = !files.hidden;
                 toggle.setAttribute('aria-expanded', String(!files.hidden));
             });
-            let queue = Promise.resolve();
             function setTool(value) {
+                pointerEnd();
                 tool = value;
                 el('pen').setAttribute('aria-pressed',String(value==='pen'));
                 el('eraser').setAttribute('aria-pressed',String(value==='erase'));
                 el('pan').setAttribute('aria-pressed',String(value==='pan'));
                 stage.classList.toggle('pan',value==='pan');
-                dragState();
+                toolState(); dragState();
             }
-            function xy(event) {
-                const r = ink.getBoundingClientRect();
+            function xy(event, r) {
                 const limit = n => Math.round(Math.max(0,Math.min(1,n))*10000);
                 return [limit((event.clientX-r.left)/r.width),limit((event.clientY-r.top)/r.height)];
             }
+            function aim(point, type) {
+                tip.hidden = false;
+                tip.classList.toggle('touch',type === 'touch');
+                tip.style.left = `${point[0]/100}%`;
+                tip.style.top = `${point[1]/100}%`;
+            }
+            function erase(a, b, rect, type) {
+                const draft = drafts();
+                const hidden = collectRemoved(new Set(removed), draft);
+                let changed = false;
+                for (const op of [...ops,...draft]) {
+                    if (op.tool !== 'pen' || !op.id || hidden.has(op.id) || !touches(op,a,b,rect,type==='touch' ? 19 : 14)) continue;
+                    let tail = last(pending);
+                    if (tail?.tool !== 'erase-stroke' || tail.targets.length >= eraseSize) {
+                        if (!queuedSlot()) break;
+                        tail = {tool:'erase-stroke',targets:[]};
+                        pending.push(tail);
+                    }
+                    tail.targets.push(op.id);
+                    hidden.add(op.id);
+                    changed = true;
+                }
+                if (changed) { redraw(); scheduleWrite(); }
+            }
             function begin(event) {
-                if (tool === 'pan' || !options.canEdit() || !data || busy || pointer !== null || event.button !== 0) return;
+                if (tool === 'pan' || !editable() || pointer !== null || event.button !== 0) return;
+                const rect = ink.getBoundingClientRect();
+                if (!rect.width || !rect.height || (tool === 'pen' && !queuedSlot())) return;
                 event.preventDefault();
                 pointer = event.pointerId;
                 ink.setPointerCapture(pointer);
-                stroke = {tool, color:el('ink-color').value, size:Number(el('ink-size').value), points:[xy(event)]};
-                paint(stroke);
+                const point = xy(event,rect);
+                if (tool === 'erase') {
+                    stroke = {last:point};
+                    aim(point,event.pointerType);
+                    erase(point,point,rect,event.pointerType);
+                } else {
+                    const id = Array.from(crypto.getRandomValues(new Uint8Array(16)), n => n.toString(16).padStart(2,'0')).join('');
+                    const style = {tool:'pen',id,color:el('ink-color').value,size:Number(el('ink-size').value)};
+                    stroke = {style,last:point};
+                    const op = {...style,points:[point]};
+                    pending.push(op); paint(op); scheduleWrite();
+                }
             }
-            function submitStroke(rev, epoch, ops) {
-                queue = queue.then(async () => {
-                    if (!options.canEdit() || data?.rev !== rev || epoch !== transport?.epoch) return;
-                    await options.send('board-ink',{board:rev,strokes:ops});
-                }).catch(e => message(options.explain(e))).finally(() => {
-                    draft = draft.filter(d => !ops.includes(d));
-                    redraw();
-                });
-            }
-            function flush() {
-                if (!stroke || !data || !transport) return;
-                draft.push(stroke);
-                submitStroke(data.rev,transport.epoch,[stroke]);
+            function penPoint(point) {
+                const before = stroke.last, style = stroke.style;
+                if (Math.hypot(point[0]-before[0],point[1]-before[1]) < 12) return;
+                let tail = last(pending);
+                if (tail?.id !== style.id || tail.points.length >= packetSize) {
+                    if (!queuedSlot()) return;
+                    tail = {...style,points:[before]};
+                    pending.push(tail);
+                }
+                tail.points.push(point); bounds.delete(tail);
+                stroke.last = point;
+                paint({...style,points:[before,point]}); scheduleWrite();
             }
             function move(event) {
-                if (pointer !== event.pointerId || !stroke) return;
-                const point = xy(event);
-                const last = stroke.points[stroke.points.length-1];
-                if (Math.hypot(point[0]-last[0],point[1]-last[1]) < 16) return;
-                paint({...stroke,points:[last,point]});
-                stroke.points.push(point);
-                if (stroke.points.length >= 96) {
-                    flush();
-                    stroke = {...stroke,points:[point]};
+                if (!editable() || tool === 'pan') return;
+                const rect = ink.getBoundingClientRect();
+                if (!rect.width || !rect.height) return;
+                if (tool === 'erase') {
+                    const at = xy(event,rect);
+                    aim(at,event.pointerType);
+                    if (pointer === event.pointerId && stroke) {
+                        const before = stroke.last;
+                        stroke.last = at;
+                        if (!samePoint(before,at)) erase(before,at,rect,event.pointerType);
+                    }
+                } else if (pointer === event.pointerId && stroke) {
+                    const samples = event.getCoalescedEvents?.();
+                    for (const sample of samples?.length ? samples : [event]) {
+                        if (!stroke) break;
+                        penPoint(xy(sample,rect));
+                    }
                 }
             }
             function done(event) {
-                if (pointer !== event.pointerId || !stroke) return;
+                if (pointer !== event.pointerId) return;
                 if (event.type === 'pointerup') move(event);
-                flush(); pointerEnd();
+                pointerEnd();
             }
             ink.addEventListener('pointerdown',begin);
             ink.addEventListener('pointermove',move);
             ink.addEventListener('pointerup',done);
             ink.addEventListener('pointercancel',done);
             ink.addEventListener('lostpointercapture',done);
+            ink.addEventListener('pointerleave',() => { tip.hidden = true; });
             el('pen').addEventListener('click',() => setTool('pen'));
             el('eraser').addEventListener('click',() => setTool('erase'));
             el('pan').addEventListener('click',() => setTool('pan'));
             async function act(work) {
-                if (!data || busy || !options.canEdit()) return;
-                busy = true; toolState(); message();
-                try { await work(); }
-                catch (e) { message(options.explain(e)); }
-                finally { busy = false; toolState(); }
+                if (!editable()) return;
+                const stamp = generation;
+                busy = true; pointerEnd(); toolState(); message();
+                try {
+                    // Commit the last drawn points on this page before changing the revision.
+                    while (stamp === generation && options.canEdit() && (writing || pending.length)) await (writing || write());
+                    if (stamp !== generation || !options.canEdit()) return;
+                    const result = await work(() => stamp === generation && options.canEdit());
+                    if (stamp === generation && result?.boardRev) targetRev = result.boardRev;
+                } catch (e) { if (stamp === generation) message(options.explain(e)); }
+                finally { busy = false; toolState(); scheduleWrite(); }
             }
             function page(doc,n) {
                 act(() => options.send('board-page',{board:data.rev,doc,page:n}));
@@ -353,12 +506,11 @@
             });
             el('board-upload').addEventListener('submit',event => {
                 event.preventDefault();
-                act(async () => {
+                act(async current => {
                     const field = el('board-file'), file = field.files[0];
                     if (!file) return;
                     if (file.size > 16*1024*1024) { message('حداکثر حجم هر فایل ۱۶ مگابایت است.'); return; }
                     const rev = data.rev;
-                    const current = transport.epoch;
                     let pages = 1;
                     if (file.type === 'application/pdf' || /\.pdf$/i.test(file.name)) {
                         const pdf = await pdfLib();
@@ -366,9 +518,10 @@
                         try { pages = (await loading.promise).numPages; }
                         finally { await loading.destroy(); }
                     }
-                    if (data?.rev !== rev || transport?.epoch !== current) throw new Error('Board changed');
-                    await options.send('upload',{board:rev,pages},file);
+                    if (!current()) return;
+                    const result = await options.send('upload',{board:rev,pages},file);
                     field.value = '';
+                    return result;
                 });
             });
         }

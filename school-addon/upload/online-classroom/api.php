@@ -33,7 +33,7 @@ cl_json_reply(static function (): array {
             }
             throw new ClassroomError(403, 'این کلاس برای حساب تو در دسترس نیست.');
         }
-        if ($expiredTest && $action !== 'status') {
+        if ($expiredTest && !in_array($action, ['status','board-sync'], true)) {
             cl_close_lesson($s, $cfg, $lesson, $now, $rpc);
             $lesson = null;
             if ($action !== 'open') throw new ClassroomError(409, 'مهلت این جلسهٔ آزمایشی پایان یافته است.');
@@ -102,6 +102,10 @@ cl_json_reply(static function (): array {
             return [];
         }
         $lesson = cl_check_live($cfg, $lesson, $actor, $body, $now);
+        if ($action === 'board-sync') {
+            // Drawing latency is independent of the slower presence/attendance poll.
+            return ['board'=>cl_board_view($s, $lesson['id'], $actor, $body, cl_activity($s, $lesson['id']))];
+        }
         if ($action === 'chat') {
             cl_chat($s, $lesson, $actor, $body['text'] ?? null, $now);
             return [];
@@ -112,9 +116,9 @@ cl_json_reply(static function (): array {
             if ($target !== null && !isset($lesson['seen'][$target])) throw new ClassroomError(409, 'ورود شرکت‌کننده هنوز تأیید نشده است.');
             cl_control_media($lesson['room'], $action, $target, static fn($method, $data) => $rpc($method, $lesson['room'], $data));
         } elseif ($action === 'upload' && $isUpload) {
-            cl_upload($s, $lesson, $body, $_FILES['file'] ?? []);
+            return cl_upload($s, $lesson, $body, $_FILES['file'] ?? []);
         } elseif (in_array($action, ['board-page','board-clear','board-ink'], true)) {
-            cl_board_action($s, $lesson, $body, $action);
+            return cl_board_action($s, $lesson, $body, $action);
         } else {
             throw new ClassroomError(400, 'عملیات شناخته نشد.');
         }

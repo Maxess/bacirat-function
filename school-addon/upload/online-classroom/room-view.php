@@ -5,7 +5,6 @@ declare(strict_types=1);
 function cl_room_icon(string $name): string
 {
     $mark = match ($name) {
-        'back' => '<path d="M5 12h14m-6-6 6 6-6 6"/>',
         'board' => '<rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21l4-4 4 4M7 12l3-3 3 2 3-4"/>',
         'clock' => '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
         'mic' => '<rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11v1a7 7 0 0 0 14 0v-1m-7 8v3m-3 0h6"/>',
@@ -14,6 +13,7 @@ function cl_room_icon(string $name): string
         'people' => '<circle cx="9" cy="7.5" r="3"/><path d="M2.5 20v-2a4 4 0 0 1 4-4h5a4 4 0 0 1 4 4v2M16 5a3 3 0 0 1 0 6m2 3a4 4 0 0 1 3.5 4v2"/>',
         'chat' => '<path d="M21 11.5A8.5 8.5 0 0 1 12.5 20H5l1.3-3A8.5 8.5 0 1 1 21 11.5ZM8 10h8m-8 4h5"/>',
         'exit' => '<path d="M10 4H5a1 1 0 0 0-1 1v14a1 1 0 0 0 1 1h5m-1-8h12m-4-4 4 4-4 4"/>',
+        'finish' => '<rect x="5" y="5" width="14" height="14" rx="2"/>',
         'pen' => '<path d="m3 21 1-5L16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 2Zm11-15 3 3"/>',
         'erase' => '<path d="m8 20-5-5a2.1 2.1 0 0 1 0-3L12 3a2.1 2.1 0 0 1 3 0l5 5a2.1 2.1 0 0 1 0 3l-9 9m-4-12 8 8m-7 4h13"/>',
         'pan' => '<path d="M8 12V6a1.5 1.5 0 0 1 3 0v5-7a1.5 1.5 0 0 1 3 0v7-5a1.5 1.5 0 0 1 3 0v6-3a1.5 1.5 0 0 1 3 0v6a6 6 0 0 1-6 6h-2a5 5 0 0 1-4-2l-4-5a1.6 1.6 0 0 1 2.5-2Z"/>',
@@ -38,58 +38,43 @@ function cl_room_icon(string $name): string
   data-pdf="<?= cl_html(cl_asset('pdf.min.mjs')) ?>" data-pdf-worker="<?= cl_html(cl_asset('pdf.worker.min.mjs')) ?>"
   data-pdf-data="<?= cl_html(cl_href(['route'=>'pdf']) . '&name=') ?>">
     <header class="room-top">
-        <div class="room-identity">
-            <a class="icon-button room-back" href="<?= cl_html(cl_href(['view'=>'classes'])) ?>" aria-label="بازگشت به فهرست کلاس‌ها" title="فهرست کلاس‌ها"><?= cl_room_icon('back') ?></a>
-            <div class="room-name">
-                <span>کلاس مجازی <span aria-hidden="true">/</span> <?= cl_html($actorLabel) ?></span>
-                <h1><?= cl_html($class['name']) ?></h1>
-            </div>
-        </div>
+        <h1 class="room-name"><?= cl_html($class['name']) ?></h1>
         <div class="room-controls" role="group" aria-label="کنترل‌های اتاق">
             <button type="button" id="microphone" class="icon-button mic-toggle" aria-pressed="false" aria-label="روشن‌کردن میکروفون" title="روشن‌کردن میکروفون" disabled>
                 <?= cl_room_icon('mic-off') . cl_room_icon('mic') ?><span id="microphone-label">میکروفون</span>
             </button>
             <button type="button" id="enable-audio" class="icon-button audio-toggle" title="فعال‌کردن پخش صدا" hidden><?= cl_room_icon('sound') ?><span>پخش صدا</span></button>
             <span class="control-divider" aria-hidden="true"></span>
-            <button type="button" id="toggle-people" class="icon-button" aria-controls="people-panel" aria-expanded="true" title="نمایش یا بستن فهرست حاضران" disabled><?= cl_room_icon('people') ?><span>حاضران</span></button>
-            <button type="button" id="toggle-chat" class="icon-button" aria-controls="chat-panel" aria-expanded="true" title="نمایش یا بستن گفت‌وگو" disabled><?= cl_room_icon('chat') ?><span>گفت‌وگو</span></button>
+            <button type="button" id="toggle-people" class="icon-button" aria-label="حاضران" aria-controls="people-panel" aria-expanded="true" title="نمایش یا بستن فهرست حاضران" disabled><?= cl_room_icon('people') ?><span>حاضران</span></button>
+            <button type="button" id="toggle-chat" class="icon-button" aria-label="گفت‌وگوی کلاس" aria-controls="chat-panel" aria-expanded="true" title="نمایش یا بستن گفت‌وگو" disabled><?= cl_room_icon('chat') ?><span>گفت‌وگو</span></button>
         </div>
         <div class="room-indicators">
             <?php if (!$staff): ?>
-            <div class="attendance" aria-label="مدت حضور شما">
-                <?= cl_room_icon('clock') ?>
-                <div><span id="attendance-label">مدت حضور شما</span><bdi id="attendance-time" aria-describedby="attendance-label">00:00:00</bdi></div>
+            <div class="attendance" id="attendance" title="مدت حضور">
+                <?= cl_room_icon('clock') ?><bdi id="attendance-time" dir="ltr" aria-label="مدت حضور، ساعت و دقیقه">00:00</bdi>
             </div>
             <?php endif; ?>
-            <span class="status-chip" id="status" role="status">اتاق انتظار</span>
-            <button type="button" id="leave" class="icon-button leave-button" aria-label="خروج از اتاق" title="خروج از اتاق" hidden><?= cl_room_icon('exit') ?><span>خروج</span></button>
+            <span class="status-dot" id="status-dot" title="اتاق انتظار"><span class="sr-only" id="status" role="status">اتاق انتظار</span></span>
+            <a id="leave" class="icon-button leave-button" href="<?= cl_html(cl_site_href($panel)) ?>" aria-label="خروج از اتاق" title="خروج از اتاق و بازگشت به پنل"><?= cl_room_icon('exit') ?><span>خروج</span></a>
+            <?php if ($staff): ?>
+            <button type="button" id="close" class="icon-button finish-button" title="پایان کلاس برای همه" aria-label="پایان کلاس برای همه" hidden><?= cl_room_icon('finish') ?></button>
+            <?php endif; ?>
         </div>
     </header>
-    <section class="session-strip" aria-labelledby="lecture-title">
-        <div class="session-heading">
-            <span class="session-icon"><?= cl_room_icon('board') ?></span>
-            <div class="session-name"><h2 id="lecture-title">جلسهٔ کلاس</h2><p><?= cl_html($actor['name']) ?> <span aria-hidden="true">·</span> <a href="<?= cl_html(cl_site_href($panel)) ?>">بازگشت به پنل</a></p></div>
-            <span id="practice-badge" class="practice-chip" hidden>آزمایشی</span>
-        </div>
-        <?php if ($staff): ?>
-        <div class="staff-actions actions">
-            <div id="staff-start" class="actions">
-                <label for="slot" class="sr-only">زنگ‌های امروز · وقت تهران</label>
-                <select id="slot"><option value="">انتخاب زنگ امروز</option>
-                    <?php foreach ($choices as $choice): ?><option value="<?= cl_html((string)$choice['id']) ?>"><?= cl_html($choice['label']) ?></option><?php endforeach; ?>
-                </select>
-                <button type="button" id="open" disabled>شروع زنگ</button>
-            </div>
-            <button type="button" id="close" class="danger-outline" hidden>پایان کلاس برای همه</button>
-        </div>
-        <?php endif; ?>
-    </section>
+    <?php if ($staff): ?>
+    <div class="staff-actions actions" id="staff-start">
+        <label for="slot" class="sr-only">انتخاب زنگ</label>
+        <select id="slot"><option value="">انتخاب زنگ امروز</option>
+            <?php foreach ($choices as $choice): ?><option value="<?= cl_html((string)$choice['id']) ?>"><?= cl_html($choice['label']) ?></option><?php endforeach; ?>
+        </select>
+        <button type="button" id="open" disabled>شروع زنگ</button>
+    </div>
+    <?php endif; ?>
     <p id="notice" role="status" class="notice" hidden></p>
     <p id="mic-feedback" role="status" class="notice" hidden></p>
     <section class="waiting board-grid" id="waiting" aria-labelledby="wait-title">
         <div class="waiting-copy">
             <span class="waiting-icon"><?= cl_room_icon('clock') ?></span>
-            <p class="eyebrow">اتاق انتظار</p>
             <h2 id="wait-title"><?= $staff ? 'در انتظار شروع زنگ' : 'در انتظار ورود دبیر یا مسئول مدرسه' ?></h2>
             <p id="wait-message"><?= $staff ? 'در حال بررسی زنگ‌های امروز…' : 'وقتی اتصال دبیر تأیید شود، خودکار وارد کلاس می‌شوی.' ?></p>
             <p class="wait-hint"><?= cl_room_icon('clock') ?> زمان انتظار در تایمر حضور حساب نمی‌شود.</p>
@@ -103,11 +88,11 @@ function cl_room_icon(string $name): string
                 <?php if ($staff): ?>
                 <div class="ink-tools" role="group" aria-label="ابزار نوشتن">
                     <button type="button" class="icon-button" id="pen" aria-pressed="true" title="قلم" aria-label="قلم"><?= cl_room_icon('pen') ?></button>
-                    <button type="button" class="icon-button" id="eraser" aria-pressed="false" title="پاک‌کن" aria-label="پاک‌کن"><?= cl_room_icon('erase') ?></button>
+                    <button type="button" class="icon-button" id="eraser" aria-pressed="false" title="پاک‌کن خط کامل" aria-label="پاک‌کن خط کامل"><?= cl_room_icon('erase') ?></button>
                     <button type="button" class="icon-button" id="pan" aria-pressed="false" title="پیمایش تخته" aria-label="پیمایش تخته"><?= cl_room_icon('pan') ?></button>
                     <label class="color-control" title="رنگ قلم"><span class="sr-only">رنگ قلم</span><input type="color" id="ink-color" value="#278bc7"></label>
                     <label class="size-control" title="ضخامت قلم"><span class="sr-only">ضخامت قلم</span><input type="range" id="ink-size" min="1" max="36" value="4"></label>
-                    <button type="button" class="icon-button" id="board-clear" title="پاک‌کردن نوشته‌های این صفحه" aria-label="پاک‌کردن نوشته‌های این صفحه"><?= cl_room_icon('trash') ?></button>
+                    <button type="button" class="icon-button" id="board-clear" title="پاک‌کردن همهٔ نوشته‌های این صفحه" aria-label="پاک‌کردن همهٔ نوشته‌های این صفحه"><?= cl_room_icon('trash') ?></button>
                 </div>
                 <div class="page-tools" role="group" aria-label="صفحه‌های فایل">
                     <button type="button" class="icon-button" id="page-prev" aria-label="صفحهٔ قبلی" title="صفحهٔ قبلی" disabled><?= cl_room_icon('prev') ?></button>
@@ -133,6 +118,7 @@ function cl_room_icon(string $name): string
                     <div class="board-bed"><div id="board-stage" class="board-stage<?= $staff ? ' editable' : '' ?>">
                         <canvas id="board-paper" aria-label="صفحهٔ فایل یا تصویر تخته"></canvas>
                         <canvas id="board-ink" aria-label="نوشته‌های روی تخته"></canvas>
+                        <?php if ($staff): ?><span id="eraser-tip" class="eraser-tip" aria-hidden="true" hidden></span><?php endif; ?>
                     </div></div>
                 </div>
             </div>
