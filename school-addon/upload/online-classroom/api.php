@@ -42,6 +42,7 @@ cl_json_reply(static function (): array {
             $idle = static function (bool $ready) use ($s, $cfg, $class, $actor): array {
                 $result = ['phase'=>'idle', 'ready'=>$ready];
                 if (cl_is_staff($actor)) $result['schedule'] = cl_staff_schedule($s, $cfg, $class, $actor, time());
+                elseif (cl_friday_window($cfg, time())['students'] ?? false) $result['practiceAvailable'] = true;
                 return $result;
             };
             if (!$lesson) return $idle(true);
@@ -69,6 +70,8 @@ cl_json_reply(static function (): array {
                 'period'=>$lesson['period'], 'subject'=>$lesson['subject'], 'slot'=>$lesson['slot'], 'bell'=>$lesson['bell'] ?? null, 'admitted'=>$allowed,
                 'joinable'=>$ready && !$expired && cl_joinable($lesson, $actor, $now),
                 'resumable'=>$ready && !$expired && $lesson['phase'] === 'paused' && $lesson['room'] === null];
+            // A paused or reconnecting pupil can still see their own last verified total, not the room activity.
+            if ($actor['role'] === 'student') $result['attendance'] = $lesson['seconds'][$actor['identity']] ?? 0;
             if ($allowed) $result += ['seconds'=>$lesson['seconds']] + cl_activity_sync($s, $lesson, $actor, $body);
             return $result;
         }

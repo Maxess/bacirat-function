@@ -49,13 +49,18 @@ function cl_is_friday_test(array $lesson): bool
 
 function cl_lesson_expired(array $cfg, array $lesson, int $now): bool
 {
-    return $now >= $lesson['deadline'] || $lesson['date'] !== cl_day($now)->format('Y-m-d')
-        || (cl_is_friday_test($lesson) && (cl_friday_window($cfg, $now)['id'] ?? null) !== $lesson['test']);
+    if ($now >= $lesson['deadline'] || $lesson['date'] !== cl_day($now)->format('Y-m-d')) return true;
+    if (!cl_is_friday_test($lesson)) return false;
+    $grant = cl_friday_window($cfg, $now);
+    return ($grant['id'] ?? null) !== $lesson['test'] || $grant['students'] !== (($lesson['test_students'] ?? false) === true);
 }
 
 function cl_can_lesson(array $lesson, array $actor): bool
 {
-    if (cl_is_friday_test($lesson)) return cl_is_staff($actor);
+    if (cl_is_friday_test($lesson)) {
+        return cl_is_staff($actor) || (($lesson['test_students'] ?? false) === true
+            && $actor['year'] === $lesson['year'] && $actor['class'] === cl_class_key($lesson['class_name']));
+    }
     return !cl_is_staff($actor) || cl_assigned($actor, $lesson['year'], $lesson['teacher']);
 }
 
@@ -188,7 +193,10 @@ function cl_open_lesson(ClassroomStore $s, array $ctx, array $cfg, array $class,
             'slot'=>$slot['id'],'period'=>$slot['period'],'subject'=>$slot['subject'],'teacher'=>$slot['teacher'],'teacher_name'=>$teacherName,
             'created'=>$now,'deadline'=>$window['end'] ?? $now + CL_MAX_LESSON_SECONDS, 'bell'=>$window['label'] ?? null,
             'active_seconds'=>0,'started'=>null,'roster'=>$test ? [] : cl_roster($s->db, $class),'seconds'=>[], 'pulses'=>[], 'seen'=>[], 'staff'=>[], 'sample'=>0];
-        if ($test) $lesson['test'] = $test['id'];
+        if ($test) {
+            $lesson['test'] = $test['id'];
+            $lesson['test_students'] = $test['students'];
+        }
     }
     $lesson['room'] = $cfg['room_prefix'] . '-v4-c' . $class['id'] . '-' . bin2hex(random_bytes(12));
     $lesson['phase'] = 'starting';
@@ -366,7 +374,8 @@ function cl_reconcile(ClassroomStore $s, array $cfg, ?array $class, array $lesso
         $account = cl_school_account($s->db, $role, cl_id($pk), $lesson['year']);
         if ($account && cl_can_lesson($lesson, $account)) $staff[$identity] = true;
     }
-    $roster = $test ? [] : cl_roster($s->db, $class, $students);
+    // Only observed, active classmates count in pupil practice; never copy a school's roster into a demo.
+    $roster = $test && ($lesson['test_students'] ?? false) !== true ? [] : cl_roster($s->db, $class, $students);
     if (count($observed) !== count($staff) + count($roster)) cl_pause($lesson);
     else {
         $lesson['roster'] += $roster;

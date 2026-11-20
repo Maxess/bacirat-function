@@ -2,8 +2,9 @@
 declare(strict_types=1);
 
 // School plugin runtime and gateway. Settings are exposed by the reviewed host overlay.
-const MPM_VERSION = '0.1.8';
+const MPM_VERSION = '0.1.9';
 const MPM_CLASSROOM_NATIVE = '0.4.0';
+const MPM_CLASSROOM_PUPIL_TRIAL = '0.4.3';
 const MPM_REGISTRY = 'mtg_plugin_registry';
 const MPM_SITE = 'mtg_plugin_site';
 const MPM_MAX_ZIP = 4 * 1024 * 1024;
@@ -18,6 +19,7 @@ const MPM_CATALOG = [
         '0.4.0' => '2b355724e133cb6f10c9312673863f5e2856a5fad53a5d5214a68632106876ac',
         '0.4.1' => '878c80c685ca427514a555b0c65a23fb524e4d232d0f9a9a3e2a652bb145a0c0',
         '0.4.2' => 'b3e0d73b6218752eb19c97a9a28fd36ee75792f4ea1ea72a44311cfc7d7e5b5c',
+        '0.4.3' => '7a6c7288400c9cd5f9ba563e2b845564785d689a181021b309455eafa52199e3',
     ],
 ];
 
@@ -962,7 +964,12 @@ function mpm_post(PDO $db, ?array $site, string $origin, string $csrf): string
                 $message = 'آزمایش لغو شد؛ ورود تازه به اتاق‌های آزمایشی بسته است.';
             } else {
                 $date = mpm_friday_date($_POST['friday_date'] ?? null);
-                if (($values['friday_test']['date'] ?? null) !== $date) $values['friday_test'] = ['date'=>$date,'id'=>bin2hex(random_bytes(16))];
+                $withStudents = version_compare($row['version'], MPM_CLASSROOM_PUPIL_TRIAL, '>=') && ($_POST['friday_students'] ?? null) === 'yes';
+                $previous = $values['friday_test'] ?? [];
+                if (($previous['date'] ?? null) !== $date || (($previous['students'] ?? false) === true) !== $withStudents) {
+                    $values['friday_test'] = ['date'=>$date,'id'=>bin2hex(random_bytes(16))];
+                    if ($withStudents) $values['friday_test']['students'] = true;
+                }
                 $message = 'آزمایش فقط برای جمعهٔ ' . $date . ' (به وقت تهران) ثبت شد.';
             }
             // Change admission under the same lock before attempting to retire any obsolete demo rooms.
@@ -1085,8 +1092,9 @@ function mpm_render_bell_hours(string $csrf, string $slug, array $hours, string 
         . '<button class="btn btn-primary" type="submit">ذخیرهٔ ساعت زنگ‌ها</button></fieldset></form>';
 }
 
-function mpm_render_friday_test(string $csrf, string $slug, ?string $date, bool $enabled, string $action): void
+function mpm_render_friday_test(string $csrf, string $slug, array $grant, bool $enabled, bool $supportsStudents, string $action): void
 {
+    $date = $grant['date'] ?? null;
     $today = mpm_today();
     $day = $today->format('Y-m-d');
     $upcoming = $today->format('w') === '5' ? $day : $today->modify('next Friday')->format('Y-m-d');
@@ -1094,12 +1102,17 @@ function mpm_render_friday_test(string $csrf, string $slug, ?string $date, bool 
     $status = $date === null ? 'تنظیم نشده' : ($date < $day ? 'پایان یافته' : (!$enabled ? 'در انتظار فعال‌سازی افزونه' : ($date === $day ? 'امروز فعال تا نیمه‌شب' : 'زمان‌بندی‌شده')));
     echo '<section class="card mb-3" id="mpm-friday-test"><h3>آزمایش ۲۴ ساعتهٔ جمعه</h3><p role="status">وضعیت: ' . $status
         . ($date !== null ? ' · <bdi>' . mpm_html($date) . '</bdi>' : '') . '</p>'
-        . '<p>فقط در تاریخ انتخابی، از ۰۰:۰۰ جمعه تا ۰۰:۰۰ شنبه به وقت تهران. همهٔ دبیران فعال می‌توانند در هر کلاس ثبت‌شدهٔ سال پیش‌فرض آزمایش را باز کنند یا به آن بپیوندند. دانش‌آموزان وارد آزمایش نمی‌شوند؛ برنامهٔ هفتگی، گزارش حضور و اعلان‌ها تغییر نمی‌کنند.</p>'
+        . '<p>فقط در تاریخ انتخابی، از ۰۰:۰۰ جمعه تا ۰۰:۰۰ شنبه به وقت تهران. همهٔ دبیران فعال می‌توانند در کلاس‌های سال پیش‌فرض آزمایش را باز کنند یا به آن بپیوندند. برنامهٔ هفتگی، گزارش رسمی و اعلان‌ها تغییری نمی‌کنند.</p>'
         . '<form class="mb-3" method="post" action="' . $action . '">';
     mpm_hidden($csrf, 'friday-test', $slug);
     echo '<label>تاریخ جمعه (میلادی) <input type="date" class="form-input" dir="ltr" required name="friday_date" min="' . $day
-        . '" value="' . mpm_html($selected) . '"></label> <button type="submit" class="btn btn-primary">ثبت آزمایش برای این جمعه</button></form>'
-        . '<form method="post" action="' . $action . '">';
+        . '" value="' . mpm_html($selected) . '"></label>';
+    if ($supportsStudents) {
+        echo '<p><label><input type="checkbox" name="friday_students" value="yes"' . (($grant['students'] ?? false) === true && $date === $selected ? ' checked' : '')
+            . '> اجازهٔ ورود آزمایشی به دانش‌آموزانِ همان کلاس</label></p>'
+            . '<p class="text-muted">دانش‌آموز تا اتصال دبیر در انتظار می‌ماند و تایمر تمرینی او گزارش رسمی نمی‌سازد. تغییر این گزینه، اتاق‌های آزمایشی قبلی را می‌بندد.</p>';
+    } else echo '<p class="text-muted">در این نسخه دانش‌آموز وارد آزمایش جمعه نمی‌شود.</p>';
+    echo '<button type="submit" class="btn btn-primary">ثبت آزمایش برای این جمعه</button></form><form method="post" action="' . $action . '">';
     mpm_hidden($csrf, 'friday-test', $slug);
     echo '<button type="submit" class="btn btn-outline" name="cancel_friday_test" value="yes">لغو آزمایش</button></form></section>';
 }
@@ -1171,7 +1184,8 @@ function mpm_render_settings(PDO $db, ?array $site, string $csrf, string $notice
         }
         if ($manifest && $compatible && mpm_has_setting($manifest, 'bell_hours', 'bell-hours')) mpm_render_bell_hours($csrf, $slug, $values['bell_hours'] ?? [], $action);
         if ($manifest && $compatible && mpm_has_setting($manifest, 'friday_test', 'friday-test')) {
-            mpm_render_friday_test($csrf, $slug, $values['friday_test']['date'] ?? null, $row['state'] === 'enabled', $action);
+            mpm_render_friday_test($csrf, $slug, $values['friday_test'] ?? [], $row['state'] === 'enabled',
+                version_compare($row['version'], MPM_CLASSROOM_PUPIL_TRIAL, '>='), $action);
         }
         if (!$compatible && !$pending) echo '<p>این نسخهٔ قدیمی را در حالت غیرفعال به بستهٔ یکپارچهٔ کلاس ارتقا بده.</p>';
         if ($compatible && $manifest) {

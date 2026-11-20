@@ -65,6 +65,7 @@ try {
     $native = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.0.zip';
     $timed = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.1.zip';
     $friday = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.2.zip';
+    $studio = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.3.zip';
     $menus = static fn() => [file_get_contents($root . '/other-settings.php'), file_get_contents($root . '/includes/header.php')];
     $managerMenus = [$other, $header];
     expect($menus() === $managerMenus, 'initialization does not rewrite the host');
@@ -268,7 +269,27 @@ try {
     submit($db,$site,'friday-test',['cancel_friday_test'=>'yes']);
     expect(mpm_settings($db,$dir,$row) === $nativeSettings+['bell_hours'=>$hours], 'early cancellation preserves all normal settings');
     submit($db,$site,'friday-test',['friday_date'=>$date]);
-    expect(mpm_settings($db,$dir,$row)['friday_test']['id']!==$consent['id'], 're-enabling cannot restore a canceled room');
+    $staffGrant = mpm_settings($db,$dir,$row)['friday_test'];
+    expect($staffGrant['id']!==$consent['id'], 're-enabling cannot restore a canceled room');
+    submit($db,$site,'friday-test',['friday_date'=>$date,'friday_students'=>'yes']);
+    expect(mpm_settings($db,$dir,$row)['friday_test']===$staffGrant, 'older classroom cannot record a grant it does not enforce');
+    submit($db,$site,'disable');
+    $saved = mpm_owned_row($db,$row)['settings'];
+    expect(mpm_install($db,$dir,$studio), 'upgrade to the studio classroom without losing existing policy');
+    $row = mpm_row($db,$slug);
+    expect($row['version']==='0.4.3' && mpm_check_store($db,$row)===$store && mpm_owned_row($db,$row)['settings']===$saved,
+        '0.4.2 to 0.4.3 preserves consent and ordinary data; pupils are still off');
+    submit($db,$site,'enable');
+    ob_start(); mpm_render_settings($db,$site,'fixture','', 'school-classroom-settings.php?embedded=1'); $studioUi=ob_get_clean();
+    expect(str_contains($studioUi,'name="friday_students" value="yes">'), 'pupil checkbox offered but unchecked');
+    submit($db,$site,'friday-test',['friday_date'=>$date,'friday_students'=>'yes']);
+    $pupilGrant = mpm_settings($db,$dir,$row)['friday_test'];
+    expect($pupilGrant['students'] === true && $pupilGrant['date'] === $date && $pupilGrant['id'] !== $staffGrant['id'], 'pupil opt-in mints a new grant');
+    submit($db,$site,'friday-test',['friday_date'=>$date,'friday_students'=>'yes']);
+    expect(mpm_settings($db,$dir,$row)['friday_test']===$pupilGrant, 'saving the same pupil policy does not disrupt a test');
+    submit($db,$site,'friday-test',['friday_date'=>$date]);
+    $staffOnly = mpm_settings($db,$dir,$row)['friday_test'];
+    expect(!isset($staffOnly['students']) && $staffOnly['id'] !== $pupilGrant['id'], 'turning off pupils invalidates their room grant');
     submit($db,$site,'friday-test',['cancel_friday_test'=>'yes']);
     foreach (['student','teacher','admin','deputy'] as $role) expect(isset(mpm_menu_items($db, $dir, $role)[$slug]), 'upgraded release shown in every menu');
     $_SESSION = ['student_id' => 1];

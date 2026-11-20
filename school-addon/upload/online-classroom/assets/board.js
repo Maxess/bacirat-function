@@ -2,13 +2,17 @@
     'use strict';
     window.ClassroomBoard = (root, options) => {
         const el = id => document.getElementById(id);
-        const card = el('board'), stage = el('board-stage');
+        const card = el('board'), stage = el('board-stage'), viewport = el('board-scroll');
         const paper = el('board-paper'), ink = el('board-ink');
         const context = ink.getContext('2d');
         const background = paper.getContext('2d', {alpha:false});
-        const zoom = el('board-zoom');
+        const zoom = el('board-zoom'), zoomOut = el('board-zoom-out'), zoomIn = el('board-zoom-in');
+        const zoomSteps = [.75, 1, 1.25, 1.5, 2, 2.5];
+        const percentage = new Intl.NumberFormat('fa-IR', {style:'percent'});
+        let zoomLevel = 1;
         let data = null, transport = null, cursor = 0, ops = [], draft = [], stroke = null, pointer = null;
         let tool = 'pen', busy = false, renderVersion = 0, documentVersion = 0, docKey = '', docsKey = '';
+        let drag = null;
         let library, job, rendering, imageLoad, imageFile;
         const staff = root.dataset.moderator === 'yes';
         const url = value => new URL(value, document.baseURI).href;
@@ -51,12 +55,52 @@
             for (const [key,val] of Object.entries({...scope, doc:doc.id})) link.searchParams.set(key,val);
             return link.href;
         }
+        function fitView() {
+            const w = viewport.clientWidth, h = viewport.clientHeight;
+            if (w && h) {
+                stage.style.width = `${Math.max(1, Math.floor(Math.min(w, h * paper.width / paper.height) * zoomSteps[zoomLevel]))}px`;
+                dragState();
+            }
+        }
+        function canDrag() {
+            return (!staff || tool === 'pan') && (viewport.scrollWidth > viewport.clientWidth || viewport.scrollHeight > viewport.clientHeight);
+        }
+        function dragState() { viewport.dataset.drag = drag ? 'moving' : canDrag() ? 'ready' : 'no'; }
+        viewport.addEventListener('pointerdown', event => {
+            if (event.pointerType !== 'mouse' || event.button !== 0 || !canDrag()) return;
+            event.preventDefault();
+            drag = {id:event.pointerId, x:event.clientX + viewport.scrollLeft, y:event.clientY + viewport.scrollTop};
+            viewport.setPointerCapture(event.pointerId);
+            dragState();
+        });
+        viewport.addEventListener('pointermove', event => {
+            if (drag?.id !== event.pointerId) return;
+            viewport.scrollLeft = drag.x - event.clientX;
+            viewport.scrollTop = drag.y - event.clientY;
+        });
+        for (const type of ['pointerup','pointercancel','lostpointercapture']) {
+            viewport.addEventListener(type, event => { if (drag?.id === event.pointerId) { drag = null; dragState(); } });
+        }
+        function setZoom(level, keepCenter = true) {
+            const x = (viewport.scrollLeft + viewport.clientWidth / 2) / Math.max(1, viewport.scrollWidth);
+            const y = (viewport.scrollTop + viewport.clientHeight / 2) / Math.max(1, viewport.scrollHeight);
+            zoomLevel = Math.max(0, Math.min(zoomSteps.length - 1, level));
+            zoom.textContent = percentage.format(zoomSteps[zoomLevel]);
+            zoomOut.disabled = zoomLevel === 0;
+            zoomIn.disabled = zoomLevel === zoomSteps.length - 1;
+            fitView();
+            if (keepCenter) {
+                viewport.scrollLeft = x * viewport.scrollWidth - viewport.clientWidth / 2;
+                viewport.scrollTop = y * viewport.scrollHeight - viewport.clientHeight / 2;
+            }
+        }
         function fit(width, height) {
             if (!(width > 0 && height > 0 && Number.isFinite(width/height))) throw new Error('Invalid board size');
             const scale = Math.min(widthLimit / Math.max(width,height), Math.sqrt(3000000 / (width*height)));
             ink.width = paper.width = Math.max(1, Math.ceil(width * scale));
             ink.height = paper.height = Math.max(1, Math.ceil(height * scale));
             stage.style.aspectRatio = `${paper.width} / ${paper.height}`;
+            fitView();
             background.fillStyle = '#fff';
             background.fillRect(0,0,paper.width,paper.height);
             redraw();
@@ -86,7 +130,8 @@
         }
         function redraw() {
             context.clearRect(0,0,ink.width,ink.height);
-            for (const op of [...ops,...draft]) paint(op);
+            for (const op of ops) paint(op);
+            for (const op of draft) paint(op);
             if (stroke) paint(stroke);
         }
         function pointerEnd() {
@@ -99,7 +144,8 @@
             else cancelRender();
             const ticket = renderVersion;
             const docTicket = documentVersion;
-            if (!view.doc) { fit(1600,1000); message(); return; }
+            stage.classList.toggle('has-document', !!view.doc);
+            if (!view.doc) { message(); return; }
             const doc = view.doc;
             docKey = doc.id;
             message('در حال نمایش فایل تخته…');
@@ -174,8 +220,10 @@
                 // Do not briefly show a page from the previous document during parsing.
                 fit(1600,1000);
                 show(next,scope,reloadDoc);
-            } else if (resetPage || next.ops.length) redraw();
-            el('board-caption').textContent = next.doc ? `${next.doc.name} · صفحهٔ ${next.page} از ${next.doc.pages}` : 'تختهٔ سفید';
+            } else if (resetPage || (next.ops.length && (draft.length || stroke))) redraw();
+            else for (const op of next.ops) paint(op);
+            const caption = next.doc ? `${next.doc.name} · صفحهٔ ${next.page} از ${next.doc.pages}` : 'تختهٔ آزاد · همگام';
+            if (el('board-caption').textContent !== caption) el('board-caption').textContent = caption;
             if (staff) {
                 const stamp = next.docs.map(d => d.id).join(',');
                 const select = el('board-doc');
@@ -194,21 +242,37 @@
         function reset() {
             data = transport = null;
             cursor = 0; ops = []; draft = []; pointerEnd(); clearDocument();
+            stage.classList.remove('has-document');
             fit(1600,1000);
+            setZoom(1, false);
             if (card.classList.contains('expanded')) setExpanded(false);
             el('board-caption').textContent = ''; message(); toolState();
         }
         function setExpanded(expand) {
             card.classList.toggle('expanded',expand);
+            for (const node of root.querySelectorAll('.room-top, .session-strip, .room-side')) node.inert = expand;
             const btn = el('board-expand');
             btn.setAttribute('aria-pressed',String(expand));
-            btn.textContent = expand ? 'بازگشت به کلاس' : 'بزرگ‌کردن تخته';
+            btn.setAttribute('aria-label', expand ? 'بازگشت به کلاس' : 'نمای بزرگ تخته');
+            btn.title = expand ? 'بازگشت به کلاس' : 'نمای بزرگ تخته';
+            fitView();
+            if (expand) btn.focus({preventScroll:true});
         }
         el('board-expand').addEventListener('click', () => setExpanded(!card.classList.contains('expanded')));
         card.addEventListener('keydown', e => { if (e.key === 'Escape') setExpanded(false); });
-        zoom.addEventListener('change', () => { stage.style.width = `${Number(zoom.value)*100}%`; });
+        zoom.addEventListener('click', () => setZoom(1));
+        zoomOut.addEventListener('click', () => setZoom(zoomLevel - 1));
+        zoomIn.addEventListener('click', () => setZoom(zoomLevel + 1));
+        if ('ResizeObserver' in window) new ResizeObserver(fitView).observe(viewport);
+        else window.addEventListener('resize', fitView);
+        setZoom(1, false);
 
         if (staff) {
+            const files = el('board-files'), toggle = el('toggle-files');
+            toggle.addEventListener('click', () => {
+                files.hidden = !files.hidden;
+                toggle.setAttribute('aria-expanded', String(!files.hidden));
+            });
             let queue = Promise.resolve();
             function setTool(value) {
                 tool = value;
@@ -216,6 +280,7 @@
                 el('eraser').setAttribute('aria-pressed',String(value==='erase'));
                 el('pan').setAttribute('aria-pressed',String(value==='pan'));
                 stage.classList.toggle('pan',value==='pan');
+                dragState();
             }
             function xy(event) {
                 const r = ink.getBoundingClientRect();

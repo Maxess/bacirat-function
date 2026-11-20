@@ -358,6 +358,39 @@ denied(409,fn()=>cl_ticket($trial,$later,$teacher,$bind($later,'PA_Teacher'),$sa
 must(cl_reconcile($s,$trial,$first,$later,$sat,$rpc) === null && !isset($sfus[$later['room']]), 'midnight ends the demo');
 cl_event_apply($s,$cfg,['event'=>'participant_left','room'=>['name'=>$parallel['room']]],$fri+5,$rpc);
 must(!cl_active($s,20) && !isset($sfus[$parallel['room']]), 'revoking Friday also closes an in-flight practice via signed event reconciliation');
+// Opt-in with pupils: same authenticated membership, real presence timing, ephemeral results.
+$withPupils = array_replace($trial, ['friday_test'=>['date'=>'2026-11-20','id'=>str_repeat('f',32),'students'=>true]]);
+$start = $fri+100;
+$pupilDemo = cl_open_lesson($s,$ctx,$withPupils,$first,$priorYear,['slot'=>CL_FRIDAY_SLOT],$start,$rpc);
+$room = $pupilDemo['room'];
+$wrongClass = cl_school_user($db,['student_id'=>2],$year);
+must($pupilDemo['roster'] === [] && cl_can_lesson($pupilDemo,$student) && !cl_can_lesson($pupilDemo,$wrongClass), 'opt-in only authorizes own class; do not copy the roster');
+$staffWire = ['teacher-4'=>'PA_PilotStaff'];
+$wire($room,$staffWire);
+$pulse(10,$priorYear,'PA_PilotStaff',$start+1);
+$unconfirmed = cl_reconcile($s,$withPupils,$first,cl_active($s,10),$start+1,$rpc);
+denied(409,fn()=>cl_ticket($withPupils,$unconfirmed,$student,$bind($unconfirmed,'PA_Student'),$start+1));
+cl_event_apply($s,$withPupils,['event'=>'participant_joined','room'=>['name'=>$room]],$start+2,$rpc);
+$practicing = cl_reconcile($s,$withPupils,$first,cl_active($s,10),$start+2,$rpc);
+denied(409,fn()=>cl_ticket($withPupils,$practicing,$wrongClass,$bind($practicing,'PA_OtherStudent'),$start+2));
+must(cl_ticket($withPupils,$practicing,$student,$bind($practicing,'PA_Student'),$start+2)['lesson'] === $pupilDemo['id'], 'pupil gets a ticket after confirmed staff arrives');
+$wire($room,$staffWire+$studentWire);
+$pulse(10,$student,'PA_Student',$start+4);
+$practicing = cl_reconcile($s,$withPupils,$first,cl_active($s,10),$start+5,$rpc);
+must($practicing['seconds'] === [] && array_keys($practicing['roster']) === ['student-1'], 'only consecutive verified intervals count');
+$practicing = cl_reconcile($s,$withPupils,$first,cl_active($s,10),$start+8,$rpc);
+must($practicing['seconds'] === ['student-1'=>3], 'same server-clock accounting used for pupil practice');
+cl_chat($s,cl_check_live($withPupils,$practicing,$student,$bind($practicing,'PA_Student'),$start+8),$student,'پیام تمرینی',$start+8);
+cl_event_apply($s,$withPupils,['event'=>'participant_left','room'=>['name'=>$room],'participant'=>['identity'=>'teacher-4','sid'=>'PA_PilotStaff']],$start+9,$rpc);
+$paused = cl_active($s,10);
+must($paused['phase']==='paused' && $paused['room'] === null && !isset($sfus[$room]) && $paused['seconds'] === ['student-1'=>3], 'last teacher leaves: pupil time freezes and transport closes');
+denied(409,fn()=>cl_ticket($withPupils,$paused,$student,$bind($practicing,'PA_Student'),$start+10));
+$resumed = cl_open_lesson($s,$ctx,$withPupils,$first,$teacher,['slot'=>CL_FRIDAY_SLOT],$start+120,$rpc);
+must($resumed['id'] === $paused['id'] && $resumed['room'] !== $room && $resumed['seconds'] === ['student-1'=>3], 'practice resumes with the same timer after the uncounted wait');
+$withoutPupils = $withPupils;
+unset($withoutPupils['friday_test']['students']);
+must(cl_reconcile($s,$withoutPupils,$first,$resumed,$start+121,$rpc) === null && !$s->get('lesson',$resumed['id'])
+    && $s->rows('chat:'.$resumed['id'],4) === [], 'revoking pupil opt-in closes and clears test activity even if the grant ID stayed the same');
 must($s->rows('reports',100) === $normalReportRows && $s->rows('host-pending',100) === $pendingRows
     && $db->query('SELECT * FROM class_schedules ORDER BY id')->fetchAll(PDO::FETCH_ASSOC) === $beforeSchedule,
     'the demo never publishes reports, sends notices or modifies school scheduling');

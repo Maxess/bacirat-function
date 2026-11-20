@@ -61,7 +61,8 @@ function cl_friday_window(array $cfg, int $now): ?array
     if (!is_array($plan) || !is_string($plan['id'] ?? null) || !preg_match('/^[a-f0-9]{32}$/D', $plan['id'])) return null;
     $day = cl_day($now);
     if ($day->format('w') !== '5' || $day->format('Y-m-d') !== ($plan['date'] ?? null)) return null;
-    return ['id'=>$plan['id'], 'end'=>$day->modify('tomorrow')->getTimestamp(), 'label'=>CL_FRIDAY_HOURS];
+    return ['id'=>$plan['id'], 'end'=>$day->modify('tomorrow')->getTimestamp(), 'label'=>CL_FRIDAY_HOURS,
+        'students'=>($plan['students'] ?? false) === true];
 }
 
 function cl_schedule_day(string $value): ?int

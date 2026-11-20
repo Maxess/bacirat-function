@@ -19,7 +19,9 @@ class Element {
 }
 function fixture(staff, autoSlot = 0) {
     const elements = Object.fromEntries(['classroom','status','lecture-title','notice','mic-feedback','people','live-panel','waiting','wait-title','wait-message',
-        'audio-tracks','chat-log','chat-form','chat-text','leave','microphone','enable-audio', ...(staff ? ['slot','open','close','clear-floor'] : ['join'])].map(id => [id,new Element(id)]));
+        'audio-tracks','chat-log','chat-form','chat-text','leave','microphone','enable-audio','microphone-label','practice-badge','people-count',
+        'toggle-people','toggle-chat','people-panel','chat-panel','chat-empty',
+        ...(staff ? ['slot','open','close','clear-floor','staff-start'] : ['join','attendance-label','attendance-time'])].map(id => [id,new Element(id)]));
     const date='2026-11-18';
     const choice = (id, label) => ({id, label});
     elements.classroom.dataset = { moderator:staff?'yes':'no',api:'/fixture',csrf:'session',class:'22',bellDate:date };
@@ -60,9 +62,11 @@ function fixture(staff, autoSlot = 0) {
             const input=JSON.parse(opt.body); assert.equal(input.class,22); requests.push(input);
             let reply={ok:true};
             if(input.action==='status'){
-                const phased = srv.phase==='idle' ? {phase:'idle'} : {phase:srv.phase,slot:srv.slot ?? 11, lesson:srv.lesson,epoch:srv.epoch,resumable:srv.resumable,subject:'ریاضی',period:'زنگ یک'};
+                const phased = ['idle','reserved'].includes(srv.phase) ? {phase:srv.phase} : {phase:srv.phase,slot:srv.slot ?? 11, lesson:srv.lesson,epoch:srv.epoch,resumable:srv.resumable,subject:'ریاضی',period:'زنگ یک'};
                 reply={...reply,ready:srv.ready,...phased,joinable:srv.phase==='live'||(staff&&srv.phase==='starting'&&srv.staffCanJoin)};
                 if (staff && srv.phase==='idle') reply.schedule=srv.schedule;
+                if (!staff && srv.phase==='idle' && srv.practiceAvailable) reply.practiceAvailable=true;
+                if (!staff && phased.lesson) reply.attendance=srv.attendance ?? srv.seconds[id] ?? 0;
                 if(input.sid && srv.phase==='live' && input.epoch===srv.epoch) Object.assign(reply,{admitted:true,seconds:srv.seconds,chat:[],board:{rev:1}});
             } else if(input.action==='open'||input.action==='ticket') {
                 if (input.action === 'open' && srv.phase !== 'live') srv.phase = 'starting';
@@ -81,7 +85,7 @@ function fixture(staff, autoSlot = 0) {
         if(next){scheduled.delete(next[0]);await next[1].fn();}
         await new Promise(resolve=>setImmediate(resolve));
     }
-    function controls(identity){return elements.people.children.find(row=>row.children[0].children[0].textContent.startsWith(identity)).querySelectorAll('button');}
+    function controls(identity){return elements.people.children.find(row=>row.children[0].children[1].textContent.startsWith(identity)).querySelectorAll('button');}
     return {elements,srv,requests,boards,time,change,controls,get room(){return lastRoom;}};
 }
 
@@ -98,6 +102,8 @@ test('student waits without media, auto enters and sees attendance only for pupi
     const first=f.room; f.srv.phase='paused'; await f.time();
     assert.equal(f.elements['live-panel'].hidden,true); assert.equal(first.state,'disconnected'); assert.equal(f.elements.microphone.disabled,true);
     assert.ok(f.boards.includes('reset'));
+    assert.equal(f.elements['attendance-time'].textContent, '00:00:09');
+    assert.match(f.elements['attendance-label'].textContent, /متوقف/);
     f.srv.epoch='epoch-B'; f.srv.phase='live'; await f.time(); await f.time();
     assert.notEqual(first,f.room); assert.equal(f.elements['live-panel'].hidden,false);
     assert.equal(f.elements.microphone.disabled,true); assert.deepEqual(f.room.localParticipant.micCalls,[]);
@@ -204,4 +210,33 @@ test('Friday test requires a click on both idle and running rooms and has no rep
     assert.equal(arriving.requests.filter(r=>r.action==='ticket').length,0);
     await arriving.elements.open.click();
     assert.equal(arriving.requests.find(r=>r.action==='open').slot,slot);
+});
+
+
+test('opted-in pupil waits for the teacher, sees a server-timed demo, and returns to waiting without adding time', async()=>{
+    const f = fixture(false);
+    f.srv.slot='friday-test'; f.srv.attendance=0; f.srv.practiceAvailable=true;
+    await f.time(); await f.time();
+    assert.equal(f.elements['attendance-time'].textContent,'00:00:00');
+    assert.match(f.elements['wait-message'].textContent,/آزمایش جمعه/);
+    f.srv.phase='starting'; await f.time();
+    assert.equal(f.requests.some(r=>r.action==='ticket'),false);
+    f.srv.phase='live'; f.srv.attendance=15;
+    await f.time(); await f.time();
+    assert.equal(f.elements['attendance-time'].textContent,'00:00:15');
+    assert.equal(f.elements['attendance-label'].textContent,'حضور آزمایشی');
+    assert.equal(f.elements['live-panel'].hidden,false);
+    assert.equal(f.elements['people-count'].textContent,'۳');
+    await f.elements['toggle-chat'].click();
+    assert.equal(f.elements['chat-panel'].hidden,true);
+    await f.elements['toggle-chat'].click();
+    assert.equal(f.elements['chat-panel'].hidden,false);
+    f.srv.phase='paused'; await f.time(); await f.time();
+    assert.equal(f.elements['attendance-time'].textContent,'00:00:15');
+    assert.equal(f.elements['waiting'].hidden,false);
+    assert.equal(f.elements['toggle-chat'].disabled,true);
+    f.srv.phase='live'; f.srv.epoch='epoch-B'; f.srv.attendance=18;
+    await f.time(); await f.time();
+    assert.equal(f.elements['attendance-time'].textContent,'00:00:18');
+    assert.equal(f.requests.filter(r=>r.action==='ticket').length,2);
 });

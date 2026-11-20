@@ -29,6 +29,9 @@
     const roomClass = Number(root.dataset.class);
     const api = (action, data = {}, options) => request(root, action, {class: roomClass, ...data}, options);
     const student = (id) => /^student-[1-9]\d{0,17}$/.test(id);
+    const persian = new Intl.NumberFormat('fa-IR');
+    const put = (node, text) => { if (node.textContent !== text) node.textContent = text; };
+    const panels = ['people', 'chat'];
     let active = null, connecting = false, busy = false, polling = false, needsRefresh = false, permanent = false, stopped = false;
     let wanted = true, autoStart = staff, optedIntoTest = false, state = {phase:'idle', ready:null}, chatCursor = 0, seconds = {}, admitted = false;
     let pollTimer, flow = 0, retryAt = 0, attempts = 0;
@@ -116,20 +119,25 @@
         if (!hasAccess()) {
             if (peopleKey) field.replaceChildren();
             peopleKey = ''; peopleTimers.clear();
+            put(el('people-count'), '۰');
             return;
         }
         const local = active.room.localParticipant;
         const people = [local, ...active.room.remoteParticipants.values()];
+        put(el('people-count'), persian.format(people.length));
         const key = JSON.stringify(people.map(p => [p.identity,p.name,maySpeak(p)]));
         if (key !== peopleKey) {
             peopleKey = key; peopleTimers.clear();
             field.replaceChildren(...people.map(person => {
                 const li = document.createElement('li');
                 const line = document.createElement('div'); line.className = 'person-line';
-                const name = document.createElement('span');
+                const name = document.createElement('span'); name.className = 'person-name';
+                const avatar = document.createElement('span'); avatar.className = 'person-avatar';
+                avatar.textContent = Array.from(String(person.name || person.identity))[0] || '·';
+                avatar.setAttribute('aria-hidden', 'true');
                 const allowed = maySpeak(person);
                 name.textContent = (person.name || person.identity) + (local === person ? ' (شما)' : '') + (allowed ? ' · نوبت صدا' : '');
-                line.append(name);
+                line.append(avatar, name);
                 if (student(person.identity)) {
                     const timer = document.createElement('bdi'); timer.className = 'duration';
                     timer.setAttribute('aria-label','مدت حضور ثبت‌شده');
@@ -148,7 +156,7 @@
                 return li;
             }));
         }
-        for (const [id, node] of peopleTimers) node.textContent = duration(seconds[id] || 0);
+        for (const [id, node] of peopleTimers) put(node, duration(seconds[id] || 0));
         for (const btn of field.querySelectorAll('button')) btn.disabled = busy;
     }
 
@@ -167,7 +175,7 @@
             node.value = String(id); node.textContent = label;
             return node;
         };
-        field.replaceChildren(option('', 'انتخاب زنگ'), ...choices.map(({id, label}) => option(id, label)));
+        field.replaceChildren(option('', 'انتخاب زنگ امروز'), ...choices.map(({id, label}) => option(id, label)));
         field.value = choices.some(({id}) => String(id) === value) ? value : choices.length === 1 ? String(choices[0].id) : '';
     }
     function bellMessage() {
@@ -186,13 +194,25 @@
         const connectingNow = connecting || (!!active && !live);
         el('live-panel').hidden = !live;
         el('waiting').hidden = live;
-        el('status').textContent = live ? 'کلاس در جریان است' : 'اتاق انتظار';
-        el('lecture-title').textContent = state.subject ? [state.subject, state.period, state.bell].filter(Boolean).join(' · ') : el('lecture-title').dataset.original;
+        root.dataset.live = live ? 'yes' : 'no';
+        put(el('status'), live ? 'در جریان' : connectingNow ? 'در حال اتصال' : 'اتاق انتظار');
+        const practice = state.slot === fridaySlot;
+        el('practice-badge').hidden = !practice && !state.practiceAvailable;
+        put(el('lecture-title'), state.subject
+            ? [state.subject, practice ? null : state.period, state.bell].filter(Boolean).join(' · ')
+            : el('lecture-title').dataset.original);
+        for (const id of panels) el(`toggle-${id}`).disabled = !live;
+        if (!staff) {
+            put(el('attendance-time'), duration(state.attendance));
+            const label = practice ? 'حضور آزمایشی' : 'مدت حضور شما';
+            put(el('attendance-label'), live ? label : `${label} · متوقف`);
+        }
         el('leave').hidden = staff ? (!wanted && !active) : !wanted;
         if (staff) {
             const slot = el('slot');
             const currentSlot = state.slot || 0;
             slot.disabled = !!currentSlot || busy;
+            el('staff-start').hidden = live;
             el('open').disabled = busy || !!active || connecting || state.ready === null || permanent || phase === 'closing'
                 || phase === 'reserved' || (!currentSlot && !slot.value) || (phase === 'paused' && !state.resumable);
             const test = (currentSlot || slot.value) === fridaySlot;
@@ -202,20 +222,28 @@
             el('close').disabled = busy || phase === 'closing';
             el('clear-floor').disabled = !live || busy;
         } else el('join').hidden = wanted || permanent;
-        el('wait-title').textContent = phase === 'paused' ? 'کلاس موقتاً متوقف است' : phase === 'closing' ? 'کلاس در حال پایان است'
-            : connectingNow ? 'در حال تأیید ورود…' : staff ? 'در انتظار شروع زنگ' : 'در انتظار ورود دبیر یا مسئول مدرسه';
-        el('wait-message').textContent = permanent ? 'برای دسترسی دوباره صفحه را از پنل مدرسه باز کنید.'
+        put(el('wait-title'), phase === 'paused' ? 'کلاس موقتاً متوقف است' : phase === 'closing' ? 'کلاس در حال پایان است'
+            : connectingNow ? 'در حال تأیید ورود…' : staff ? 'در انتظار شروع زنگ' : 'در انتظار ورود دبیر یا مسئول مدرسه');
+        put(el('wait-message'), permanent ? 'برای دسترسی دوباره صفحه را از پنل مدرسه باز کن.'
             : phase === 'reserved' ? (staff ? 'اتاق این کلاس در اختیار جلسهٔ دیگری است.' : 'اتاق این کلاس هنوز برای ورود دانش‌آموز باز نیست.')
             : state.ready === false ? 'ارتباط با سرور رسانه برقرار نیست. دسترسی موقتاً بسته است.'
             : state.callbackMissing ? 'رویداد اتصال از LiveKit تأیید نشده است. مدیر مدرسه نشانی وب‌هوک در تنظیمات افزونه را بررسی کند.'
-            : phase === 'paused' ? 'تا بازگشت دبیر یا مسئول مجاز منتظر بمانید؛ شمارش حضور متوقف است.'
+            : phase === 'paused' ? 'با خروج آخرین مسئول، تایمر حضور متوقف می‌شود. بعد از بازگشت مسئول و تأیید اتصال، کلاس ادامه پیدا می‌کند.'
             : staff ? bellMessage()
-            : 'شما وارد اتاق انتظار شده‌اید. نیازی به اقدامی نیست؛ لطفاً تا ورود دبیر، مدیر یا ناظم منتظر بمانید.';
+            : !wanted ? 'برای ورود دوباره، «بازگشت به اتاق انتظار» را بزن.'
+            : state.practiceAvailable ? 'آزمایش جمعه برای کلاس تو مجاز است. پس از تأیید اتصال دبیر، خودکار وارد می‌شوی.'
+            : 'وقتی اتصال دبیر یا مسئول مدرسه تأیید شود، خودکار وارد کلاس می‌شوی.');
         const local = active?.room.localParticipant;
         el('microphone').disabled = !live || busy || !maySpeak(local);
-        el('microphone').textContent = local?.isMicrophoneEnabled ? 'خاموش‌کردن میکروفون' : 'روشن‌کردن میکروفون';
+        const micOn = live && !!local?.isMicrophoneEnabled;
+        const micAction = micOn ? 'خاموش‌کردن میکروفون' : 'روشن‌کردن میکروفون';
+        el('microphone').setAttribute('aria-pressed', String(micOn));
+        el('microphone').setAttribute('aria-label', micAction);
+        el('microphone').title = live && !maySpeak(local) ? 'برای روشن‌کردن میکروفون از دبیر نوبت بگیر' : micAction;
+        put(el('microphone-label'), micOn ? 'صدای من روشن' : 'میکروفون');
         el('enable-audio').hidden = !live || active.room.canPlaybackAudio;
         el('chat-text').disabled = !live || busy;
+        el('chat-empty').hidden = chatCursor > 0;
         for (const audio of el('audio-tracks').children) audio.muted = !live;
         renderPeople();
     }
@@ -252,6 +280,7 @@
             chatCursor = row.n;
         }
         while (log.children.length > 120) log.firstElementChild.remove();
+        el('chat-empty').hidden = chatCursor > 0;
         if (end) log.scrollTop = log.scrollHeight;
     }
 
@@ -359,7 +388,7 @@
                 needsRefresh ||= !!(result.chatMore || result.board?.more);
             } else clearActivity();
             if (!active && !connecting && wanted && state.ready && Date.now() >= retryAt
-                && (state.slot !== fridaySlot || optedIntoTest)) {
+                && (!staff || state.slot !== fridaySlot || optedIntoTest)) {
                 if (state.joinable) {
                     const info = {lesson:state.lesson,epoch:state.epoch};
                     enter(() => api('ticket',info));
@@ -392,6 +421,15 @@
         pollTimer = setTimeout(poll, 30);
     }
 
+    for (const id of panels) {
+        const button = el(`toggle-${id}`);
+        const panel = el(`${id}-panel`);
+        button.addEventListener('click', () => {
+            panel.hidden = !panel.hidden;
+            button.setAttribute('aria-expanded', String(!panel.hidden));
+            if (!panel.hidden) panel.scrollIntoView?.({block:'nearest'});
+        });
+    }
     el('microphone').addEventListener('click', () => run(async () => {
         const link = active;
         const local = link?.room.localParticipant;
