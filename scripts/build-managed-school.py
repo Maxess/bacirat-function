@@ -16,8 +16,8 @@ HOST = ROOT / 'plugin-manager'
 SRC = ROOT / 'school-addon/upload/online-classroom'
 LEGACY = ARTIFACTS / 'school-classroom-pilot-v0.1.0.zip'
 LEGACY_SHA = 'bebc35a02f57346880373a034ee493b757a8017a12812a133ab957358d9de161'
-VERSION = '0.4.0'
-MANAGER_VERSION = '0.1.6'
+VERSION = '0.4.1'
+MANAGER_VERSION = '0.1.7'
 PDF_VERSION = '6.5.438'
 PDF_SHA = 'be0f0fc35c7e0052b2e00303be1b9697970e615f1debdf14a0400da0516173bf61a970e7650aa7397a31c371c6f74ed61ce8352583af2e13fbe7a6e875d171a4'
 PDF_URL = f'https://registry.npmjs.org/pdfjs-dist/-/pdfjs-dist-{PDF_VERSION}.tgz'
@@ -72,7 +72,7 @@ def plugin_entries(pdf_archive):
         'report_menus': {role: 'حضور و غیاب کلاس مجازی' for role in ('teacher', 'admin', 'deputy')},
         'routes': {'page': 'index.php', 'api': 'api.php', 'content': 'content.php', 'events': 'events.php', 'job': 'job.php'},
         'store': True, 'pdf_resources': 'assets/pdf-resources.zip',
-        'preserve_settings_from': ['0.2.0', '0.2.1', '0.2.2', '0.2.3', '0.3.0'],
+        'preserve_settings_from': ['0.2.0', '0.2.1', '0.2.2', '0.2.3', '0.3.0', '0.4.0'],
         'hooks': {'deactivate': 'deactivate.php'},
         'settings': [
             {'key': 'signal_url', 'type': 'wss', 'label': 'آدرس رسانه (wss://)'},
@@ -82,6 +82,7 @@ def plugin_entries(pdf_archive):
             {'key': 'notify_school_bale', 'type': 'switch', 'label': 'ارسال حضور به گفت‌وگوهای خصوصی ربات بله'},
             {'key': 'notify_school_telegram', 'type': 'switch', 'label': 'ارسال حضور به گفت‌وگوهای خصوصی ربات تلگرام'},
             {'key': 'notify_school_rubika', 'type': 'switch', 'label': 'ارسال حضور به گفت‌وگوهای خصوصی ربات روبیکا'},
+            {'key': 'bell_hours', 'type': 'bell-hours', 'label': 'ساعت زنگ‌های کلاس مجازی'},
         ],
         'files': {name: hashlib.sha256(content).hexdigest() for name, content in files.items()},
     }
@@ -117,7 +118,8 @@ def main():
         'plugins/school-plugins.php': manager.read_bytes(), 'README-fa.md': (HOST / 'README-fa.md').read_bytes(),
         **{p.relative_to(HOST / 'mtagbot').as_posix(): p.read_bytes()
             for p in sorted((HOST / 'mtagbot').rglob('*.php'))},
-        'media/README-fa.md': (ROOT / 'server/README-fa.md').read_bytes(),
+        **{f'media/{name}': (ROOT / 'server' / name).read_bytes()
+            for name in ('README-fa.md', 'WEBHOOK-fa.md', 'install.py', 'admission.py')},
         'patches/mtagbot-726ef103.patch': (HOST / 'patches/mtagbot-726ef103.patch').read_bytes(),
     })
     print(f'Built both archives; classroom manifest SHA-256: {expected}')

@@ -170,9 +170,9 @@ function cl_b64url(string $value): string
     return rtrim(strtr(base64_encode($value), '+/', '-_'), '=');
 }
 
-function cl_jwt(array $cfg, array $video, int $ttl, ?array $actor = null): string
+function cl_jwt(array $cfg, array $video, int $ttl, ?array $actor = null, ?int $now = null): string
 {
-    $now = time();
+    $now ??= time();
     $body = ['iss' => $cfg['api_key'], 'nbf' => $now - 5, 'iat' => $now, 'exp' => $now + $ttl, 'video' => $video];
     if ($actor !== null) {
         $body['sub'] = $actor['identity'];
@@ -182,12 +182,12 @@ function cl_jwt(array $cfg, array $video, int $ttl, ?array $actor = null): strin
     return $unsigned . '.' . cl_b64url(hash_hmac('sha256', $unsigned, $cfg['api_secret'], true));
 }
 
-function cl_join_ticket(array $cfg, string $room, array $actor): string
+function cl_join_ticket(array $cfg, string $room, array $actor, int $ttl = 35, ?int $now = null): string
 {
     return cl_jwt($cfg, [
         'roomJoin' => true, 'room' => $room, 'canSubscribe' => true,
         'canPublish' => false, 'canPublishData' => false,
-    ], 35, $actor);
+    ], $ttl, $actor, $now);
 }
 
 function cl_service_grant(string $method, string $room): array

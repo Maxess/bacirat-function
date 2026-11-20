@@ -63,6 +63,7 @@ try {
     $upgrade = __DIR__ . '/../artifacts/school-classroom-plugin-v0.2.3.zip';
     $scheduled = __DIR__ . '/../artifacts/school-classroom-plugin-v0.3.0.zip';
     $native = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.0.zip';
+    $timed = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.1.zip';
     $menus = static fn() => [file_get_contents($root . '/other-settings.php'), file_get_contents($root . '/includes/header.php')];
     $managerMenus = [$other, $header];
     expect($menus() === $managerMenus, 'initialization does not rewrite the host');
@@ -192,7 +193,47 @@ try {
     expect($row['version'] === '0.4.0' && $row['owner'] === $oldRow['owner'] && mpm_check_store($db,$row)===$store, 'retains owner and attendance data');
     expect(mpm_settings($db,$dir,$row) === ['signal_url'=>$previous['signal_url'],'api_key'=>$previous['api_key'],'api_secret'=>$secret,'max_participants'=>4], 'retains only compatible media configuration; legacy bot options are not enabled');
     expect($db->query("SELECT bucket FROM `$store` WHERE bucket<>'!owner'")->fetchAll(PDO::FETCH_COLUMN) === ['reports'], 'cleans retired watch/pairing/queued data only');
+    denied(fn()=>submit($db, $site, 'bell-hours', ['bell_hours'=>[1=>['start'=>'08:30','end'=>'09:15']]]));
+    $mediaInput = ['signal_url'=>$previous['signal_url'], 'api_key'=>$previous['api_key'], 'max_participants'=>'4', 'notify_school_bale'=>'yes'];
+    submit($db, $site, 'settings', ['settings'=>$mediaInput]);
+    $nativeSettings = mpm_settings($db, $dir, $row);
+    $nativeCiphertext = mpm_owned_row($db, $row)['settings'];
     submit($db, $site, 'enable');
+    denied(fn()=>mpm_install($db, $dir, $timed));
+    submit($db, $site, 'disable');
+    expect(mpm_install($db, $dir, $timed), 'upgrade the native classroom to optional timed bells');
+    $row = mpm_row($db, $slug);
+    expect($row['version'] === '0.4.1' && $row['owner'] === $oldRow['owner'] && mpm_check_store($db, $row) === $store, 'timed upgrade keeps the same data ownership');
+    expect(mpm_settings($db, $dir, $row) === $nativeSettings && mpm_owned_row($db, $row)['settings'] === $nativeCiphertext
+        && $db->query("SELECT payload FROM `$store` WHERE bucket='reports'")->fetchColumn() === '{}', 'timed mode is opt-in; native notices, keys and reports survive');
+    submit($db, $site, 'enable');
+    $hours = [1=>['start'=>'08:30','end'=>'09:15'], 2=>['start'=>'09:15','end'=>'10:00'], 4=>['start'=>'11:00','end'=>'12:00']];
+    $_POST = ['csrf'=>'wrong','action'=>'bell-hours','slug'=>$slug,'bell_hours'=>$hours];
+    denied(fn()=>mpm_post($db, $site, $site['origin'], 'fixture-form-token'));
+    expect(http_response_code() === 403 && mpm_settings($db, $dir, $row) === $nativeSettings, 'hours-only save still requires the manager session form token');
+    http_response_code(200);
+    mpm_query($db, "UPDATE `$table` SET runtime='scheduled-v2' WHERE id=1");
+    submit($db, $site, 'bell-hours', ['bell_hours'=>$hours + [3=>['start'=>'','end'=>'']], 'settings'=>['api_secret'=>'ignored']]);
+    expect(mpm_settings($db, $dir, $row) === $nativeSettings + ['bell_hours'=>$hours] && mpm_owned_row($db, $row)['runtime'] === 'scheduled-v2'
+        && mpm_row($db, $slug)['state'] === 'enabled', 'save valid ordered bells with blanks while active without changing media or runtime');
+    $hoursCiphertext = mpm_owned_row($db, $row)['settings'];
+    foreach ([null, [5=>['start'=>'08:30','end'=>'09:00']], [1=>'08:30'], [1=>['start'=>'08:30','end'=>'']],
+        [1=>['start'=>'24:10','end'=>'25:10']], [1=>['start'=>'09:00','end'=>'08:30']], [1=>['start'=>'08:30','end'=>'08:30']],
+        [1=>['start'=>'23:30','end'=>'00:30']], [1=>['start'=>['08:30'],'end'=>'09:00']],
+        array_replace($hours,[2=>['start'=>'09:14','end'=>'10:00']])] as $invalid) {
+        denied(fn()=>submit($db, $site, 'bell-hours', ['bell_hours'=>$invalid]));
+        expect(mpm_owned_row($db, $row)['settings'] === $hoursCiphertext, 'reject bad, partial, overlapping and excess periods before writing');
+    }
+    denied(fn()=>submit($db, $site, 'settings', ['settings'=>$mediaInput]));
+    mpm_query($db, "UPDATE `$table` SET runtime=NULL WHERE id=1");
+    // The general settings form cannot rewrite the schedule; blanking all rows restores legacy selection.
+    submit($db, $site, 'disable');
+    submit($db, $site, 'settings', ['settings'=>$mediaInput + ['bell_hours'=>[]]]);
+    expect(mpm_settings($db, $dir, $row) === $nativeSettings + ['bell_hours'=>$hours], 'saving general settings keeps the schedule');
+    submit($db, $site, 'enable');
+    submit($db, $site, 'bell-hours', ['bell_hours'=>[1=>['start'=>'','end'=>'']]]);
+    expect(mpm_settings($db, $dir, $row) === $nativeSettings, 'clear all bell hours without changing other settings');
+    submit($db, $site, 'bell-hours', ['bell_hours'=>$hours]);
     foreach (['student','teacher','admin','deputy'] as $role) expect(isset(mpm_menu_items($db, $dir, $role)[$slug]), 'upgraded release shown in every menu');
     $_SESSION = ['student_id' => 1];
     $_GET = ['class'=>22];
@@ -205,6 +246,8 @@ try {
     expect($asset === file_get_contents(mpm_release_dir($dir, $row) . '/assets/classroom.css') && str_contains($asset, '.participant-controls'), 'new release serves its own assets');
     ob_start(); mpm_render_settings($db, $site, 'fixture', ''); $ui = ob_get_clean();
     expect(!str_contains($ui, $secret) && str_contains($ui, 'action="other-settings.php?tab=plugins"') && !str_contains($ui, '<!doctype'), 'native form fragment, no second page or plaintext secret');
+    expect(substr_count($ui, 'type="time"') === 8 && str_contains($ui, 'name="bell_hours[4][end]" aria-label="پایان زنگ ۴" value="12:00"')
+        && str_contains($ui, 'name="bell_hours[3][start]" aria-label="شروع زنگ ۳" value=""') && str_contains($ui, 'name="action" value="bell-hours"'), 'four independent pairs with persisted hours in the enabled settings tab');
     denied(fn()=>submit($db, $site, 'remove'));
     expect(is_file($path . '/index.php') && mpm_table_exists($db, $table), 'explicit delete confirmation');
 
@@ -238,7 +281,7 @@ try {
     expect(file_get_contents($work . '/outside.txt') === 'do not delete', 'unlink without following symlink');
     foreach (['student','teacher','admin'] as $role) expect(mpm_menu_items($db, $dir, $role) === [], 'removed from every panel');
     denied(fn()=>mpm_dispatch($db, $site, $slug, 'asset'));
-    mpm_install($db, $dir, $native);
+    mpm_install($db, $dir, $timed);
     expect(mpm_settings($db, $dir, mpm_row($db, $slug)) === [], 'reinstall does not restore deleted data');
     submit($db, $site, 'remove', ['confirm_delete'=>'yes']);
     if ($dsn !== 'sqlite::memory:') {
@@ -250,7 +293,7 @@ try {
         expect(!mpm_table_exists($db, $table) && !mpm_row($db, $slug) && !file_exists(mpm_path($dir, $attempt)), 'aborted install recoverable despite partially applied DDL');
         foreach (['classes', 'students', 'admins', 'settings', 'academic_years', MPM_REGISTRY, MPM_SITE] as $fixtureTable) $db->exec("DROP TABLE `$fixtureTable`");
     }
-    echo strtoupper($db->getAttribute(PDO::ATTR_DRIVER_NAME)) . " PASS native gateway, private files, guarded migration, settings fragment, active menu state and scoped purge\n";
+    echo strtoupper($db->getAttribute(PDO::ATTR_DRIVER_NAME)) . " PASS native gateway, private files, guarded migration, bell-hours settings, active menu state and scoped purge\n";
 } finally {
     mpm_remove_tree($work);
 }

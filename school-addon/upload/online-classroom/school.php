@@ -141,6 +141,16 @@ function cl_period_key(string $label): string
     return preg_replace('/^(?:زنگ)?0*([1-9][0-9]*)$/uD', '$1', cl_class_key($label)) ?? '';
 }
 
+/** The weekly timetable maps the numbered bell to a class; its hours come from the plugin. */
+function cl_bell_window(array $hours, string $period, int $now): ?array
+{
+    $pair = $hours[cl_period_key($period)] ?? null;
+    if ($pair === null) return null;
+    $day = cl_day($now);
+    $stamp = static fn(string $time): int => $day->setTime((int)substr($time, 0, 2), (int)substr($time, 3, 2))->getTimestamp();
+    return ['start'=>$stamp($pair['start']), 'end'=>$stamp($pair['end']), 'label'=>$pair['start'] . ' تا ' . $pair['end']];
+}
+
 function cl_slots_for_date(PDO $db, array $class, int $now): array
 {
     $rows = cl_query($db, 'SELECT id,academic_year,class_name,day_of_week,period_num,subject_name,teacher_id FROM class_schedules ORDER BY period_num,id', []);

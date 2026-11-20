@@ -38,6 +38,11 @@ function cl_event_apply(ClassroomStore $s, array $cfg, array $event, int $now, c
     return cl_class_lock($s, $cfg, $id, static function () use ($s, $cfg, $event, $now, $rpc, $id, $room) {
         $lesson = cl_active($s, $id);
         if (!$lesson || $lesson['room'] !== $room) return false; // Delayed/repeated events cannot affect a resumed lesson.
+        if ($lesson['phase'] === 'closing' || $now >= $lesson['deadline'] || $lesson['date'] !== cl_day($now)->format('Y-m-d')) {
+            cl_pause($lesson, 'closing');
+            cl_retire_transport($s, $cfg, $lesson, $now, $rpc, $event['event'] === 'room_finished');
+            return true;
+        }
         if (in_array($event['event'], ['room_started','participant_joined'], true)) {
             if ($lesson['phase'] === 'starting' && empty($lesson['event_received'])) {
                 $lesson['event_received'] = true;
@@ -46,10 +51,9 @@ function cl_event_apply(ClassroomStore $s, array $cfg, array $event, int $now, c
             return false;
         }
         if ($event['event'] === 'room_finished') {
-            $final = $lesson['phase'] === 'closing' || $now >= $lesson['deadline'] || $lesson['date'] !== cl_day($now)->format('Y-m-d');
-            cl_pause($lesson, $final ? 'closing' : 'paused');
+            cl_pause($lesson);
             cl_retire_transport($s, $cfg, $lesson, $now, $rpc, true);
-            return $final;
+            return false;
         }
         $who = $event['participant']['identity'] ?? null;
         $sid = $event['participant']['sid'] ?? null;

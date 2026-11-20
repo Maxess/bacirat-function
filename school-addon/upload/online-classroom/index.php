@@ -6,9 +6,8 @@ require_once __DIR__ . '/reports.php';
 cl_headers();
 header('Content-Type: text/html; charset=UTF-8');
 $actor = $errorMessage = $class = $reports = null;
-$classes = $slots = [];
+$classes = $choices = [];
 $connect = $year = '';
-$autoSlot = 0;
 $now = time();
 try {
     $cfg = cl_config();
@@ -29,12 +28,7 @@ try {
             return;
         }
         if ($class !== null && cl_is_staff($actor)) {
-            $slots = cl_today_slots($s->db, $class, $actor, $now);
-            $slots = array_filter($slots, static function ($slot) use ($s, $class, $now, $year) {
-                $teacher = cl_school_account($s->db, 'teacher', $slot['teacher'], $year);
-                return $teacher && $teacher['year'] === $year && ($s->get('lesson', cl_lesson_id($class, $slot['period'], cl_day($now)->format('Y-m-d')))['phase'] ?? null) !== 'finished';
-            });
-            if (count($slots) === 1) $autoSlot = array_key_first($slots);
+            $choices = cl_staff_schedule($s, $cfg, $class, $actor, $now)['choices'];
         }
     }
     if ($class !== null) $connect = $cfg['api_url'] . ' ' . $cfg['signal_url'];
@@ -97,7 +91,7 @@ $pageTitle = $reports !== null ? 'حضور و غیاب کلاس مجازی' : ($
         </section>
     <?php else: ?>
         <section id="classroom" data-api="<?= cl_html(cl_href(['route'=>'api'])) ?>" data-csrf="<?= cl_html(cl_context()['csrf']) ?>"
-          data-class="<?= $class['id'] ?>" data-auto-slot="<?= $autoSlot ?>" data-moderator="<?= $staff ? 'yes' : 'no' ?>"
+          data-class="<?= $class['id'] ?>" data-bell-date="<?= cl_day($now)->format('Y-m-d') ?>" data-moderator="<?= $staff ? 'yes' : 'no' ?>"
           data-content="<?= cl_html(cl_href(['route'=>'content','class'=>$class['id']])) ?>"
           data-pdf="<?= cl_html(cl_asset('pdf.min.mjs')) ?>" data-pdf-worker="<?= cl_html(cl_asset('pdf.worker.min.mjs')) ?>"
           data-pdf-data="<?= cl_html(cl_href(['route'=>'pdf']) . '&name=') ?>">
@@ -105,10 +99,10 @@ $pageTitle = $reports !== null ? 'حضور و غیاب کلاس مجازی' : ($
                 <div><p class="eyebrow" id="status" role="status">اتاق انتظار</p><h2 id="lecture-title">کلاس <?= cl_html($class['name']) ?></h2></div>
                 <?php if ($staff): ?>
                 <div class="staff-actions">
-                    <label for="slot">زنگ‌های امروز · <?= cl_html(CL_DAYS[(int)cl_day($now)->format('w')]) ?></label>
+                    <label for="slot">زنگ‌های امروز · وقت تهران</label>
                     <div class="actions">
                     <select id="slot"><option value="">انتخاب زنگ</option>
-                        <?php foreach ($slots as $slot): ?><option value="<?= $slot['id'] ?>"><?= cl_html($slot['period'] . ' · ' . $slot['subject']) ?></option><?php endforeach; ?>
+                        <?php foreach ($choices as $choice): ?><option value="<?= $choice['id'] ?>"><?= cl_html($choice['label']) ?></option><?php endforeach; ?>
                     </select>
                     <button type="button" id="open" disabled>شروع زنگ</button><button type="button" id="close" class="danger" hidden>پایان کلاس برای همه</button>
                     </div>
@@ -119,7 +113,7 @@ $pageTitle = $reports !== null ? 'حضور و غیاب کلاس مجازی' : ($
             <section class="card waiting" id="waiting">
                 <span aria-hidden="true" class="waiting-icon">◷</span>
                 <h2 id="wait-title"><?= $staff ? 'در انتظار شروع زنگ' : 'در انتظار ورود دبیر یا مسئول مدرسه' ?></h2>
-                <p id="wait-message"><?= $staff ? 'اگر چند زنگ مجاز داری، زنگ موردنظر را از برنامهٔ امروز انتخاب کن.' : 'شما وارد اتاق انتظار شده‌اید. نیازی به اقدامی نیست؛ لطفاً تا ورود دبیر، مدیر یا ناظم منتظر بمانید.' ?></p>
+                <p id="wait-message"><?= $staff ? 'در حال بررسی زنگ‌های امروز…' : 'شما وارد اتاق انتظار شده‌اید. نیازی به اقدامی نیست؛ لطفاً تا ورود دبیر، مدیر یا ناظم منتظر بمانید.' ?></p>
                 <p class="meta">زمان انتظار در حضور کلاس حساب نمی‌شود.</p>
                 <?php if (!$staff): ?><button type="button" id="join" hidden>بازگشت به اتاق انتظار</button><?php endif; ?>
             </section>

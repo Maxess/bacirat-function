@@ -8,7 +8,8 @@ const script = fs.readFileSync(path.join(__dirname, '../school-addon/upload/onli
 const listener = {canPublish:false, canPublishSources:[]};
 const mic = {canPublish:true,canPublishSources:[2]};
 class Element {
-    constructor(tag) { this.tag = tag; this.handlers = {}; this.children = []; this.dataset = {}; this.textContent = ''; this.value = ''; this.disabled = false; this.hidden = false; this.options = []; }
+    constructor(tag) { this.tag = tag; this.handlers = {}; this.children = []; this.dataset = {}; this.textContent = ''; this.value = ''; this.disabled = false; this.hidden = false; }
+    get options() { return this.children; }
     addEventListener(k,v) { this.handlers[k] = v; }
     setAttribute(k,v) { this[k] = v; }
     append(...items) { this.children.push(...items); }
@@ -19,12 +20,14 @@ class Element {
 function fixture(staff, autoSlot = 0) {
     const elements = Object.fromEntries(['classroom','status','lecture-title','notice','mic-feedback','people','live-panel','waiting','wait-title','wait-message',
         'audio-tracks','chat-log','chat-form','chat-text','leave','microphone','enable-audio', ...(staff ? ['slot','open','close','clear-floor'] : ['join'])].map(id => [id,new Element(id)]));
-    elements.classroom.dataset = { moderator:staff?'yes':'no',api:'/fixture',csrf:'session',class:'22',autoSlot:String(autoSlot) };
-    if (staff) elements.slot.options = [{value:'11', remove(){ elements.slot.options=[]; }}];
+    const date='2026-11-18';
+    const choice = (id, label) => ({id, label});
+    elements.classroom.dataset = { moderator:staff?'yes':'no',api:'/fixture',csrf:'session',class:'22',bellDate:date };
     const requests=[], scheduled=new Map(), boards=[];
     let timerSeq=0, lastRoom;
     const id=staff?'teacher-1':'student-1';
-    const srv={phase:'idle',lesson:'lesson-11',epoch:'epoch-A',ready:true, staffCanJoin:false,seconds:{'student-1':9,'student-2':21}};
+    const srv={phase:'idle',lesson:'lesson-11',epoch:'epoch-A',ready:true, staffCanJoin:false,seconds:{'student-1':9,'student-2':21},
+        hidden:false, schedule:{date, timed:false, choices:autoSlot ? [choice(autoSlot,'ریاضی')] : [choice(11,'ریاضی'),choice(12,'علوم')], next:null}};
     const person = (identity) => ({identity, name:identity, sid:`PA_${identity}`, permissions:listener, micCalls:[], isMicrophoneEnabled:false,
         async setMicrophoneEnabled(value) {
             this.micCalls.push(value);
@@ -50,7 +53,7 @@ function fixture(staff, autoSlot = 0) {
     }
     vm.runInNewContext(script, {
         window:{isSecureContext:true,LivekitClient:lk,addEventListener(){},confirm:()=>true,ClassroomBoard:()=>({position:()=>({board:0,ink:0}),sync:(...p)=>boards.push(p),reset:()=>boards.push('reset')})},
-        document:{getElementById:id=>elements[id],createElement:tag=>new Element(tag),addEventListener(){}},
+        document:{getElementById:id=>elements[id],createElement:tag=>new Element(tag),addEventListener(){},get hidden(){return srv.hidden;}},
         setTimeout(fn,ms){const t=++timerSeq; scheduled.set(t,{fn,ms});return t;}, clearTimeout:t=>scheduled.delete(t), AbortController,
         async fetch(url,opt){
             assert.equal(url,'/fixture'); assert.equal(opt.headers['X-Classroom-CSRF'],'session');
@@ -59,6 +62,7 @@ function fixture(staff, autoSlot = 0) {
             if(input.action==='status'){
                 const phased = srv.phase==='idle' ? {phase:'idle'} : {phase:srv.phase,slot:11, lesson:srv.lesson,epoch:srv.epoch,resumable:srv.resumable,subject:'ریاضی',period:'زنگ یک'};
                 reply={...reply,ready:srv.ready,...phased,joinable:srv.phase==='live'||(staff&&srv.phase==='starting'&&srv.staffCanJoin)};
+                if (staff && srv.phase==='idle') reply.schedule=srv.schedule;
                 if(input.sid && srv.phase==='live' && input.epoch===srv.epoch) Object.assign(reply,{admitted:true,seconds:srv.seconds,chat:[],board:{rev:1}});
             } else if(input.action==='open'||input.action==='ticket') {
                 if (input.action === 'open' && srv.phase !== 'live') srv.phase = 'starting';
@@ -66,7 +70,9 @@ function fixture(staff, autoSlot = 0) {
             } else if(input.action==='give-mic') change(input.identity,mic);
             else if(input.action==='cut-mic') change(input.identity,listener);
             else if(input.action==='cut-all-mics') for(const p of [lastRoom.localParticipant,...lastRoom.remoteParticipants.values()]) change(p.identity,listener);
-            else if(input.action==='close') srv.phase='idle';
+            else if(input.action==='close') {
+                srv.phase='idle'; srv.schedule={...srv.schedule, choices:srv.schedule.choices.filter(n=>n.id!==11)};
+            }
             return {ok:true,json:async()=>reply};
         },
     });
@@ -137,4 +143,40 @@ test('on entry staff auto-opens the unmistakable bell, and never auto-opens the 
     assert.equal(f.elements['live-panel'].hidden,false);
     f.srv.phase='idle'; await f.time(); await f.time();
     assert.equal(f.requests.filter(r=>r.action==='open').length,1);
+});
+
+
+test('server clock selects the timed bell without a reload; waiting and the next bell do not auto-start another room', async()=>{
+    const f=fixture(true);
+    f.srv.schedule={...f.srv.schedule,timed:true,choices:[],next:'زنگ ۱ · ریاضی · 08:30 تا 09:15'};
+    await f.time(); await f.time();
+    assert.ok(f.elements.open.disabled);
+    assert.match(f.elements['wait-message'].textContent,/08:30 تا 09:15/);
+    assert.equal(f.requests.filter(r=>r.action==='open').length,0);
+    f.srv.hidden=true;
+    f.srv.schedule={...f.srv.schedule, choices:[{id:11,label:'زنگ ۱ · ریاضی · 08:30 تا 09:15'}],next:null};
+    await f.time();
+    assert.equal(f.requests.filter(r=>r.action==='open').length,0, 'a hidden tab does not start the next bell');
+    f.srv.hidden=false;
+    await f.time(); await f.time();
+    assert.deepEqual(f.requests.filter(r=>r.action==='open').map(r=>r.slot),[11]);
+    f.srv.phase='live'; await f.time(); await f.time();
+    const room=f.room;
+    f.srv.phase='idle'; f.srv.schedule={...f.srv.schedule,choices:[{id:12,label:'زنگ ۲ · علوم · 09:15 تا 10:00'}]};
+    await f.time(); await f.time();
+    assert.equal(room.state,'disconnected');
+    assert.equal(f.elements['live-panel'].hidden,true);
+    assert.deepEqual(f.elements.slot.options.map(n=>n.value),['','12']);
+    assert.deepEqual(f.requests.filter(r=>r.action==='open').map(r=>r.slot),[11]);
+    assert.equal(f.elements.open.disabled,false, 'staff can explicitly start the newly available period');
+});
+
+test('a waiting tab left open overnight does not auto-start the following day', async()=>{
+    const f=fixture(true);
+    f.srv.schedule={...f.srv.schedule,timed:true,choices:[],next:null};
+    await f.time();
+    f.srv.schedule={...f.srv.schedule,date:'2026-11-19',choices:[{id:13,label:'زنگ ۱'}]};
+    await f.time(); await f.time();
+    assert.equal(f.elements.slot.value,'13');
+    assert.equal(f.requests.filter(r=>r.action==='open').length,0);
 });

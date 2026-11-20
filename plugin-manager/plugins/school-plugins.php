@@ -2,11 +2,12 @@
 declare(strict_types=1);
 
 // Native mtagbot plugin runtime and gateway. The editor is in other-settings.php.
-const MPM_VERSION = '0.1.6';
+const MPM_VERSION = '0.1.7';
 const MPM_CLASSROOM_NATIVE = '0.4.0';
 const MPM_REGISTRY = 'mtg_plugin_registry';
 const MPM_SITE = 'mtg_plugin_site';
 const MPM_MAX_ZIP = 4 * 1024 * 1024;
+const MPM_BELL_LABELS = [1=>'۱', 2=>'۲', 3=>'۳', 4=>'۴'];
 const MPM_CATALOG = [
     'school-classroom' => [
         '0.2.0' => '67f080645d4dce5b709183556b0dd7297c0784388942b2dd00c6157d8a5a117b',
@@ -15,6 +16,7 @@ const MPM_CATALOG = [
         '0.2.3' => 'a9f39ab9a6b1aeb062973f2489b750f3245443b099ffff77915f555dfa92295b',
         '0.3.0' => '159551bb9bba129168c6b3e3f5d4da1468e1f908e7cacb9d3f62e140fdefcb03',
         '0.4.0' => '2b355724e133cb6f10c9312673863f5e2856a5fad53a5d5214a68632106876ac',
+        '0.4.1' => '878c80c685ca427514a555b0c65a23fb524e4d232d0f9a9a3e2a652bb145a0c0',
     ],
 ];
 
@@ -529,12 +531,52 @@ function mpm_settings(PDO $db, string $dir, array $row): array
     return json_decode($data, true, 32, JSON_THROW_ON_ERROR);
 }
 
+function mpm_has_bell_hours(array $manifest): bool
+{
+    foreach ($manifest['settings'] as $field) {
+        if ($field['key'] === 'bell_hours' && $field['type'] === 'bell-hours') return true;
+    }
+    return false;
+}
+
+function mpm_bell_hours(mixed $input): array
+{
+    if (!is_array($input) || array_diff_key($input, MPM_BELL_LABELS)) throw new MpmNotice('تنظیم ساعت فقط برای زنگ‌های ۱ تا ۴ مجاز است.');
+    $hours = [];
+    $previousEnd = null;
+    foreach (MPM_BELL_LABELS as $n=>$label) {
+        if (!array_key_exists($n, $input)) continue;
+        $row = $input[$n];
+        if (!is_array($row) || array_diff_key($row, ['start'=>true,'end'=>true])) throw new MpmNotice('تنظیم زنگ ' . $label . ' معتبر نیست.');
+        $start = $row['start'] ?? '';
+        $end = $row['end'] ?? '';
+        if ($start === '' && $end === '') continue;
+        foreach ([$start, $end] as $time) {
+            if (!is_string($time) || !preg_match('/^(?:[01][0-9]|2[0-3]):[0-5][0-9]$/D', $time)) {
+                throw new MpmNotice('برای زنگ ' . $label . ' هر دو ساعت را با قالب ۲۴ ساعته (مثل ۰۸:۳۰) وارد کن، یا هر دو را خالی بگذار.');
+            }
+        }
+        if ($start >= $end) throw new MpmNotice('پایان زنگ ' . $label . ' باید بعد از شروع آن و در همان روز باشد.');
+        if ($previousEnd !== null && $start < $previousEnd) {
+            throw new MpmNotice('شروع زنگ ' . $label . ' نباید قبل از پایان زنگ قبلی باشد؛ زنگ‌ها را به ترتیب و بدون هم‌پوشانی ثبت کن.');
+        }
+        $hours[$n] = ['start'=>$start,'end'=>$end];
+        $previousEnd = $end;
+    }
+    return $hours;
+}
+
 function mpm_save_settings(PDO $db, string $dir, array $row, array $manifest, array $input): void
 {
     $previous = mpm_settings($db, $dir, $row);
     $settings = [];
     foreach ($manifest['settings'] as $field) {
         $key = $field['key'];
+        if ($field['type'] === 'bell-hours') {
+            // Editing media/notices must not change the separately saved schedule.
+            if (isset($previous[$key])) $settings[$key] = $previous[$key];
+            continue;
+        }
         $value = $input[$key] ?? '';
         if (!is_string($value)) throw new MpmNotice('مقدار تنظیم معتبر نیست.');
         $value = trim($value);
@@ -885,6 +927,15 @@ function mpm_post(PDO $db, ?array $site, string $origin, string $csrf): string
             return 'غیرفعال شد؛ داده‌ها و فایل‌ها حفظ شدند.' . mpm_deactivate($db, $site, $dir, $row);
         }
         $manifest = mpm_manifest_for($dir, $row);
+        if ($action === 'bell-hours' && mpm_native_release($row) && mpm_has_bell_hours($manifest)) {
+            // The manager lock serializes this update with room requests. Active lessons retain their saved deadline.
+            $hours = mpm_bell_hours($_POST['bell_hours'] ?? null);
+            $values = mpm_settings($db, $dir, $row);
+            if ($hours === []) unset($values['bell_hours']);
+            else $values['bell_hours'] = $hours;
+            mpm_write_settings($db, $dir, $row, $values);
+            return $hours === [] ? 'ساعت‌بندی خاموش شد؛ انتخاب زنگ از برنامهٔ امروز انجام می‌شود.' : 'ساعت زنگ‌ها ذخیره شد؛ زنگی که قبلاً باز شده ساعت پایان قبلی را حفظ می‌کند.';
+        }
         if ($action === 'settings' && is_array($_POST['settings'] ?? null) && mpm_native_release($row)) {
             if ($row['state'] !== 'disabled') throw new MpmNotice('برای تغییر تنظیمات ابتدا افزونه را غیرفعال کن.');
             if (mpm_owned_row($db, $row)['runtime'] !== null) throw new MpmNotice('اتاق قبلی هنوز بسته نشده است؛ ابتدا دوباره بستن اتاق را امتحان کن.');
@@ -975,6 +1026,25 @@ function mpm_settings_fragment(array $view): void
     catch (Throwable $error) { echo '<p role="alert">تنظیمات افزونه‌ها کامل بارگیری نشد.</p>'; }
 }
 
+function mpm_render_bell_hours(string $csrf, string $slug, array $hours): void
+{
+    echo '<form class="mb-3" method="post" action="other-settings.php?tab=plugins">';
+    mpm_hidden($csrf, 'bell-hours', $slug);
+    echo '<fieldset aria-describedby="mpm-bell-help"><legend>ساعت زنگ‌های کلاس مجازی</legend>'
+        . '<p id="mpm-bell-help">به وقت تهران، برای همهٔ روزهای برنامهٔ هفتگی. برای زنگِ بدون کلاس هر دو خانه را خالی بگذار. اگر همه خالی باشند، ساعت‌بندی خاموش است.</p>'
+        . '<div class="table-responsive"><table class="table"><thead><tr><th scope="col">زنگ</th><th scope="col">شروع</th><th scope="col">پایان</th></tr></thead><tbody>';
+    foreach (MPM_BELL_LABELS as $n=>$label) {
+        echo '<tr><th scope="row">زنگ ' . $label . '</th>';
+        foreach (['start'=>'شروع','end'=>'پایان'] as $key=>$title) {
+            echo '<td><input type="time" step="60" dir="ltr" class="form-input" name="bell_hours[' . $n . '][' . $key . ']"'
+                . ' aria-label="' . $title . ' زنگ ' . $label . '" value="' . mpm_html($hours[$n][$key] ?? '') . '"></td>';
+        }
+        echo '</tr>';
+    }
+    echo '</tbody></table></div><p class="text-muted">تغییر ساعت‌ها نیاز به غیرفعال‌کردن افزونه ندارد و زنگ باز را قطع نمی‌کند.</p>'
+        . '<button class="btn btn-primary" type="submit">ذخیرهٔ ساعت زنگ‌ها</button></fieldset></form>';
+}
+
 function mpm_render_settings(PDO $db, ?array $site, string $csrf, string $notice): void
 {
     echo '<h2>افزونه‌ها</h2><p class="text-muted">مدیر افزونه‌ها · نسخهٔ <bdi>' . MPM_VERSION . '</bdi> · داده‌ها در پایگاه همین سایت</p>';
@@ -1019,6 +1089,7 @@ function mpm_render_settings(PDO $db, ?array $site, string $csrf, string $notice
             echo '<form class="mb-3" method="post" action="other-settings.php?tab=plugins">';
             mpm_hidden($csrf, 'settings', $slug);
             foreach ($manifest['settings'] as $field) {
+                if ($field['type'] === 'bell-hours') continue;
                 $key = $field['key'];
                 $name = 'settings[' . mpm_html($key) . ']';
                 $value = $values[$key] ?? '';
@@ -1038,6 +1109,7 @@ function mpm_render_settings(PDO $db, ?array $site, string $csrf, string $notice
             }
             echo '<button class="btn btn-primary" type="submit">ذخیرهٔ تنظیمات</button></form>';
         }
+        if ($manifest && $compatible && mpm_has_bell_hours($manifest)) mpm_render_bell_hours($csrf, $slug, $values['bell_hours'] ?? []);
         if (!$compatible && !$pending) echo '<p>این نسخهٔ قدیمی را در حالت غیرفعال به بستهٔ یکپارچهٔ کلاس ارتقا بده.</p>';
         if ($compatible && $manifest) {
             echo '<p>گیرندهٔ وب‌هوک LiveKit (در سرور رسانهٔ موجود): <br><code dir="ltr" style="overflow-wrap:anywhere">'

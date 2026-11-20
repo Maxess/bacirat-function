@@ -25,7 +25,12 @@ cl_json_reply(static function (): array {
         $now = time();
         $lesson = cl_active($s, $class['id']);
         if ($action === 'status') {
-            if (!$lesson) return ['phase'=>'idle', 'ready'=>true];
+            $idle = static function (bool $ready) use ($s, $cfg, $class, $actor): array {
+                $result = ['phase'=>'idle', 'ready'=>$ready];
+                if (cl_is_staff($actor)) $result['schedule'] = cl_staff_schedule($s, $cfg, $class, $actor, time());
+                return $result;
+            };
+            if (!$lesson) return $idle(true);
             $allowedRole = $lesson['year'] === $class['year'] && cl_can_lesson($lesson, $actor);
             if ($allowedRole) $lesson = cl_touch($s, $lesson, $actor, $body, $now);
             $ready = true;
@@ -36,7 +41,7 @@ cl_json_reply(static function (): array {
             }
             if (!$lesson) {
                 if (function_exists('mpm_classroom_delivery_after_response')) mpm_classroom_delivery_after_response();
-                return ['phase'=>'idle', 'ready'=>$ready];
+                return $idle($ready);
             }
             if (!$allowedRole) return ['phase'=>'reserved','ready'=>$ready];
             $now = time(); // A slow SFU call must not extend a previously captured sample's validity.
@@ -45,7 +50,7 @@ cl_json_reply(static function (): array {
             $allowed = $live && cl_match_transport($lesson, $body) && cl_entered($lesson, $actor, $body['sid'] ?? null, $now);
             $result = ['phase'=>$phase,'ready'=>$ready, 'lesson'=>$lesson['id'], 'epoch'=>cl_epoch($lesson),
                 'callbackMissing'=>$lesson['phase'] === 'paused' && empty($lesson['event_received']),
-                'period'=>$lesson['period'], 'subject'=>$lesson['subject'], 'slot'=>$lesson['slot'], 'admitted'=>$allowed,
+                'period'=>$lesson['period'], 'subject'=>$lesson['subject'], 'slot'=>$lesson['slot'], 'bell'=>$lesson['bell'] ?? null, 'admitted'=>$allowed,
                 'joinable'=>$ready && cl_joinable($lesson, $actor, $now),
                 'resumable'=>$ready && $lesson['phase'] === 'paused' && $lesson['room'] === null];
             if ($allowed) $result += ['seconds'=>$lesson['seconds']] + cl_activity_sync($s, $lesson, $actor, $body);
