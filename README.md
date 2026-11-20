@@ -4,7 +4,7 @@
 
 1. [فایل‌های به‌روزرسانی سایت و مدیر ۰٫۱٫۶](artifacts/mtagbot-plugin-manager-v0.1.6.zip) — اصلاحات `other-settings.php`، سربرگ/پابرگ پنل‌های `mtagbot` و فایل‌های افزونه. سازگار با سورس مدرسه در `726ef103`؛ [راهنمای نصب و بازگشت روی هاست تست](plugin-manager/README-fa.md).
 2. [افزونهٔ کلاس مجازی ۰٫۴٫۰](artifacts/school-classroom-plugin-v0.4.0.zip) — بسته را در تب بومی **تنظیمات دیگر ← افزونه‌ها** نصب کن. برای ارتقا زنگ‌های قبلی را ببند و ابتدا با مدیر قبلی «غیرفعال‌سازی (حفظ داده)» را بزن.
-3. [تنظیم وب‌هوک بومی LiveKit موجود](server/README-fa.md#native-events) — بدون نصب سرویس ناظر. این مرحله برای اتاق‌های ۰٫۴٫۰ لازم است.
+3. [ثبت خودکار وب‌هوک بومی LiveKit در VPS تست](server/WEBHOOK-fa.md) — بدون نصب سرویس ناظر و بدون نیاز به آپلود دوبارهٔ افزونه. [روش دستی برای پیکربندی سفارشی](server/README-fa.md#manual-native-events).
 
 افزونه از همان نشست، پایگاه داده، برنامهٔ هفتگی و حساب‌های مدرسه استفاده می‌کند. منوی فعال **کلاس مجازی** مستقیم به کلاس می‌رود؛ دبیر، مدیر مجاز یا ناظم همان مدرسه کلاس را باز می‌کند. حضور هر زنگ جداست و انتظار/وقفه شمرده نمی‌شود. گفت‌وگو، تختهٔ تصویر و PDF و کلاس صوتی حفظ شده‌اند.
 
@@ -13,7 +13,7 @@
 ### ساخت و آزمون محلی
 
 ```sh
-python3 scripts/build-managed-school.py
+python3 scripts/build-managed-school.py --output-dir /tmp/school-classroom-build
 php tests/plugin-manager.php
 php tests/school-classroom.php
 php tests/classroom-lessons.php
@@ -21,7 +21,7 @@ node --test tests/classroom-ui.cjs
 python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
-ساخت، SDK ثابت از ZIP منتشرشدهٔ قدیمی و PDF.js ثابت از npm را با هش تأیید می‌کند. برای ساخت آفلاین از `--pdf-archive` با همان آرشیو npm استفاده کن. آزمون PHP به `pdo_sqlite` و برای چرخهٔ مدیر به `ZipArchive` و `OpenSSL` نیاز دارد. برای اجرای `tests/plugin-manager.php` و `tests/classroom-lessons.php` روی MariaDB/MySQL، `MPM_TEST_DSN` را روی **پایگاه محلی خالی و موقت** `mpm_fixture_*` تنظیم کن (نمونه: `mysql:host=127.0.0.1;port=3306;dbname=mpm_fixture_local;charset=utf8mb4`) و `MPM_TEST_USER` و `MPM_TEST_PASSWORD` را در محیط بده. پایگاه واقعی مدرسه را به آزمون نده.
+ساخت، SDK ثابت از ZIP منتشرشدهٔ قدیمی و PDF.js ثابت از npm را با هش تأیید می‌کند. برای بازسازی دقیق ZIPهای منتشرشدهٔ ۰٫۱٫۶ و ۰٫۴٫۰ از [سورس همان انتشار](https://github.com/Maxess/bacirat-function/tree/dfc1a65f0b2c88d60c05e236473a0cf99fef1ac2) استفاده کن؛ ابزار وب‌هوک جدا از آن ZIPها منتشر می‌شود. برای ساخت آفلاین از `--pdf-archive` با همان آرشیو npm استفاده کن. آزمون PHP به `pdo_sqlite` و برای چرخهٔ مدیر به `ZipArchive` و `OpenSSL` نیاز دارد. برای اجرای `tests/plugin-manager.php` و `tests/classroom-lessons.php` روی MariaDB/MySQL، `MPM_TEST_DSN` را روی **پایگاه محلی خالی و موقت** `mpm_fixture_*` تنظیم کن (نمونه: `mysql:host=127.0.0.1;port=3306;dbname=mpm_fixture_local;charset=utf8mb4`) و `MPM_TEST_USER` و `MPM_TEST_PASSWORD` را در محیط بده. پایگاه واقعی مدرسه را به آزمون نده.
 
 آزمون‌ها حسابداری زنگ، چت و تخته، مجوزهای ورود و کنترل رسانه، ارتقا/حذف، و اعلان را با دادهٔ مصنوعی بررسی می‌کنند. در آزمون مرورگر HTTPS/MariaDB، از پنل‌های خود `mtagbot`، رندر واقعی PDF/تصویر و شبیه‌ساز تماس‌های LiveKit و ربات استفاده شده است؛ جای تأیید گوشی، WebRTC، پایداری، ظرفیت یا ارسال واقعی در VPS تست را نمی‌گیرد.
 
