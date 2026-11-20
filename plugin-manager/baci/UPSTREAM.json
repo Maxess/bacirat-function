@@ -7,6 +7,8 @@
   "archive_sha256": "a394c42f5fea760ccae40b156b414c5b6e8406481fb352e0cf6084d969e5ed24",
   "original_files": {
     "includes/header.php": "4170b92a76cfe5394f2244f1839ad96f3ad4cdb25247c55c733ea9e4a75a5567",
-    "includes/management_hub.php": "7d42d9c65f394efad9f3e22d93d5821349e22884a3adc70b92251e5cd538c44f"
+    "includes/management_hub.php": "7d42d9c65f394efad9f3e22d93d5821349e22884a3adc70b92251e5cd538c44f",
+    "other-settings.php": "afde1fc60406fdcada873fd54c37a3b32940fcdb5e2bf0a35a1dfbd913995f8b",
+    "includes/footer.php": "47d8f2ff1476249f7448ef1de7d99d2f976d27d458f7c174d3b70a18b6f92785"
   }
 }

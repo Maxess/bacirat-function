@@ -274,6 +274,27 @@ test('server clock selects the timed bell without a reload; waiting and the next
     assert.equal(f.elements.open.disabled,false, 'staff can explicitly start the newly available period');
 });
 
+test('a shared weekly bell requires a manual start even when only one teacher option is visible', async()=>{
+    const f=fixture(true);
+    const shared={id:24,label:'زنگ ۱ · ریاضی · تک‌زنگ',manual:true};
+    f.srv.schedule={...f.srv.schedule,timed:true,choices:[shared]};
+    await f.status(); await f.status();
+    assert.deepEqual(f.requests.filter(r=>r.action==='open'),[]);
+    assert.equal(f.elements.slot.value,'24');
+    assert.match(f.elements['wait-message'].textContent,/درسِ این هفته/);
+    await f.elements.open.click();
+    assert.equal(f.requests.find(r=>r.action==='open').slot,24);
+
+    const admin=fixture(true);
+    admin.srv.schedule={...admin.srv.schedule,timed:true,choices:[shared,{id:25,label:'زنگ ۱ · علوم · تک‌زنگ',manual:true}]};
+    await admin.status();
+    assert.equal(admin.elements.slot.value,'');
+    assert.ok(admin.elements.open.disabled);
+    admin.srv.schedule={...admin.srv.schedule,choices:[{id:26,label:'زنگ ۲'}]};
+    await admin.status(); await admin.status();
+    assert.deepEqual(admin.requests.filter(r=>r.action==='open'),[], 'waiting on a shared bell does not auto-open a later one');
+});
+
 test('a waiting tab left open overnight does not auto-start the following day', async()=>{
     const f=fixture(true);
     f.srv.schedule={...f.srv.schedule,timed:true,choices:[],next:null};

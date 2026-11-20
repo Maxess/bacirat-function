@@ -427,6 +427,7 @@
         const schedule = state.schedule;
         if (!schedule) return 'در حال بررسی زنگ‌های امروز…';
         if (schedule.choices.length === 1 && schedule.choices[0].id === fridaySlot) return 'برای آزمایش، «ورود به آزمایش جمعه» را بزن. این جلسه گزارش حضور یا اعلان ندارد.';
+        if (schedule.choices.some(choice => choice.manual)) return 'برای تک‌زنگ، درسِ این هفته را انتخاب کن و «شروع زنگ» را بزن.';
         if (schedule.choices.length > 1) return 'زنگ موردنظر را از برنامهٔ امروز انتخاب کن.';
         if (schedule.choices.length === 1) return 'زنگ مشخص است؛ برای ورود می‌توانی «شروع زنگ» را بزنی.';
         if (schedule.next) return `زنگ بعدی: ${schedule.next} (به وقت تهران).`;
@@ -678,7 +679,7 @@
                 || !['live', ...(staff ? ['starting'] : [])].includes(state.phase))) release(active);
             if (staff && prior.lesson && state.phase === 'idle') { wanted = false; optedIntoTest = false; }
             // Observe/rejoin one lesson per entry. An old tab never starts the next lesson on its own.
-            if (state.lesson || state.phase === 'reserved' || state.schedule?.choices.some(choice => choice.id === fridaySlot)
+            if (state.lesson || state.phase === 'reserved' || state.schedule?.choices.some(choice => choice.id === fridaySlot || choice.manual)
                 || (!state.schedule?.timed && state.schedule?.choices.length > 1)) autoStart = false;
             if (active && local.sid && scope().sid === local.sid && connected() && result.admitted === true) {
                 admitted = true; seconds = result.seconds || {};
@@ -696,7 +697,7 @@
                     const slot = state.slot;
                     enter(() => api('open',{slot}));
                 } else if (autoStart && state.phase === 'idle' && !document.hidden && state.schedule?.date === root.dataset.bellDate
-                    && state.schedule?.choices.length === 1 && state.schedule.choices[0].id !== fridaySlot) {
+                    && state.schedule?.choices.length === 1) {
                     autoStart = false;
                     enter(() => api('open',{slot:state.schedule.choices[0].id}));
                 }

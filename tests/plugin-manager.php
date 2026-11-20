@@ -71,6 +71,7 @@ try {
     $access = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.6.zip';
     $focus = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.7.zip';
     $trail = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.8.zip';
+    $timetable = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.9.zip';
     $menus = static fn() => [file_get_contents($root . '/other-settings.php'), file_get_contents($root . '/includes/header.php')];
     $managerMenus = [$other, $header];
     expect($menus() === $managerMenus, 'initialization does not rewrite the host');
@@ -336,6 +337,20 @@ try {
         && $db->query("SELECT payload FROM `$store` WHERE bucket='reports'")->fetchColumn()==='{}',
         '0.4.7 to 0.4.8 conserves data, configuration and the opt-in flag');
     submit($db,$site,'enable');
+    denied(fn()=>mpm_install($db,$dir,$timetable));
+    submit($db,$site,'disable');
+    submit($db,$site,'settings',['settings'=>$mediaInput + ['screen_share'=>'yes']]);
+    $savedSettings = mpm_settings($db,$dir,$row);
+    $saved = mpm_owned_row($db,$row)['settings'];
+    expect($savedSettings['screen_share']===true && $savedSettings['bell_hours']===$hours && $savedSettings['friday_test']===$pupilGrant,
+        'current settings include an explicitly enabled screen pilot, bell hours and the pupil grant');
+    expect(mpm_install($db,$dir,$timetable), 'upgrade to the native weekly timetable integration');
+    $row = mpm_row($db,$slug);
+    expect($row['version']==='0.4.9' && $row['owner']===$oldRow['owner'] && mpm_check_store($db,$row)===$store
+        && mpm_owned_row($db,$row)['settings']===$saved && mpm_settings($db,$dir,$row)===$savedSettings
+        && $db->query("SELECT payload FROM `$store` WHERE bucket='reports'")->fetchColumn()==='{}',
+        '0.4.8 to 0.4.9 keeps settings exactly as saved (including screen opt-in) and retains reports');
+    submit($db,$site,'enable');
     submit($db,$site,'friday-test',['friday_date'=>$date,'friday_students'=>'yes']);
     expect(mpm_settings($db,$dir,$row)['friday_test']===$pupilGrant, 'saving the same pupil policy does not disrupt a test');
     submit($db,$site,'friday-test',['friday_date'=>$date]);
@@ -360,6 +375,7 @@ try {
     expect($asset === file_get_contents(mpm_release_dir($dir, $row) . '/assets/classroom.css') && str_contains($asset, '.participant-controls'), 'new release serves its own assets');
     ob_start(); mpm_render_settings($db, $site, 'fixture', ''); $ui = ob_get_clean();
     expect(!str_contains($ui, $secret) && str_contains($ui, 'action="other-settings.php?tab=plugins"') && !str_contains($ui, '<!doctype'), 'native form fragment, no second page or plaintext secret');
+    expect(str_contains($ui, 'courses-management.php?hub_tab=classes#hubPanel'), 'clock settings link to the native timetable source');
     expect(substr_count($ui, 'type="time"') === 8 && str_contains($ui, 'name="bell_hours[4][end]" aria-label="پایان زنگ ۴" value="12:00"')
         && str_contains($ui, 'name="bell_hours[3][start]" aria-label="شروع زنگ ۳" value=""') && str_contains($ui, 'name="action" value="bell-hours"'), 'four independent pairs with persisted hours in the enabled settings tab');
     denied(fn()=>submit($db, $site, 'remove'));

@@ -2,7 +2,7 @@
 declare(strict_types=1);
 
 // School plugin runtime and gateway. Settings are exposed by the reviewed host overlay.
-const MPM_VERSION = '0.1.14';
+const MPM_VERSION = '0.1.15';
 const MPM_CLASSROOM_NATIVE = '0.4.0';
 const MPM_CLASSROOM_PUPIL_TRIAL = '0.4.3';
 const MPM_REGISTRY = 'mtg_plugin_registry';
@@ -26,6 +26,7 @@ const MPM_CATALOG = [
         '0.4.6' => '02ccccc105d26560d3e237a3314b635a6d311fc97287ebc7305dbc691a2a1a80',
         '0.4.7' => 'd4f639e75dd6d396a17fe46914b4d91da2a3dc8c54da12fcabae3bf4fcb86f94',
         '0.4.8' => '495ea3133cbbc74f5f51c90133c67f5c38ab74f1a328493bd52406ca2c68ff34',
+        '0.4.9' => 'f44e2910c0cdbc5bce1a599980d594fe8271e7d5713ffed20d9352f04732bc5d',
     ],
 ];
 
@@ -1085,7 +1086,7 @@ function mpm_render_bell_hours(string $csrf, string $slug, array $hours, string 
     echo '<form class="mb-3" method="post" action="' . $action . '">';
     mpm_hidden($csrf, 'bell-hours', $slug);
     echo '<fieldset aria-describedby="mpm-bell-help"><legend>ساعت زنگ‌های کلاس مجازی</legend>'
-        . '<p id="mpm-bell-help">به وقت تهران، برای همهٔ روزهای برنامهٔ هفتگی. برای زنگِ بدون کلاس هر دو خانه را خالی بگذار. اگر همه خالی باشند، ساعت‌بندی خاموش است.</p>'
+        . '<p id="mpm-bell-help">روز، کلاس، درس و دبیر از <a href="courses-management.php?hub_tab=classes#hubPanel" target="_top">مدیریت دروس ← کلاس‌ها و دروس ← برنامه هفتگی و دبیران</a> در سال جاری مدرسه خوانده می‌شوند. اینجا فقط ساعت شروع و پایان هر شمارهٔ زنگ را به وقت تهران ثبت کن؛ ساعت‌ها بین روزها مشترک‌اند. برای زنگی که ساعت ندارد، هر دو خانه را خالی بگذار. اگر همه خالی باشند، محدودیت ساعت خاموش است.</p>'
         . '<div class="table-responsive"><table class="table"><thead><tr><th scope="col">زنگ</th><th scope="col">شروع</th><th scope="col">پایان</th></tr></thead><tbody>';
     foreach (MPM_BELL_LABELS as $n=>$label) {
         echo '<tr><th scope="row">زنگ ' . $label . '</th>';

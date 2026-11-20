@@ -61,7 +61,7 @@ function cl_can_lesson(array $lesson, array $actor): bool
         return cl_is_staff($actor) || (($lesson['test_students'] ?? false) === true
             && $actor['year'] === $lesson['year'] && $actor['class'] === cl_class_key($lesson['class_name']));
     }
-    return !cl_is_staff($actor) || cl_assigned($actor, $lesson['year'], $lesson['teacher']);
+    return !cl_is_staff($actor) || cl_assigned($actor, $lesson['teacher']);
 }
 
 function cl_has_staff(array $lesson, int $now): bool
@@ -131,18 +131,23 @@ function cl_staff_schedule(ClassroomStore $s, array $cfg, array $class, array $a
     foreach (cl_today_slots($s->db, $class, $actor, $now) as $slot) {
         $window = cl_bell_window($hours, $slot['period'], $now);
         if ($hours && (!$window || $now >= $window['end'])) continue;
-        $teacher = cl_school_account($s->db, 'teacher', $slot['teacher'], $class['year']);
-        if (!$teacher || $teacher['year'] !== $class['year']
-            || ($s->get('lesson', cl_lesson_id($class, $slot['period'], $date))['phase'] ?? null) === 'finished') continue;
-        $label = $slot['period'] . ' · ' . $slot['subject'] . ($window ? ' · ' . $window['label'] : '');
+        if (($s->get('lesson', cl_lesson_id($class, $slot['period'], $date))['phase'] ?? null) === 'finished') continue;
+        $when = $window ? ' · ' . $window['label'] : '';
+        $label = $slot['period'] . ' · ' . $slot['subject'] . ($slot['shared'] ? ' · ' . $slot['teacher_name'] . ' · تک‌زنگ' : '') . $when;
         if ($window && $now < $window['start']) {
             if ($window['start'] < $soonest) {
                 $soonest = $window['start'];
-                $next = $label;
+                $next = $slot['shared'] ? $slot['period'] . ' · تک‌زنگ (انتخاب دستی)' . $when : $label;
             }
-        } else $choices[] = ['id'=>$slot['id'], 'label'=>$label];
+        } else $choices[] = ['id'=>$slot['id'], 'label'=>$label, 'manual'=>$slot['shared']];
     }
     return ['date'=>$date, 'timed'=>$hours !== [], 'choices'=>$choices, 'next'=>$next];
+}
+
+function cl_matches_slot(array $lesson, ?array $slot): bool
+{
+    return $slot !== null && $lesson['slot'] === $slot['id'] && $lesson['teacher'] === $slot['teacher']
+        && $lesson['subject'] === $slot['subject'] && cl_period_key($lesson['period']) === cl_period_key($slot['period']);
 }
 
 function cl_open_lesson(ClassroomStore $s, array $ctx, array $cfg, array $class, array $actor, array $input, int $now, callable $rpc): array
@@ -161,15 +166,14 @@ function cl_open_lesson(ClassroomStore $s, array $ctx, array $cfg, array $class,
     } else {
         $slotId = cl_id($input['slot'] ?? null);
         $slot = $slotId ? cl_get_slot($s->db, $class, $slotId, $now) : null;
-        if (!$slot || !cl_assigned($actor, $class['year'], $slot['teacher'])) {
-            throw new ClassroomError(403, 'برای شروع، زنگ همین کلاس از برنامهٔ امروز و دبیر مجاز آن را انتخاب کن.');
+        if (!$slot || !cl_assigned($actor, $slot['teacher'])) {
+            throw new ClassroomError(403, 'برای شروع، زنگ همین کلاس از برنامهٔ امروز با دبیر فعال و مجاز انتخاب کن.');
         }
-        $assigned = cl_school_account($s->db, 'teacher', $slot['teacher'], $class['year']);
-        if (!$assigned || $assigned['year'] !== $class['year']) throw new ClassroomError(409, 'دبیرِ این زنگ برای سال پیش‌فرض فعال نیست.');
-        $teacherName = $assigned['name'];
+        $teacherName = $slot['teacher_name'];
         $id = cl_lesson_id($class, $slot['period'], $date);
     }
-    if ($lesson && ($lesson['id'] !== $id || $lesson['year'] !== $class['year'] || $lesson['phase'] === 'closing' || cl_lesson_expired($cfg, $lesson, $now))) {
+    if ($lesson && ($lesson['id'] !== $id || $lesson['year'] !== $class['year'] || (!$test && !cl_matches_slot($lesson, $slot))
+        || $lesson['phase'] === 'closing' || cl_lesson_expired($cfg, $lesson, $now))) {
         throw new ClassroomError(409, 'جلسهٔ دیگری برای این کلاس باز یا در حال بسته‌شدن است.');
     }
     if ($lesson && $lesson['room'] !== null) {
@@ -334,11 +338,7 @@ function cl_reconcile(ClassroomStore $s, array $cfg, ?array $class, array $lesso
 {
     $test = cl_is_friday_test($lesson);
     $valid = $class !== null && $class['year'] === $lesson['year'] && !cl_lesson_expired($cfg, $lesson, $now);
-    if ($valid && !$test) {
-        $slot = cl_get_slot($s->db, $class, $lesson['slot'], $now);
-        $valid = $slot && $slot['teacher'] === $lesson['teacher'] && $slot['subject'] === $lesson['subject']
-            && cl_period_key($slot['period']) === cl_period_key($lesson['period']);
-    }
+    if ($valid && !$test) $valid = cl_matches_slot($lesson, cl_get_slot($s->db, $class, $lesson['slot'], $now));
     $closingNow = false;
     if (!$valid) {
         $closingNow = $lesson['phase'] !== 'closing';

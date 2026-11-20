@@ -94,7 +94,7 @@ $pageTitle = $roomPage ? trim($schoolName . ' ' . $classLabel)
     <?php elseif ($reports !== null): cl_render_reports($reports); ?>
     <?php elseif ($class === null): ?>
         <section class="card">
-            <h2>کلاس‌های سال پیش‌فرض</h2>
+            <h2>کلاس‌های سال جاری مدرسه</h2>
             <?php if ($friday): ?><p role="status">آزمایش جمعه تا نیمه‌شب تهران فعال است. کلاس را انتخاب کن؛ <?= (cl_friday_window($cfg, $now)['students'] ?? false) ? 'دانش‌آموزانِ همان کلاس پس از اتصال دبیر اجازهٔ ورود دارند.' : 'جلسه فقط برای دبیران و مسئولان مجاز است.' ?> آزمایش گزارش رسمی یا اعلان ندارد.</p><?php endif; ?>
             <?php if (!$classes): ?><p>برای این حساب در سال جاری کلاس قابل دسترسی نیست. عضویت یا برنامهٔ هفتگی را بررسی کن.</p><?php endif; ?>
             <div class="class-grid">

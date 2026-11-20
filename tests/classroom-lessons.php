@@ -30,7 +30,7 @@ foreach ([
     "INSERT INTO classes VALUES (10,'هفتم ۱','1405/1406'),(20,'هفتم۲','1405/1406'),(30,'هفتم۱','1404/1405')",
     "INSERT INTO students VALUES (1,'اول','مجاز','هفتم1','1405/1406','active'),(2,'دوم','مجاز','هفتم2','1405/1406','active'),
        (3,'قدیمی','','هفتم1','1404/1405','active'),(4,'غایب','','هفتم ۱','1405/1406','active'),(5,'غیرفعال','','هفتم1','1405/1406','inactive')",
-    "INSERT INTO teachers VALUES (1,'دبیر ریاضی','1405/1406',1,0),(2,'دبیر دیگر','1405/1406',1,0),(3,'ناظم','1405/1406',1,1),(4,'دبیر سال پیش','1404/1405',1,0)",
+    "INSERT INTO teachers VALUES (1,'دبیر ریاضی',NULL,1,0),(2,'دبیر دیگر','1404/1405',1,0),(3,'ناظم',NULL,1,1),(4,'دبیر سال پیش','1404/1405',1,0)",
     "INSERT INTO admins VALUES (1,'مدیر','super_admin','[]',1),(2,'ناظر عمومی','observer','[]',1),(3,'مدیر آموزشی','edu_admin','[\"manage_classes\"]',1)",
     "INSERT INTO class_schedules VALUES (11,1,'هفتم1','1405/1406','چهار شنبه','زنگ ۱','ریاضی'),(12,2,'هفتم2','1405/1406','چهارشنبه','زنگ ۱','علوم'),
        (13,2,'هفتم1','1405/1406','چهارشنبه','زنگ ۲','علوم'),(14,1,'هفتم1','1405/1406','شنبه','زنگ ۱','ریاضی'),(15,4,'هفتم1','1404/1405','چهارشنبه','زنگ ۱','ورزش')",
@@ -49,6 +49,14 @@ must(cl_current_year($db) === $year, 'explicit imported current-year setting mat
 $db->exec('UPDATE academic_years SET is_default=1');
 denied(409, fn()=>cl_current_year($db));
 $db->exec('UPDATE academic_years SET is_default=0 WHERE id=2');
+$db->exec("UPDATE settings SET key_value='1404/1405' WHERE key_name='current_academic_year'");
+must(cl_current_year($db) === '1404/1405', 'native current selection wins over the default flag');
+$db->exec('UPDATE academic_years SET status=0 WHERE id=2');
+denied(409, fn()=>cl_current_year($db));
+$db->exec("UPDATE settings SET key_value='1402/1403' WHERE key_name='current_academic_year'");
+must(cl_current_year($db) === $year, 'deleted year falls back to an unambiguous active default');
+$db->exec('UPDATE academic_years SET status=1 WHERE id=2');
+$db->exec("UPDATE settings SET key_value='1405/1406' WHERE key_name='current_academic_year'");
 $classes = cl_classes($db, $year);
 must(array_keys($classes) === [10,20], 'current default only');
 $db->exec("INSERT INTO classes VALUES (31,'هفتم۱','1405/1406')");
@@ -100,11 +108,15 @@ try {
 
 denied(403,fn()=>cl_class_for($db,$classes,20,$student));
 must(cl_access_class($db,$classes[10],$other) && !cl_access_class($db,$classes[20],$teacher), 'teacher class from assignment, not display name');
-must(array_keys(cl_today_slots($db,$first,$teacher,$t)) === [11] && array_keys(cl_today_slots($db,$first,$deputy,$t)) === [11,13], 'Tehran weekday, real schedule id and deputy');
+must(array_keys(cl_today_slots($db,$first,$teacher,$t)) === [11] && array_keys(cl_today_slots($db,$first,$deputy,$t)) === [11,13], 'Tehran weekday and scheduled teacher/deputy even with null or stale teacher year');
 
 $db->exec("INSERT INTO class_schedules VALUES (91,2,'هفتم1','1405/1406','چهارشنبه','۰۱','علوم')");
 must(!cl_get_slot($db,$first,11,$t) && !cl_get_slot($db,$first,91,$t) && array_keys(cl_today_slots($db,$first,$deputy,$t)) === [13], 'conflicting rows for the same bell are rejected');
 $db->exec('DELETE FROM class_schedules WHERE id=91');
+$db->exec("INSERT INTO class_schedules VALUES (91,1,'هفتم1','1405/1406','چهار شنبه','زنگ ۱','ریاضی'),
+    (92,1,'هفتم1','1405/1406','چهارشنبه','زنگ ۵','نامعتبر'),(93,1,'هفتم1','1405/1406','چهارشنبه','کلاس ۳','نامعتبر')");
+must(array_keys(cl_slots_for_date($db,$first,$t)) === [13], 'identical duplicates and malformed periods are not eligible even without clock hours');
+$db->exec('DELETE FROM class_schedules WHERE id IN (91,92,93)');
 
 $runtime = null; $sfus = []; $snapshots = []; $outage = false;
 $ctx = ['write_runtime'=>static function ($value) use (&$runtime) { $runtime = $value; }];
@@ -485,6 +497,39 @@ must(!cl_active($s,10) && !isset($sfus[$secondRoom]) && cl_report_detail($s,$oth
 $fourth = strtotime('2026-11-25T06:50:00Z');
 must(array_column($at($teacher,$fourth)['choices'],'id') === [74], 'fourth bell maps to the normalized school period number');
 must(!$at($teacher,$fourth+2700)['choices'], 'bell end is exclusive, even if it was never opened');
+// V1.15 stores a second subject in the exact same cell. There is no persisted week parity.
+$sharedAt = $bell + 7*86400;
+$db->exec("INSERT INTO class_schedules VALUES (92,2,'هفتم1','1405/1406','چهار شنبه','زنگ ۱','آزمایشگاه')");
+must(array_column($at($deputy,$sharedAt)['choices'],'id') === [92,99] && str_contains($at($deputy,$sharedAt-1)['next'],'انتخاب دستی'),
+    'the two native alternatives occupy one timed bell');
+must(array_column($at($teacher,$sharedAt)['choices'],'id') === [99] && $at($teacher,$sharedAt)['choices'][0]['manual'],
+    'only the assigned alternative is exposed to the teacher, and never auto-started');
+$db->exec('UPDATE teachers SET status=0 WHERE id=2');
+must(array_column($at($deputy,$sharedAt)['choices'],'id') === [99] && $at($deputy,$sharedAt)['choices'][0]['manual'],
+    'a disabled partner is not eligible and does not make the bell automatic');
+denied(403,fn()=>$timedOpen($deputy,92,$sharedAt));
+$db->exec('UPDATE teachers SET status=1 WHERE id=2');
+$db->exec("INSERT INTO class_schedules VALUES (93,NULL,'هفتم1','1405/1406','چهار شنبه','زنگ ۱','سومین ردیف')");
+must(!$at($deputy,$sharedAt)['choices'], 'three allocations in a cell stay blocked');
+$db->exec('DELETE FROM class_schedules WHERE id=93');
+denied(403,fn()=>$timedOpen($teacher,92,$sharedAt));
+denied(409,fn()=>$timedOpen($deputy,92,$sharedAt-1));
+$sharedLesson = $timedOpen($teacher,99,$sharedAt); $sharedRoom = $sharedLesson['room'];
+$event('room_started',$sharedRoom,$sharedAt+1); $wire($sharedRoom,$teacherWire); $pulse(10,$teacher,'PA_Teacher',$sharedAt+2);
+must($sample(10,$sharedAt+3,$first)['phase'] === 'live', 'ordinary year-independent teacher supervises the selected row');
+denied(409,fn()=>$timedOpen($deputy,92,$sharedAt+4));
+$event('participant_left',$sharedRoom,$sharedAt+5,'teacher-1','PA_Teacher');
+must(cl_active($s,10)['phase'] === 'paused', 'chosen alternate can pause');
+denied(409,fn()=>$timedOpen($deputy,92,$sharedAt+6));
+$resumedAlternate = $timedOpen($deputy,99,$sharedAt+7);
+must($resumedAlternate['id'] === $sharedLesson['id'] && $resumedAlternate['teacher'] === 1
+    && $resumedAlternate['deadline'] === $sharedAt+60, 'only the chosen alternate can resume; the deadline is pinned');
+cl_close_lesson($s,$timed,$resumedAlternate,$sharedAt+8,$rpc);
+denied(409,fn()=>$timedOpen($deputy,92,$sharedAt+9));
+must(!$at($deputy,$sharedAt+9)['choices'] && cl_report_detail($s,$teacher,$sharedLesson['id'])['slot'] === 99
+    && cl_report_detail($s,$other,$sharedLesson['id']) === null, 'one report per bell, recorded under its selected teacher');
+$db->exec('DELETE FROM class_schedules WHERE id=92');
+
 // A one-day pilot is independent of bell hours, timetable assignments and official attendance.
 $fri = strtotime('2026-11-19T20:30:00Z'); // Friday 00:00 in Tehran, still Thursday in UTC.
 $sat = strtotime('2026-11-20T20:30:00Z');

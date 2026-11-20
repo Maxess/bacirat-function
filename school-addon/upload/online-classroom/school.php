@@ -5,17 +5,21 @@ require_once __DIR__ . '/core.php';
 // The school owns these records. The plugin only reads them and never repairs the host's schema.
 function cl_current_year(PDO $db): string
 {
-    $defaults = cl_query($db, 'SELECT year_name, status FROM academic_years WHERE is_default = 1 LIMIT 2', [])->fetchAll(PDO::FETCH_ASSOC);
-    if (count($defaults) === 1 && (int)$defaults[0]['status'] === 1 && ($year = cl_year($defaults[0]['year_name'])) !== '') return $year;
-    if ($defaults === []) {
-        // Some host imports set the explicit current-year setting before setting a master-table flag. Never guess a year from date or class rows.
-        $selected = cl_year((string)cl_query($db, 'SELECT key_value FROM settings WHERE key_name=?', ['current_academic_year'])->fetchColumn());
-        if ($selected !== '') {
-            $known = cl_query($db, 'SELECT year_name FROM academic_years WHERE status=1', [])->fetchAll(PDO::FETCH_COLUMN);
-            if (count(array_filter($known, static fn($year) => cl_year($year) === $selected)) === 1) return $selected;
-        }
+    $years = $defaults = [];
+    $rows = cl_query($db, 'SELECT year_name,status,is_default FROM academic_years', []);
+    while ($row = $rows->fetch(PDO::FETCH_ASSOC)) {
+        $key = cl_year($row['year_name']);
+        if ($key !== '') $years[$key][] = (int)$row['status'];
+        if ((int)$row['is_default'] === 1) $defaults[] = $key;
     }
-    throw new ClassroomError(409, 'در تنظیمات مدرسه یک سال تحصیلیِ فعال را به‌عنوان پیش‌فرض انتخاب کن.');
+    if (count($defaults) <= 1) {
+        // Baci's classes.php opens the school's current year first, not necessarily the default flag.
+        // Never open a different year if that selection is inactive or ambiguous.
+        $selected = cl_year((string)cl_query($db, 'SELECT key_value FROM settings WHERE key_name=?', ['current_academic_year'])->fetchColumn());
+        if (!isset($years[$selected])) $selected = $defaults[0] ?? '';
+        if (($years[$selected] ?? []) === [1]) return $selected;
+    }
+    throw new ClassroomError(409, 'در مدیریت دروس، یک سال تحصیلیِ فعال را به‌عنوان سال جاری مدرسه انتخاب کن.');
 }
 
 function cl_class_key(?string $s): string
@@ -104,7 +108,8 @@ function cl_school_account(PDO $db, string $role, int $id, string $year): ?array
         $row = cl_query($db, 'SELECT * FROM teachers WHERE id=?', [$id])->fetch(PDO::FETCH_ASSOC);
         if (!$row || (int)$row['status'] !== 1) return null;
         $name = (string)$row['full_name'];
-        if ((int)($row['is_deputy'] ?? 0) === 1 && cl_year($row['academic_year'] ?? '') === $year) $office = 'deputy';
+        // Baci v4.40+: teachers and their roles are global. class_schedules owns the year of each allocation.
+        if ((int)($row['is_deputy'] ?? 0) === 1) $office = 'deputy';
     } elseif ($role === 'admin') {
         $row = cl_query($db, 'SELECT name,role,permissions,status FROM admins WHERE id=?', [$id])->fetch(PDO::FETCH_ASSOC);
         if (!$row || (int)$row['status'] !== 1) return null;
@@ -116,7 +121,7 @@ function cl_school_account(PDO $db, string $role, int $id, string $year): ?array
         return null;
     }
     return ['id'=>$id, 'identity'=>$role . '-' . $id, 'name'=>cl_safe_label($name ?: $role, 90), 'role'=>$role,
-        'class'=>$class ?? null, 'office'=>$office ?? null, 'year'=>cl_year($row['academic_year'] ?? '')];
+        'class'=>$class ?? null, 'office'=>$office ?? null, 'year'=>$year];
 }
 
 function cl_safe_label(string $name, int $limit): string
@@ -138,15 +143,15 @@ function cl_is_staff(array $actor): bool
     return $actor['role'] !== 'student';
 }
 
-function cl_assigned(array $actor, string $year, int $teacher): bool
+function cl_assigned(array $actor, int $teacher): bool
 {
-    return $actor['office'] !== null || ($actor['role'] === 'teacher' && $actor['id'] === $teacher && $actor['year'] === $year);
+    return $actor['office'] !== null || ($actor['role'] === 'teacher' && $actor['id'] === $teacher);
 }
 
 function cl_class_for(PDO $db, array $classes, int $classId, array $actor, bool $friday = false): array
 {
     $class = $classes[$classId] ?? null;
-    if (!$class || !cl_access_class($db, $class, $actor, $friday)) throw new ClassroomError(403, 'این کلاس برای حساب تو در سال پیش‌فرض در دسترس نیست.');
+    if (!$class || !cl_access_class($db, $class, $actor, $friday)) throw new ClassroomError(403, 'این کلاس برای حساب تو در سال جاری مدرسه در دسترس نیست.');
     return $class;
 }
 
@@ -154,7 +159,6 @@ function cl_access_class(PDO $db, array $class, array $actor, bool $friday = fal
 {
     if ($actor['role'] === 'student') return $actor['class'] === $class['key'] && $actor['year'] === $class['year'];
     if ($friday || $actor['office']) return true; // The demo only widens visibility for authenticated staff.
-    if ($actor['year'] !== $class['year']) return false;
     $rows = cl_query($db, 'SELECT class_name,academic_year FROM class_schedules WHERE teacher_id=?', [$actor['id']]);
     while ($slot = $rows->fetch(PDO::FETCH_ASSOC)) if (cl_slot_class($slot, $class)) return true;
     return false;
@@ -165,15 +169,9 @@ function cl_slot_class(array $slot, array $class): bool
     return cl_year($slot['academic_year']) === $class['year'] && cl_class_key($slot['class_name']) === $class['key'];
 }
 
-function cl_slot_info(array $slot): array
-{
-    return ['id'=>cl_id($slot['id']), 'teacher'=>cl_id($slot['teacher_id']), 'day'=>cl_schedule_day((string)$slot['day_of_week']),
-        'period'=>cl_safe_label((string)$slot['period_num'], 50), 'subject'=>cl_safe_label((string)$slot['subject_name'], 100)];
-}
-
 function cl_period_key(string $label): string
 {
-    return preg_replace('/^(?:زنگ)?0*([1-9][0-9]*)$/uD', '$1', cl_class_key($label)) ?? '';
+    return preg_match('/\A(?:زنگ)?0*([1-4])\z/u', cl_class_key($label), $parts) ? $parts[1] : '';
 }
 
 /** The weekly timetable maps the numbered bell to a class; its hours come from the plugin. */
@@ -188,27 +186,40 @@ function cl_bell_window(array $hours, string $period, int $now): ?array
 
 function cl_slots_for_date(PDO $db, array $class, int $now): array
 {
-    $rows = cl_query($db, 'SELECT id,academic_year,class_name,day_of_week,period_num,subject_name,teacher_id FROM class_schedules ORDER BY period_num,id', []);
+    $rows = cl_query($db, 'SELECT cs.id,cs.academic_year,cs.class_name,cs.day_of_week,cs.period_num,cs.subject_name,cs.teacher_id,
+        t.id AS assigned_id,t.full_name AS assigned_name FROM class_schedules cs
+        LEFT JOIN teachers t ON t.id=cs.teacher_id AND t.status=1 ORDER BY cs.id', []);
     $day = (int)cl_day($now)->format('w');
-    $slots = $periods = [];
+    $periods = [];
     while ($slot = $rows->fetch(PDO::FETCH_ASSOC)) {
-        if (!cl_slot_class($slot, $class)) continue;
-        $info = cl_slot_info($slot);
-        $label = cl_period_key($info['period']);
-        if (!$info['id'] || $info['day'] !== $day || $label === '') continue;
-        if (isset($periods[$label])) {
-            unset($slots[$periods[$label]]); // Conflicting rows do not define two separate occurrences of a bell.
-            continue;
+        if (!cl_slot_class($slot, $class) || cl_schedule_day($slot['day_of_week']) !== $day) continue;
+        $number = cl_period_key($slot['period_num']);
+        if ($number !== '' && cl_id($slot['id'])) $periods[$number][] = $slot;
+    }
+    ksort($periods, SORT_NUMERIC);
+    $slots = [];
+    // classes.php groups its cells by the native class key and the stored year/day/period.
+    $cell = static fn($row) => [$row['academic_year'], preg_replace('/[\s\-\/_]+/', '', trim($row['class_name'])), $row['day_of_week'], $row['period_num']];
+    foreach ($periods as $group) {
+        $shared = count($group) === 2;
+        if (count($group) > 2 || ($shared && ($cell($group[0]) !== $cell($group[1])
+            || [$group[0]['teacher_id'], trim($group[0]['subject_name'])] === [$group[1]['teacher_id'], trim($group[1]['subject_name'])]))) continue;
+        // Baci stores both alternatives but no week parity. Keep both rows in the same bell;
+        // require manual selection even if only one teacher is active/eligible for this viewer.
+        foreach ($group as $row) {
+            $id = cl_id($row['id']);
+            $teacher = cl_id($row['assigned_id']);
+            $subject = cl_safe_label($row['subject_name'], 100);
+            if ($teacher && $subject !== '') $slots[$id] = ['id'=>$id, 'teacher'=>$teacher, 'subject'=>$subject,
+                'teacher_name'=>cl_safe_label((string)$row['assigned_name'], 90), 'period'=>cl_safe_label($row['period_num'], 50), 'shared'=>$shared];
         }
-        $periods[$label] = $info['id'];
-        if ($info['teacher'] && $info['subject'] !== '') $slots[$info['id']] = $info;
     }
     return $slots;
 }
 
 function cl_today_slots(PDO $db, array $class, array $actor, int $now): array
 {
-    return array_filter(cl_slots_for_date($db, $class, $now), static fn($info) => cl_assigned($actor, $class['year'], $info['teacher']));
+    return array_filter(cl_slots_for_date($db, $class, $now), static fn($info) => cl_assigned($actor, $info['teacher']));
 }
 
 function cl_get_slot(PDO $db, array $class, int $slotId, int $now): ?array
