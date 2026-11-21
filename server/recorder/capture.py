@@ -34,12 +34,15 @@ def encoder(ffmpeg, pattern, seconds=450):
     # leaving margin below the 45 MB per-part limit even with continuous motion.
     return [str(ffmpeg), '-nostdin', '-hide_banner', '-loglevel', 'error', '-n', '-f', 'webm',
             '-probesize', '512k', '-analyzeduration', '1200000', '-threads', '2', '-i', 'pipe:0',
-            '-map', '0:v:0', '-map', '0:a:0', '-t', '7250', '-vf', f'fps={FPS}',
+            '-map', '0:v:0', '-map', '0:a:0', '-t', '7250', '-vf', f'fps={FPS}:start_time=0',
             '-c:v', 'libx264', '-threads', '2', '-pix_fmt', 'yuv420p', '-preset', 'veryfast',
             '-crf', '22', '-maxrate', '640k', '-bufsize', '1280k', '-g', str(FPS * 10),
             '-force_key_frames', f'expr:gte(t,n_forced*{seconds})',
             '-c:a', 'aac', '-b:a', '64k', '-ac', '1', '-ar', '48000', '-f', 'segment', '-segment_time', str(seconds),
-            '-reset_timestamps', '1', '-segment_format', 'mp4', '-segment_format_options', 'movflags=+faststart', str(pattern)]
+            # AAC priming and stream timestamp rounding can shift a forced keyframe
+            # just before the requested cut. Accept it instead of doubling a part.
+            '-segment_time_delta', f'{1/FPS:.6f}', '-reset_timestamps', '1', '-segment_format', 'mp4',
+            '-segment_format_options', 'movflags=+faststart', str(pattern)]
 
 
 class CaptureError(Exception):

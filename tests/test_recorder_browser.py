@@ -298,13 +298,18 @@ class CompositorTest(unittest.IsolatedAsyncioTestCase):
         ffmpeg = os.environ['MPM_REC_FFMPEG']
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            source = subprocess.check_output([ffmpeg, '-v', 'error', '-f', 'lavfi', '-i', 'testsrc=size=320x180:rate=10',
-                '-f', 'lavfi', '-i', 'sine=frequency=680', '-t', '3.1', '-c:v', 'libvpx', '-pix_fmt', 'yuv420p',
-                '-c:a', 'libopus', '-f', 'webm', '-'], timeout=12)
-            subprocess.run(encoder(ffmpeg, root / 'clip-000-%03d.mp4', seconds=1), input=source, check=True, timeout=15)
+            source = subprocess.check_output([ffmpeg, '-v', 'error', '-f', 'lavfi', '-i',
+                'testsrc2=size=1280x720:rate=12,noise=alls=15:allf=t+u',
+                '-f', 'lavfi', '-i', 'sine=sample_rate=48000:frequency=553', '-t', '16.5', '-c:v', 'libvpx',
+                '-deadline', 'realtime', '-cpu-used', '8', '-threads', '2', '-b:v', '1250k',
+                '-c:a', 'libopus', '-b:a', '64k', '-f', 'webm', '-'], timeout=16)
+            subprocess.run(encoder(ffmpeg, root / 'clip-000-%03d.mp4', seconds=8), input=source, check=True, timeout=15)
             parts = clips(root)
-            self.assertGreaterEqual(len(parts), 3)
+            self.assertEqual(len(parts), 3, 'never skip the first keyframe boundary and create a double-length part')
             for part in parts:
                 raw = part.read_bytes()
                 self.assertLess(raw.find(b'moov'), raw.find(b'mdat'))
                 subprocess.run([ffmpeg, '-v', 'error', '-i', str(part), '-f', 'null', '-'], check=True, timeout=5)
+                info = subprocess.run([ffmpeg, '-hide_banner', '-i', str(part)], capture_output=True, text=True, timeout=5).stderr
+                duration = float(info.split('Duration: 00:00:', 1)[1].split(',', 1)[0])
+                self.assertLessEqual(duration, 8.20)
