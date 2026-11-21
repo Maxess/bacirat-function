@@ -78,15 +78,33 @@ function cl_day(int $now): DateTimeImmutable
     return Calendar::tehran($now);
 }
 
+function cl_tehran_clock(int $stamp): string
+{
+    return Calendar::clock($stamp);
+}
+
+function cl_tehran_midnight(int $now): int
+{
+    return cl_day($now)->modify('tomorrow')->getTimestamp();
+}
+
+/** Wall-clock labels, never elapsed time or the host/browser's default timezone. */
+function cl_lesson_times(array $lesson): string
+{
+    $start = $lesson['started'] ?? null;
+    $end = $lesson['ended'] ?? null;
+    if (!is_int($start) || $start <= 0) return '';
+    $label = cl_tehran_clock($start);
+    if (is_int($end) && $end >= $start) {
+        $label .= ' تا ' . cl_tehran_clock($end);
+        if (cl_day($end)->format('Y-m-d') !== cl_day($start)->format('Y-m-d')) $label .= ' (روز بعد)';
+    }
+    return cl_persian_digits($label);
+}
+
 function cl_display_day(string $iso): string
 {
     return Calendar::label($iso);
-}
-
-function cl_today_view(int $now): array
-{
-    $iso = cl_day($now)->format('Y-m-d');
-    return ['day'=>$iso, 'dayLabel'=>cl_display_day($iso)];
 }
 
 function cl_persian_digits(string $value): string
@@ -106,7 +124,7 @@ function cl_friday_window(array $cfg, int $now): ?array
     if (!is_array($plan) || !is_string($plan['id'] ?? null) || !preg_match('/^[a-f0-9]{32}$/D', $plan['id'])) return null;
     $day = cl_day($now);
     if ($day->format('w') !== '5' || $day->format('Y-m-d') !== ($plan['date'] ?? null)) return null;
-    return ['id'=>$plan['id'], 'end'=>$day->modify('tomorrow')->getTimestamp(), 'label'=>CL_FRIDAY_HOURS,
+    return ['id'=>$plan['id'], 'end'=>cl_tehran_midnight($now), 'label'=>CL_FRIDAY_HOURS,
         'students'=>($plan['students'] ?? false) === true];
 }
 

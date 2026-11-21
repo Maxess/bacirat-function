@@ -23,6 +23,11 @@ final class Calendar
         return (new DateTimeImmutable('@' . $timestamp))->setTimezone(new DateTimeZone('Asia/Tehran'));
     }
 
+    public static function clock(int $timestamp): string
+    {
+        return self::tehran($timestamp)->format('H:i');
+    }
+
     public static function digits(string $value): string
     {
         return str_replace(range(0, 9), self::PERSIAN, $value);

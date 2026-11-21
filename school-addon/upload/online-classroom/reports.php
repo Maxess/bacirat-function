@@ -36,11 +36,13 @@ function cl_reports(ClassroomStore $s, array $actor): array
 function cl_render_reports(array $data): void
 {
     if (isset($data['report'])) {
-        $r = $data['report']; ?>
+        $r = $data['report'];
+        $times = cl_lesson_times($r); ?>
         <section class="card report-summary">
             <a href="<?= cl_html(cl_href(['view'=>'reports'])) ?>">← فهرست زنگ‌های برگزارشده</a>
-            <h2><?= cl_html($r['class_name'] . ' · ' . $r['subject']) ?></h2>
+            <h2><?= cl_html($r['class_name'] . ' · ' . $r['subject'] . (isset($r['repeat_of']) ? ' · برگزاری مجدد' : '')) ?></h2>
             <p><?= cl_html(cl_persian_digits($r['year']) . ' | ' . cl_display_day($r['date']) . ' | ' . cl_persian_digits($r['period']) . ' | ' . $r['teacher_name']) ?></p>
+            <?php if ($times !== ''): ?><p>ساعت برگزاری (وقت تهران): <?= cl_html($times) ?></p><?php endif; ?>
             <p>مدت برگزاری فعال: <strong><bdi dir="ltr"><?= cl_persian_digits(cl_duration($r['active_seconds'])) ?></bdi></strong> <span class="meta">(بدون زمان انتظار یا وقفه)</span></p>
             <?php if (!empty($data['delivery'])): $d = $data['delivery']; ?>
             <p class="meta">نتیجهٔ اعلان‌ها: <?= (int)($d['sent'] ?? 0) ?> ارسال شده · <?= (int)($d['failed'] ?? 0) ?> خطا · <?= (int)($d['uncertain'] ?? 0) ?> نامشخص · <?= (int)($d['skipped'] ?? 0) ?> رد شده</p>
@@ -61,9 +63,9 @@ function cl_render_reports(array $data): void
         <p class="meta">حضور هر دانش‌آموز نسبت به مدت واقعی برگزاری محاسبه می‌شود، نه مدت باز بودن صفحه یا اتاق انتظار.</p>
         <?php if (!$data['reports']): ?><p>هنوز زنگ پایان‌یافته‌ای برای این حساب ثبت نشده است.</p><?php endif; ?>
         <ul class="report-list">
-        <?php foreach ($data['reports'] as $r): ?>
-            <li><a href="<?= cl_html(cl_href(['view'=>'reports','lesson'=>$r['id']])) ?>"><strong><?= cl_html($r['class_name'] . ' · ' . $r['subject']) ?></strong>
-                <span><?= cl_html(cl_display_day($r['date']) . ' | ' . cl_persian_digits($r['period']) . ' | ' . $r['teacher_name'] . ' | ' . cl_persian_digits($r['year'])) ?></span></a></li>
+        <?php foreach ($data['reports'] as $r): $times = cl_lesson_times($r); ?>
+            <li><a href="<?= cl_html(cl_href(['view'=>'reports','lesson'=>$r['id']])) ?>"><strong><?= cl_html($r['class_name'] . ' · ' . $r['subject'] . (isset($r['repeat_of']) ? ' · برگزاری مجدد' : '')) ?></strong>
+                <span><?= cl_html(cl_display_day($r['date']) . ($times !== '' ? ' · ' . $times : '') . ' | ' . cl_persian_digits($r['period']) . ' | ' . $r['teacher_name'] . ' | ' . cl_persian_digits($r['year'])) ?></span></a></li>
         <?php endforeach; ?>
         </ul>
         <?php if ($data['next'] !== null): ?><a href="<?= cl_html(cl_href(['view'=>'reports','before'=>$data['next']])) ?>">زنگ‌های قدیمی‌تر</a><?php endif; ?>

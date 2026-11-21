@@ -13,7 +13,7 @@ function blocked(callable $call, int $status): void {
     throw new RuntimeException('expected denial');
 }
 $room = 'test-example-v3-c10-cccccccccccccccccccccccc';
-$cfg = ['api_key'=>str_repeat('x',24),'api_secret'=>str_repeat('y',64)];
+$cfg = ['api_key'=>str_repeat('x',24),'api_secret'=>str_repeat('y',64),'camera_share'=>true];
 $student = ['identity'=>'student-1','name'=>'دانش‌آموز'];
 [$header,$payload,$sig]=explode('.',cl_join_ticket($cfg,$room,$student));
 $claims=json_decode(base64_decode(strtr($payload,'-_','+/'),true),true,512,JSON_THROW_ON_ERROR);
@@ -71,14 +71,17 @@ $rpc = static function (string $method, string $target, array $data) use (&$perm
     return $peer($id);
 };
 $get = fn()=> $s->get('lesson',$lesson['id']);
-$set = static fn($actor,$feature,$enabled,$identity=null)=>cl_set_access($s,$get(),$actor,compact('feature','enabled','identity'),$now,$rpc);
+$set = static fn($actor,$feature,$enabled,$identity=null)=>cl_set_access($s,$cfg,$get(),$actor,compact('feature','enabled','identity'),$now,$rpc);
 blocked(fn()=>$set($student,'board',true,'student-1'),403);
 blocked(fn()=>$set($teacher,'screen',true),400);
 blocked(fn()=>$set($teacher,'mic','true'),400);
 blocked(fn()=>$set($teacher,'board',true,'admin-1'),400);
 blocked(fn()=>$set($teacher,'mic',true,'student-999'),409);
 blocked(fn()=>$set($teacher,'mic',true,['student-1']),400);
-blocked(fn()=>cl_set_access($s,array_replace($lesson,['camera_codec'=>null]),$teacher,['feature'=>'camera','enabled'=>true],$now,$rpc),409);
+blocked(fn()=>cl_set_access($s,$cfg,array_replace($lesson,['camera_codec'=>null]),$teacher,['feature'=>'camera','enabled'=>true],$now,$rpc),409);
+$disabled = array_replace($cfg, ['camera_share'=>false, 'screen_share'=>true]);
+blocked(fn()=>cl_set_access($s,$disabled,$lesson,$teacher,['feature'=>'camera','enabled'=>true],$now,$rpc),409);
+check(cl_webcam_codec($disabled,$lesson)===null && cl_screen_enabled($disabled,$lesson), 'screen works independently when webcam is turned off');
 check($get() === $lesson && !$updates,'invalid writes do not modify policy or permissions');
 
 $set($admin,'mic',true,'student-1');
@@ -88,6 +91,10 @@ $set($teacher,'camera',true);
 check($permissions['student-1'] === $both && $permissions['student-6'] === $cam && $permissions['teacher-1'] === $cam
     && $permissions['admin-1'] === $cam && $permissions['student-999'] === $listener,'group cameras for admitted people, never screen share or data');
 check($tracks['student-1'] === ['MICROPHONE'] && !$tracks['student-6'],'grant does not publish, and video does not replace audio');
+$tracks['student-1'][] = 'CAMERA';
+check(cl_sync_media($disabled,$get(),cl_live_media_peers($rpc('ListParticipants',$room,['room'=>$room])),$rpc)
+    && $permissions['student-1'] === $mic && $tracks['student-1'] === ['MICROPHONE'], 'a global webcam denial removes stale sources without touching mic');
+$set($teacher,'camera',true);
 $tracks['student-1'][] = 'CAMERA';
 $set($teacher,'mic',false,'student-1');
 check($permissions['student-1'] === $cam && $tracks['student-1'] === ['CAMERA'],'revoking mic preserves independent camera');
@@ -100,7 +107,7 @@ check($get()['access']['camera'] === ['all'=>false,'members'=>[]] && $permission
 // A newly sampled SID starts with a listener ticket and is granted only after PHP sees admission.
 $pending = $get();
 $pending['seen']['student-999'] = $sfuSids['student-999'];
-$refresh = fn($l) => cl_sync_media($l,cl_live_media_peers($rpc('ListParticipants',$room,['room'=>$room])),$rpc);
+$refresh = fn($l) => cl_sync_media($cfg,$l,cl_live_media_peers($rpc('ListParticipants',$room,['room'=>$room])),$rpc);
 check($permissions['student-999'] === $listener && $refresh($pending) && $permissions['student-999'] === $mic,'late admission gets the lesson default');
 $broken['student-6'] = 'reconnect';
 blocked(fn()=>$set($teacher,'camera',true,'student-6'),502);

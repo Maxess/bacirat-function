@@ -4,7 +4,7 @@ declare(strict_types=1);
 use BaciClassroom\Calendar;
 
 // School plugin runtime and gateway. Settings are exposed by the reviewed host overlay.
-const MPM_VERSION = '0.1.17';
+const MPM_VERSION = '0.1.18';
 const MPM_CLASSROOM_NATIVE = '0.4.0';
 const MPM_CLASSROOM_PUPIL_TRIAL = '0.4.3';
 const MPM_REGISTRY = 'mtg_plugin_registry';
@@ -31,6 +31,7 @@ const MPM_CATALOG = [
         '0.4.9' => 'f44e2910c0cdbc5bce1a599980d594fe8271e7d5713ffed20d9352f04732bc5d',
         '0.4.10' => 'dec342dc941221a036554959c688cef2e2fb4921c4527447d737664b7820117e',
         '0.4.11' => '88d32ab3f56ea0c52e59c9cbfb41e178bfb5bcf9e5ae1ae88433be6997202964',
+        '0.4.12' => 'fbfdc731b25c38dff963f5d98069807aaef117902824011272abae3a781d9369',
     ],
 ];
 
@@ -1048,7 +1049,7 @@ function mpm_post(PDO $db, ?array $site, string $origin, string $csrf): string
                     $values['friday_test'] = ['date'=>$date,'id'=>bin2hex(random_bytes(16))];
                     if ($withStudents) $values['friday_test']['students'] = true;
                 }
-                $message = 'آزمایش فقط برای جمعهٔ ' . $date . ' (به وقت تهران) ثبت شد.';
+                $message = 'آزمایش فقط برای ' . Calendar::label($date) . '، به وقت تهران، ثبت شد.';
             }
             // Change admission under the same lock before attempting to retire any obsolete demo rooms.
             mpm_write_settings($db, $dir, $row, $values);

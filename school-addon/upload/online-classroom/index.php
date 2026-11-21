@@ -9,7 +9,7 @@ $actor = $errorMessage = $class = $reports = $friday = null;
 $classes = $choices = [];
 $connect = $year = $schoolName = $classLabel = '';
 $now = time();
-$today = cl_today_view($now);
+$bellDate = cl_day($now)->format('Y-m-d');
 try {
     $cfg = cl_config();
     $s = cl_store();
@@ -57,7 +57,7 @@ $panel = match ($actor['office'] ?? $actor['role'] ?? '') {
     'student'=>'student-panel.php', 'teacher'=>'teacher-panel.php', 'deputy'=>'deputy-panel.php', 'admin'=>'index.php?view=dashboard', default=>'index.php?view=login',
 };
 $roomPage = $class !== null && $errorMessage === null;
-if ($roomPage) cl_headers(true, $staff && ($cfg['screen_share'] ?? false) === true);
+if ($roomPage) cl_headers(true, $staff && ($cfg['screen_share'] ?? false) === true, ($cfg['camera_share'] ?? false) === true);
 $pageTitle = $roomPage ? trim($schoolName . ' ' . $classLabel)
     : ($reports !== null ? 'حضور و غیاب کلاس مجازی' : 'کلاس مجازی');
 ?>
@@ -96,7 +96,7 @@ $pageTitle = $roomPage ? trim($schoolName . ' ' . $classLabel)
     <?php elseif ($class === null): ?>
         <section class="card">
             <h2>کلاس‌های سال جاری مدرسه</h2>
-            <p class="meta"><time datetime="<?= cl_html($today['day']) ?>"><?= cl_html($today['dayLabel']) ?></time> · وقت تهران</p>
+            <p class="meta"><time datetime="<?= cl_html($bellDate) ?>"><?= cl_html(cl_display_day($bellDate)) ?></time> · وقت تهران</p>
             <?php if ($friday): ?><p role="status">آزمایش جمعه تا نیمه‌شب تهران فعال است. کلاس را انتخاب کن؛ <?= (cl_friday_window($cfg, $now)['students'] ?? false) ? 'دانش‌آموزانِ همان کلاس پس از اتصال دبیر اجازهٔ ورود دارند.' : 'جلسه فقط برای دبیران و مسئولان مجاز است.' ?> آزمایش گزارش رسمی یا اعلان ندارد.</p><?php endif; ?>
             <?php if (!$classes): ?><p>برای این حساب در سال جاری کلاس قابل دسترسی نیست. عضویت یا برنامهٔ هفتگی را بررسی کن.</p><?php endif; ?>
             <div class="class-grid">

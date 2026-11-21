@@ -27,6 +27,7 @@
     if (!root) return;
     const lk = window.LivekitClient;
     const fridaySlot = 'friday-test';
+    const isRepeatSlot = value => typeof value === 'string' && /^repeat-[a-f0-9]{32}$/.test(value);
     const staff = root.dataset.moderator === 'yes';
     const roomClass = Number(root.dataset.class);
     const api = (action, data = {}, options) => request(root, action, {class: roomClass, ...data}, options);
@@ -39,17 +40,17 @@
         camera:{label:'دوربین',icons:['camera','camera-off'],source:1}, board:{label:'نوشتن روی تخته',icons:['pen']}};
     const permissionIcons = el('permission-icons')?.content;
     const cameraSource = lk?.Track.Source.Camera, micSource = lk?.Track.Source.Microphone, screenSource = lk?.Track.Source.ScreenShare;
-    // VP8, one layer, no second codec. These are encoder targets, not wire rates.
-    const cameraVideo = {width:320,height:180,frameRate:8,bitrate:85000};
+    // One layer, no second codec. These are encoder targets, not wire rates.
+    const cameraVideo = {width:256,height:144,frameRate:10,bitrate:50000};
     const shareVideo = {width:640,height:360,frameRate:2,bitrate:70000}; // Static pages and large text, not motion video.
+    const canCaptureCamera = typeof window.navigator?.mediaDevices?.getUserMedia === 'function';
     const canCaptureScreen = typeof window.navigator?.mediaDevices?.getDisplayMedia === 'function';
     const attention = window.ClassroomAttention(changeWake);
     let active = null, connecting = false, busy = false, polling = false, needsRefresh = false, permanent = false, stopped = false;
     let wanted = true, autoStart = staff, optedIntoTest = false, state = {phase:'idle', ready:null}, chatCursor = 0, seconds = {}, admitted = false;
     let pollTimer, flow = 0, retryAt = 0, attempts = 0;
     let statusAt = 0, inkAt = Infinity, aimAt = Infinity, inkRead = 0, inkRetryAt = 0;
-    let peopleKey = '', peopleRows = new Map(), speakersKey = '', slotKey = null, videoMenuKey = '';
-    let picture = '', wantedVideo = null;
+    let peopleKey = '', peopleRows = new Map(), speakersKey = '', slotKey = null;
     const cameraTiles = new Map();
     let shownScreen = null;
     let toastTimer, lastNotice = '', lastNoticeAt = -Infinity;
@@ -267,7 +268,8 @@
                 btn.setAttribute('aria-pressed', String(enabled));
                 btn.setAttribute('aria-label', label);
                 btn.title = `${enabled ? 'لغو اجازهٔ' : 'دادن اجازهٔ'} ${label}${on ? ' (روشن)' : ''}`;
-                btn.disabled = busy || state.members?.[id] !== person.sid || (feature === 'camera' && !state.cameraCodec && !enabled);
+                btn.hidden = feature === 'camera' && !state.cameraCodec;
+                btn.disabled = busy || state.members?.[id] !== person.sid || btn.hidden;
             }
         }
     }
@@ -281,52 +283,35 @@
         track.stop();
         return link.room.localParticipant.unpublishTrack(track, true).catch(() => {});
     }
-    // Start without any automatic subscriptions. Keep microphone delivery independent of
-    // the picture selector, and unsubscribe the old picture before asking for a new one.
+    function canReceiveVideo(person, pub) {
+        if (!hasAccess() || document.hidden || pub.kind !== lk.Track.Kind.Video || pub.isMuted) return false;
+        if (pub.source === cameraSource) return !!state.cameraCodec && mayCamera(person) && pub === person.getTrackPublication(cameraSource);
+        return pub.source === screenSource && mayScreen(person) && person.identity === state.screen?.identity && person.sid === state.screen.sid
+            && pub === person.getTrackPublication(screenSource);
+    }
+
+    // Subscribe only after confirmed admission. The presenter's screen and any permitted
+    // webcams can coexist; neither changes voice/board, and a hidden tab stops receiving video.
     function updateSubscriptions() {
-        const selector = el('receive-video');
+        if (!active || !connected()) return;
         const live = hasAccess();
-        const candidates = new Map(), publications = [];
-        if (active && connected()) for (const person of active.room.remoteParticipants.values()) {
+        for (const person of active.room.remoteParticipants.values()) {
             for (const pub of person.trackPublications.values()) {
-                publications.push(pub);
-                if (!live || pub.kind !== lk.Track.Kind.Video || pub.isMuted) continue;
-                if (pub.source === screenSource && mayScreen(person) && person.identity === state.screen?.identity
-                    && person.sid === state.screen.sid) candidates.set(pub.trackSid, [pub, `اشتراک صفحه · ${personName(person)}`]);
-                if (pub.source === cameraSource && state.cameraCodec && mayCamera(person)) {
-                    candidates.set(pub.trackSid, [pub, `دوربین · ${personName(person)}`]);
-                }
+                const wanted = (live && pub.kind === lk.Track.Kind.Audio && pub.source === micSource) || canReceiveVideo(person, pub);
+                if (pub.isDesired !== wanted) pub.setSubscribed(wanted);
             }
         }
-        if (!candidates.has(picture)) picture = '';
-        const labels = [...candidates].map(([sid, [, label]]) => [sid, label]);
-        const menuKey = JSON.stringify(labels);
-        if (videoMenuKey !== menuKey) {
-            videoMenuKey = menuKey;
-            const option = ([id, label]) => {
-                const node = document.createElement('option');
-                node.value = id; node.textContent = label;
-                return node;
-            };
-            selector.replaceChildren(...[['','فقط صدا و تخته'], ...labels].map(option));
-        }
-        if (selector.value !== picture) selector.value = picture;
-        selector.disabled = !live || !candidates.size;
-        wantedVideo = document.hidden ? null : candidates.get(picture)?.[0] ?? null;
-        const wants = pub => pub === wantedVideo || (live && pub.kind === lk.Track.Kind.Audio && pub.source === micSource);
-        for (const pub of publications) if (pub.isDesired && !wants(pub)) pub.setSubscribed(false);
-        for (const pub of publications) if (!pub.isDesired && wants(pub)) pub.setSubscribed(true);
     }
 
     function renderCameras() {
         const strip = el('camera-strip');
         const cameraPeople = new Map();
-        if (hasAccess() && state.cameraCodec) {
+        if (hasAccess() && state.cameraCodec && !document.hidden) {
             const room = active.room;
             for (const person of [room.localParticipant, ...room.remoteParticipants.values()]) {
                 const pub = person.getTrackPublication(cameraSource);
                 if (!mayCamera(person) || !pub?.track || pub.isMuted || pub.track.kind !== lk.Track.Kind.Video
-                    || (person === room.localParticipant ? pub.track !== active.cameraTrack : pub !== wantedVideo)) continue;
+                    || (person === room.localParticipant ? pub.track !== active.cameraTrack : !pub.isDesired || !canReceiveVideo(person, pub))) continue;
                 cameraPeople.set(person.identity, {track:pub.track, name:personName(person)});
             }
         }
@@ -340,6 +325,7 @@
                 const figure = document.createElement('figure'), caption = document.createElement('figcaption');
                 const video = document.createElement('video');
                 video.autoplay = true; video.playsInline = true; video.muted = true;
+                figure.dataset.identity = id;
                 track.attach(video);
                 figure.append(video, caption); strip.append(figure);
                 tile = {track,video,caption,figure}; cameraTiles.set(id,tile);
@@ -379,11 +365,11 @@
         const mine = live && itsScreen(active);
         if (active?.screenTrack && (!mine || !state.screenEnabled || !mayScreen(local))) stopScreen(active);
         let person, display = null;
-        if (live && selected) {
+        if (live && selected && !document.hidden) {
             person = mine ? local : active.room.remoteParticipants.get(selected.identity);
             const pub = person?.getTrackPublication(screenSource);
             if (person?.sid === selected.sid && mayScreen(person) && pub?.track?.kind === lk.Track.Kind.Video && !pub.isMuted
-                && (mine ? pub.track === active.screenTrack : pub === wantedVideo)) display = pub.track;
+                && (mine ? pub.track === active.screenTrack : pub.isDesired && canReceiveVideo(person, pub))) display = pub.track;
         }
         const video = el('screen-video');
         if (shownScreen !== display) {
@@ -414,8 +400,8 @@
         if (restoreFocus) btn.focus();
     }
     function renderAccessMenu(live) {
-        el('room-permissions').hidden = !live;
-        if (!live) setAccessMenu(false);
+        el('access-features').hidden = !live;
+        el('access-camera').hidden = !state.cameraCodec;
         el('camera-unavailable').hidden = !!state.cameraCodec;
         for (const feature of Object.keys(features)) {
             const anyException = Object.keys(state.access?.[feature]?.members || {}).length > 0;
@@ -474,6 +460,7 @@
         const schedule = state.schedule;
         if (!schedule) return 'در حال بررسی زنگ‌های امروز…';
         if (schedule.choices.length === 1 && schedule.choices[0].id === fridaySlot) return 'برای آزمایش، «ورود به آزمایش جمعه» را بزن. این جلسه گزارش حضور یا اعلان ندارد.';
+        if (schedule.choices.some(choice => isRepeatSlot(choice.id))) return 'برای تکرار یک زنگ پایان‌یافته، «برگزاری مجدد» را انتخاب کن. گزارش این اجرا جدا خواهد بود.';
         if (schedule.choices.some(choice => choice.manual)) return 'برای تک‌زنگ، درسِ این هفته را انتخاب کن و «شروع زنگ» را بزن.';
         if (schedule.choices.length > 1) return 'زنگ موردنظر را از برنامهٔ امروز انتخاب کن.';
         if (schedule.choices.length === 1) return 'زنگ مشخص است؛ برای ورود می‌توانی «شروع زنگ» را بزنی.';
@@ -494,13 +481,7 @@
         el('status-dot').title = status;
         const start = state.startTime || '';
         el('lesson-start').hidden = !start;
-        root.dataset.started = start ? 'yes' : 'no';
         put(el('lesson-start-time'), faDigits(start));
-        if (state.dayLabel && state.day) {
-            const date = el('room-date');
-            put(date, state.dayLabel);
-            if (date.dateTime !== state.day) date.dateTime = state.day;
-        }
         for (const id of panels) el(`toggle-${id}`).disabled = !live;
         if (!staff) {
             el('live-attendance').hidden = !live || !Number.isInteger(state.attendance);
@@ -516,9 +497,10 @@
             el('open').disabled = busy || !!active || connecting || state.ready === null || permanent || phase === 'closing'
                 || phase === 'reserved' || (!currentSlot && !slot.value) || (phase === 'paused' && !state.resumable);
             const test = (currentSlot || slot.value) === fridaySlot;
-            el('open').textContent = test ? 'ورود به آزمایش جمعه' : phase === 'paused' ? 'ادامهٔ زنگ' : currentSlot ? 'پیوستن به زنگ' : 'شروع زنگ';
+            el('open').textContent = test ? 'ورود به آزمایش جمعه' : phase === 'paused' ? 'ادامهٔ زنگ' : currentSlot ? 'پیوستن به زنگ'
+                : isRepeatSlot(slot.value) ? 'برگزاری مجدد زنگ' : 'شروع زنگ';
             const end = currentSlot === fridaySlot ? 'بستن اتاق آزمایشی برای همه' : 'پایان کلاس برای همه';
-            el('close').setAttribute('aria-label', end);
+            put(el('close-label'), end);
             el('close').title = end;
             el('close').hidden = !state.lesson || phase === 'reserved';
             el('close').disabled = busy || phase === 'closing';
@@ -543,8 +525,9 @@
         el('microphone').setAttribute('aria-label', micAction);
         el('microphone').title = live && !maySpeak(local) ? 'برای روشن‌کردن میکروفون از دبیر نوبت بگیر' : micAction;
         const cam = el('camera');
-        const camOn = live && !!active.cameraTrack && !!local.isCameraEnabled && mayCamera(local);
-        const canCamera = live && !!state.cameraCodec && mayCamera(local);
+        if ((active?.cameraTrack || active?.cameraBusy) && (!live || !state.cameraCodec || !mayCamera(local))) stopCamera(active);
+        const camOn = live && !!active.cameraTrack && !!local.isCameraEnabled;
+        const canCamera = live && canCaptureCamera && !!state.cameraCodec && mayCamera(local);
         const camAction = camOn ? 'خاموش‌کردن دوربین' : 'روشن‌کردن دوربین';
         cam.hidden = !canCamera;
         cam.disabled = !canCamera || !!active?.cameraBusy;
@@ -570,7 +553,7 @@
         }
         if (active) { active.speakers = []; stopCamera(active); stopScreen(active); }
         admitted = false; inkAt = aimAt = Infinity; inkRetryAt = 0;
-        chatCursor = 0; seconds = {}; picture = '';
+        chatCursor = 0; seconds = {};
         delete state.profiles; delete state.profilesRev;
     }
     function release(link = active, warn = false) {
@@ -739,9 +722,11 @@
             if (active && (active.epoch !== state.epoch || active.lesson !== state.lesson || !result.ready
                 || !['live', ...(staff ? ['starting'] : [])].includes(state.phase))) release(active);
             if (staff && prior.lesson && state.phase === 'idle') { wanted = false; optedIntoTest = false; }
+            // Repeat choices never auto-open and don't change the ordinary timetable's auto-open rules.
+            const regularChoices = (state.schedule?.choices || []).filter(choice => !isRepeatSlot(choice.id));
             // Observe/rejoin one lesson per entry. An old tab never starts the next lesson on its own.
-            if (state.lesson || state.phase === 'reserved' || state.schedule?.choices.some(choice => choice.id === fridaySlot || choice.manual)
-                || (!state.schedule?.timed && state.schedule?.choices.length > 1)) autoStart = false;
+            if (state.lesson || state.phase === 'reserved' || regularChoices.some(choice => choice.id === fridaySlot || choice.manual)
+                || (!state.schedule?.timed && regularChoices.length > 1)) autoStart = false;
             if (active && local.sid && scope().sid === local.sid && connected() && result.admitted === true) {
                 admitted = true; seconds = result.seconds || {};
                 render();
@@ -758,9 +743,9 @@
                     const slot = state.slot;
                     enter(() => api('open',{slot}));
                 } else if (autoStart && state.phase === 'idle' && !document.hidden && state.schedule?.date === root.dataset.bellDate
-                    && state.schedule?.choices.length === 1) {
+                    && regularChoices.length === 1) {
                     autoStart = false;
-                    enter(() => api('open',{slot:state.schedule.choices[0].id}));
+                    enter(() => api('open',{slot:regularChoices[0].id}));
                 }
             }
         } catch (error) {
@@ -821,10 +806,7 @@
             }
         });
     }
-    el('receive-video').addEventListener('change', event => {
-        picture = event.target.value;
-        render();
-    });
+
     el('microphone').addEventListener('click', () => run(async () => {
         const link = active;
         const local = link?.room.localParticipant;
@@ -839,28 +821,52 @@
     el('camera').addEventListener('click', async () => {
         const link = active, codec = state.cameraCodec;
         const local = link?.room.localParticipant;
-        if (!hasAccess() || !codec || !mayCamera(local) || link.cameraBusy) return;
+        if (!hasAccess() || !codec || !canCaptureCamera || !mayCamera(local) || link.cameraBusy) return;
         link.cameraBusy = true;
+        const {sid} = scope(link);
         const attempt = ++link.cameraAttempt;
-        const valid = () => link === active && hasAccess() && state.cameraCodec === codec && mayCamera(local) && link.cameraAttempt === attempt;
+        const valid = () => link === active && hasAccess() && scope(link).sid === sid && state.cameraCodec === codec
+            && mayCamera(local) && link.cameraAttempt === attempt;
         render();
+        let raw;
         try {
             if (link.cameraTrack) { await stopCamera(link); return; }
-            // This click is the only path to getUserMedia for video. A grant never calls it.
+            // Only this button asks for a camera. Never fetch audio with the camera stream.
             const {width,height,frameRate} = cameraVideo;
-            const track = await lk.createLocalVideoTrack({facingMode:'user',resolution:{width,height,frameRate}});
-            if (!valid()) { track.stop(); return; }
+            const video = {facingMode:{ideal:'user'}, width:{ideal:width,max:width}, height:{ideal:height,max:height},
+                frameRate:{ideal:frameRate,max:frameRate}};
+            const stream = await window.navigator.mediaDevices.getUserMedia({video,audio:false});
+            [raw] = stream.getVideoTracks();
+            for (const track of stream.getTracks()) if (track !== raw) track.stop();
+            if (!raw) throw new PublicError('مرورگر تصویر دوربین را در اختیار کلاس نگذاشت.');
+            if (!valid()) { raw.stop(); return; }
+            const oversized = () => {
+                const size = raw.getSettings();
+                return size.width > width || size.height > height || size.frameRate > frameRate + .1;
+            };
+            if (oversized()) await raw.applyConstraints(video);
+            if (oversized()) throw new PublicError('مرورگر نتوانست دوربین را به کیفیت ۱۴۴p و حداکثر ۱۰ فریم محدود کند.');
+            if (!valid() || raw.readyState !== 'live') { raw.stop(); return; }
+            raw.contentHint = 'motion';
+            const track = new lk.LocalVideoTrack(raw);
             link.cameraTrack = track;
-            track.mediaStreamTrack.addEventListener('ended', () => {
+            raw.addEventListener('ended', () => {
                 if (link.cameraTrack === track) { stopCamera(link); if (active === link) render(); }
             }, {once:true});
             await local.publishTrack(track, {source:cameraSource, videoCodec:codec, simulcast:false, backupCodec:false,
                 videoEncoding:{maxBitrate:cameraVideo.bitrate,maxFramerate:frameRate}});
+            if (!valid()) {
+                if (link.cameraTrack === track) stopCamera(link);
+                else { track.stop(); await local.unpublishTrack(track,true).catch(() => {}); }
+            }
         } catch (error) {
+            raw?.stop();
             if (valid()) {
                 stopCamera(link);
-                note(['NotAllowedError','PermissionDeniedError','SecurityError'].includes(error?.name)
+                note(error instanceof PublicError ? error.message
+                    : ['NotAllowedError','PermissionDeniedError','SecurityError'].includes(error?.name)
                     ? 'مرورگر اجازهٔ استفاده از دوربین را نداده است. (CAMERA-ACCESS)'
+                    : error?.name === 'OverconstrainedError' ? 'دستگاه کیفیت سبک وبکم را پشتیبانی نمی‌کند. (CAMERA-SIZE)'
                     : 'دوربین روشن نشد؛ دستگاه یا اتصال رسانه را بررسی کن. (CAMERA-START)');
             }
         } finally {
@@ -870,7 +876,7 @@
     });
     if (staff) el('screen-toggle').addEventListener('click', async () => {
         const link = active;
-        if (!hasAccess() || !state.screenEnabled || state.cameraCodec !== 'vp8' || !canCaptureScreen || link.screenBusy || busy) return;
+        if (!hasAccess() || !state.screenEnabled || !canCaptureScreen || link.screenBusy || busy) return;
         if (state.screen && !itsScreen(link)) return;
         const local = scope(link), person = link.room.localParticipant;
         link.screenBusy = true;
@@ -952,11 +958,11 @@
         release(active,true);
     });
     if (staff) {
-        el('slot').addEventListener('change', render);
+        el('slot').addEventListener('change', () => { autoStart = false; render(); });
         el('open').addEventListener('click', () => run(async () => {
             if (state.phase === 'closing' || state.ready === null || permanent) return;
             const choice = state.slot || el('slot').value;
-            const slot = choice === fridaySlot ? choice : Number(choice);
+            const slot = choice === fridaySlot || isRepeatSlot(choice) ? choice : Number(choice);
             if (!slot) return;
             optedIntoTest = slot === fridaySlot;
             wanted = true;
@@ -979,6 +985,7 @@
             const test = state.slot === fridaySlot;
             if (!state.lesson || !window.confirm(test ? 'اتاق آزمایشی برای همه بسته شود؟ تا پایان جمعه می‌توان دوباره آن را باز کرد.' : 'کلاس برای همه پایان یابد و گزارش حضور ثبت شود؟')) return;
             run(async () => {
+                setAccessMenu(false, true);
                 wanted = false; optedIntoTest = false; flow++;
                 const response = api('close',{lesson:state.lesson});
                 release(active,true);

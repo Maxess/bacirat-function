@@ -82,6 +82,12 @@ function cl_camera_codec(array $room): ?string
     return in_array('video/vp8', $names, true) ? 'vp8' : (in_array('video/h264', $names, true) ? 'h264' : null);
 }
 
+/** The codec advertised by the SFU is also used by screen share. Its presence alone does not enable webcams. */
+function cl_webcam_codec(array $cfg, array $lesson): ?string
+{
+    return ($cfg['camera_share'] ?? false) === true ? ($lesson['camera_codec'] ?? null) : null;
+}
+
 function cl_live_media_peers(array $reply): array
 {
     $people = array_key_exists('participants', $reply) ? $reply['participants'] : [];
@@ -114,17 +120,18 @@ function cl_media_matches(array $peer, string $identity, array $wanted): bool
 }
 
 /** Apply the lesson policy to real SFU participants. Listener tickets never carry a reusable publish grant. */
-function cl_sync_media(array $lesson, array $peers, callable $rpc, bool $strict = false): bool
+function cl_sync_media(array $cfg, array $lesson, array $peers, callable $rpc, bool $strict = false): bool
 {
     if (!isset($lesson['access']['mic']) && !isset($lesson['access']['camera']) && empty($lesson['screen_used'])) return true;
     $room = $lesson['room'];
+    $camera = cl_webcam_codec($cfg, $lesson) !== null;
     $failed = false;
     $until = microtime(true) + 1.25; // Bound lock time; subsequent presence samples retry mismatches.
     foreach ($peers as $id=>$peer) {
         $sources = [];
         if (($lesson['seen'][$id] ?? null) === $peer['sid']) {
             foreach (CL_MEDIA_FEATURES as $feature=>$source) {
-                if (($feature !== 'camera' || !empty($lesson['camera_codec'])) && cl_access_enabled($lesson, $feature, $id)) $sources[] = $source;
+                if (($feature !== 'camera' || $camera) && cl_access_enabled($lesson, $feature, $id)) $sources[] = $source;
             }
             if (($lesson['screen']['identity'] ?? null) === $id && ($lesson['screen']['sid'] ?? null) === $peer['sid']
                 && ($lesson['staff'][$id] ?? null) === $peer['sid']) $sources[] = 'SCREEN_SHARE';

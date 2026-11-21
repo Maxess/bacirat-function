@@ -8,6 +8,7 @@ const CL_SAMPLE_INTERVAL = 3;
 const CL_PULSE_TTL = 12;
 const CL_START_SECONDS = 32;
 const CL_MAX_LESSON_SECONDS = 7200;
+const CL_REPEAT_PREFIX = 'repeat-';
 
 function cl_room_class(array $cfg, string $room): int
 {
@@ -117,6 +118,19 @@ function cl_touch(ClassroomStore $s, array $lesson, array $actor, array $input, 
     return $lesson;
 }
 
+function cl_lesson_choice(array $lesson): int|string
+{
+    return isset($lesson['repeat_of']) ? CL_REPEAT_PREFIX . $lesson['repeat_of'] : $lesson['slot'];
+}
+
+/** Repeat only the actual, still-assigned, original bell, never an ordinary empty or demo room. */
+function cl_repeatable(array $cfg, ?array $prior, array $slot, int $now): bool
+{
+    return ($cfg['repeat_bells'] ?? false) === true && ($prior['phase'] ?? null) === 'finished'
+        && !isset($prior['repeat_of']) && !cl_is_friday_test($prior) && isset($prior['started'], $prior['ended'])
+        && $prior['ended'] <= $now && cl_matches_slot($prior, $slot);
+}
+
 /** Server-clock choices for an idle class; a time alone never grants an assignment. */
 function cl_staff_schedule(ClassroomStore $s, array $cfg, array $class, array $actor, int $now): array
 {
@@ -129,11 +143,19 @@ function cl_staff_schedule(ClassroomStore $s, array $cfg, array $class, array $a
         $choices[] = ['id'=>CL_FRIDAY_SLOT, 'label'=>CL_FRIDAY_TITLE . ' · ' . CL_FRIDAY_HOURS];
     }
     foreach (cl_today_slots($s->db, $class, $actor, $now) as $slot) {
+        $label = $slot['period'] . ' · ' . $slot['subject'] . ($slot['shared'] ? ' · ' . $slot['teacher_name'] . ' · تک‌زنگ' : '');
+        $base = cl_lesson_id($class, $slot['period'], $date);
+        $previous = $s->get('lesson', $base);
+        if (($previous['phase'] ?? null) === 'finished') {
+            if (cl_repeatable($cfg, $previous, $slot, $now)) {
+                $choices[] = ['id'=>CL_REPEAT_PREFIX . $base, 'label'=>'برگزاری مجدد · ' . $label, 'manual'=>true];
+            }
+            continue;
+        }
         $window = cl_bell_window($hours, $slot['period'], $now);
         if ($hours && (!$window || $now >= $window['end'])) continue;
-        if (($s->get('lesson', cl_lesson_id($class, $slot['period'], $date))['phase'] ?? null) === 'finished') continue;
         $when = $window ? ' · ' . $window['label'] : '';
-        $label = $slot['period'] . ' · ' . $slot['subject'] . ($slot['shared'] ? ' · ' . $slot['teacher_name'] . ' · تک‌زنگ' : '') . $when;
+        $label .= $when;
         if ($window && $now < $window['start']) {
             if ($window['start'] < $soonest) {
                 $soonest = $window['start'];
@@ -155,22 +177,37 @@ function cl_open_lesson(ClassroomStore $s, array $ctx, array $cfg, array $class,
     if (!cl_is_staff($actor)) throw new ClassroomError(403, 'شروع کلاس فقط برای دبیر یا مسئول مجاز است.');
     $lesson = cl_active($s, $class['id']);
     $date = cl_day($now)->format('Y-m-d');
-    $test = null;
-    $window = null;
-    if (($input['slot'] ?? null) === CL_FRIDAY_SLOT) {
+    $test = $window = $repeatOf = null;
+    $choice = $input['slot'] ?? null;
+    if ($choice === CL_FRIDAY_SLOT) {
         $test = $window = cl_friday_window($cfg, $now);
         if (!$test) throw new ClassroomError(403, 'آزمایش کلاس مجازی فقط در جمعهٔ تعیین‌شده باز است.');
         $id = ($lesson['test'] ?? null) === $test['id'] ? $lesson['id'] : bin2hex(random_bytes(16));
         $slot = ['id'=>CL_FRIDAY_SLOT,'period'=>'آزمایشی','subject'=>CL_FRIDAY_TITLE,'teacher'=>$actor['role'] === 'teacher' ? $actor['id'] : 0];
         $teacherName = $actor['name'];
     } else {
-        $slotId = cl_id($input['slot'] ?? null);
+        $original = null;
+        if (is_string($choice) && preg_match('/\A' . CL_REPEAT_PREFIX . '([a-f0-9]{32})\z/', $choice, $m)) {
+            $repeatOf = $m[1];
+            $original = $s->get('lesson', $repeatOf);
+            if (($original['class_id'] ?? null) !== $class['id'] || $original['year'] !== $class['year'] || $original['date'] !== $date) {
+                throw new ClassroomError(409, 'فقط زنگ پایان‌یافتهٔ همین کلاس در همین روز به وقت تهران قابل بازبرگزاری است.');
+            }
+        }
+        $slotId = cl_id($repeatOf === null ? $choice : $original['slot']);
         $slot = $slotId ? cl_get_slot($s->db, $class, $slotId, $now) : null;
         if (!$slot || !cl_assigned($actor, $slot['teacher'])) {
             throw new ClassroomError(403, 'برای شروع، زنگ همین کلاس از برنامهٔ امروز با دبیر فعال و مجاز انتخاب کن.');
         }
         $teacherName = $slot['teacher_name'];
         $id = cl_lesson_id($class, $slot['period'], $date);
+        if ($repeatOf !== null) {
+            if ($id !== $repeatOf || !cl_repeatable($cfg, $original, $slot, $now)) {
+                throw new ClassroomError(409, 'برگزاری مجدد این زنگ در تنظیمات یا برنامهٔ امروز مجاز نیست.');
+            }
+            // Keep the original report and bell key. Resume only the active repetition of this exact bell.
+            $id = ($lesson['repeat_of'] ?? null) === $repeatOf ? $lesson['id'] : bin2hex(random_bytes(16));
+        }
     }
     if ($lesson && ($lesson['id'] !== $id || $lesson['year'] !== $class['year'] || (!$test && !cl_matches_slot($lesson, $slot))
         || $lesson['phase'] === 'closing' || cl_lesson_expired($cfg, $lesson, $now))) {
@@ -181,7 +218,12 @@ function cl_open_lesson(ClassroomStore $s, array $ctx, array $cfg, array $class,
         throw new ClassroomError(409, 'در حال بستن اتصال قبلی کلاس؛ چند لحظه صبر کن.');
     }
     if (!$lesson) {
-        if (!$test) {
+        if ($repeatOf !== null) {
+            $regular = cl_bell_window($cfg['bell_hours'] ?? [], $slot['period'], $now);
+            $length = $regular ? min(CL_MAX_LESSON_SECONDS, $regular['end'] - $regular['start']) : CL_MAX_LESSON_SECONDS;
+            $end = min($now + $length, cl_tehran_midnight($now));
+            $window = ['end'=>$end, 'label'=>'بازبرگزاری · ' . cl_tehran_clock($now) . ' تا ' . cl_tehran_clock($end)];
+        } elseif (!$test) {
             if ($s->get('lesson', $id)) throw new ClassroomError(409, 'این زنگ امروز پایان یافته است.');
             $hours = $cfg['bell_hours'] ?? [];
             if ($hours) {
@@ -195,8 +237,9 @@ function cl_open_lesson(ClassroomStore $s, array $ctx, array $cfg, array $class,
         // Save the cutoff on creation. Editing ordinary bell hours cannot change it later.
         $lesson = ['id'=>$id,'class_id'=>$class['id'],'class_name'=>$class['name'],'year'=>$class['year'],'date'=>$date,
             'slot'=>$slot['id'],'period'=>$slot['period'],'subject'=>$slot['subject'],'teacher'=>$slot['teacher'],'teacher_name'=>$teacherName,
-            'created'=>$now,'deadline'=>$window['end'] ?? $now + CL_MAX_LESSON_SECONDS, 'bell'=>$window['label'] ?? null,
+            'created'=>$now,'deadline'=>$window['end'] ?? min($now + CL_MAX_LESSON_SECONDS, cl_tehran_midnight($now)), 'bell'=>$window['label'] ?? null,
             'active_seconds'=>0,'started'=>null,'roster'=>$test ? [] : cl_roster($s->db, $class),'seconds'=>[], 'pulses'=>[], 'seen'=>[], 'staff'=>[], 'sample'=>0];
+        if ($repeatOf !== null) $lesson['repeat_of'] = $repeatOf;
         if ($test) {
             $lesson['test'] = $test['id'];
             $lesson['test_students'] = $test['students'];
@@ -401,7 +444,7 @@ function cl_reconcile(ClassroomStore $s, array $cfg, ?array $class, array $lesso
             }
             // Do not stop attendance because an individual device's media policy is still catching up.
             cl_refresh_screen($lesson, $cfg, $peers, $now);
-            $lesson['media_pending'] = !cl_sync_media($lesson, $peers, $rpc);
+            $lesson['media_pending'] = !cl_sync_media($cfg, $lesson, $peers, $rpc);
         }
     }
     if ($lesson['phase'] === 'paused') return cl_retire_transport($s, $cfg, $lesson, $now, $rpc);
@@ -410,7 +453,7 @@ function cl_reconcile(ClassroomStore $s, array $cfg, ?array $class, array $lesso
 }
 
 /** Under the same class lock as presence, page changes and ink writes. */
-function cl_set_access(ClassroomStore $s, array $lesson, array $actor, array $body, int $now, callable $rpc): array
+function cl_set_access(ClassroomStore $s, array $cfg, array $lesson, array $actor, array $body, int $now, callable $rpc): array
 {
     if (!cl_is_staff($actor)) throw new ClassroomError(403, 'تغییر دسترسی فقط برای دبیر یا مسئول مجاز است.');
     $feature = $body['feature'] ?? null;
@@ -424,8 +467,9 @@ function cl_set_access(ClassroomStore $s, array $lesson, array $actor, array $bo
     if ($identity !== null && !cl_entered($lesson, ['identity'=>$identity], $sid, $now)) {
         throw new ClassroomError(409, 'ورود این شرکت‌کننده هنوز تأیید نشده است.');
     }
-    if ($feature === 'camera' && $enabled && empty($lesson['camera_codec'])) {
-        throw new ClassroomError(409, 'سرور رسانهٔ این کلاس فقط صدا دارد؛ مدیر باید پشتیبانی دوربین را روی VPS فعال کند.');
+    if ($feature === 'camera' && $enabled && cl_webcam_codec($cfg, $lesson) === null) {
+        throw new ClassroomError(409, ($cfg['camera_share'] ?? false) === true
+            ? 'سرور رسانهٔ این اتاق از تصویر دوربین پشتیبانی نمی‌کند.' : 'وبکم در تنظیمات افزونه فعال نیست.');
     }
     if ($identity === null) $lesson['access'][$feature] = ['all'=>$enabled, 'members'=>[]];
     else {
@@ -446,7 +490,7 @@ function cl_set_access(ClassroomStore $s, array $lesson, array $actor, array $bo
                 $peers = cl_live_media_peers(['participants'=>[$peer]]);
                 if (($peers[$identity]['sid'] ?? null) !== $sid) $peers = [];
             }
-            $verified = cl_sync_media($lesson, $peers, $rpc);
+            $verified = cl_sync_media($cfg, $lesson, $peers, $rpc);
         } catch (ClassroomError $error) { $verified = false; }
         if (!$verified) {
             $lesson['media_pending'] = true;
@@ -546,12 +590,12 @@ function cl_set_screen(ClassroomStore $s, array $cfg, array $lesson, array $acto
     $peers = cl_live_media_peers($rpc('ListParticipants', $room, ['room'=>$room]));
     if ($enable) {
         if (($peers[$id]['sid'] ?? null) !== $sid) throw new ClassroomError(409, 'اتصال ارائه‌دهنده عوض شده است.');
-        if (!$owner && !cl_sync_media($lesson, $peers, $rpc, true)) throw cl_media_bad_reply();
+        if (!$owner && !cl_sync_media($cfg, $lesson, $peers, $rpc, true)) throw cl_media_bad_reply();
         $lesson['screen'] = $mine + ['until'=>$now + CL_SCREEN_LEASE];
         $s->put('lesson', $lesson['id'], $lesson);
-        $confirmed = cl_sync_media($lesson, [$id=>$peers[$id]], $rpc, true);
+        $confirmed = cl_sync_media($cfg, $lesson, [$id=>$peers[$id]], $rpc, true);
         if (!$confirmed) unset($lesson['screen']);
-    } else $confirmed = cl_sync_media($lesson, $peers, $rpc, true);
+    } else $confirmed = cl_sync_media($cfg, $lesson, $peers, $rpc, true);
     if (!$confirmed) $lesson['media_pending'] = true;
     $s->put('lesson', $lesson['id'], $lesson);
     if (!$confirmed) throw cl_media_bad_reply();
@@ -571,7 +615,7 @@ function cl_finish_lesson(ClassroomStore $s, array $cfg, array $lesson, int $now
             $lesson['phase'] = 'finished';
             $s->put('lesson', $id, $lesson);
             $key = sprintf('%012d:%s', $lesson['created'], $id);
-            $entry = array_intersect_key($lesson, array_flip(['id','class_id','class_name','year','date','period','subject','teacher_name','active_seconds']));
+            $entry = array_intersect_key($lesson, array_flip(['id','class_id','class_name','year','date','period','subject','teacher_name','active_seconds','started','ended','repeat_of']));
             $s->put('reports', $key, $entry);
             $s->put('reports:teacher-' . $lesson['teacher'], $key, $entry);
             $providers = array_values(array_filter(['bale','rubika','telegram'], static fn($p) => ($cfg['notify_school_' . $p] ?? false) === true));

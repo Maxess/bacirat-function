@@ -205,7 +205,7 @@ denied(429,fn()=>cl_chat($s,$active,$student,'spam',$t+10));
 $stroke=['tool'=>'pen','color'=>'#0055aa','size'=>4,'points'=>[[420,200],[9000,9800]]];
 $pupilInk = ['strokes'=>[$stroke+['id'=>str_repeat('b',32)]]];
 denied(403,fn()=>cl_ink_input($active,$student,$pupilInk));
-cl_set_access($s,$active,$teacher,['feature'=>'board','enabled'=>true,'identity'=>'student-1'],$t+9,$rpc);
+cl_set_access($s,$cfg,$active,$teacher,['feature'=>'board','enabled'=>true,'identity'=>'student-1'],$t+9,$rpc);
 $active = cl_active($s,10);
 must(cl_activity_sync($s,$active,$student,[])['board']['write'] && !cl_may_write($active,['role'=>'student','identity'=>'student-4']),
     'individual pen grant is visible only to that pupil');
@@ -255,11 +255,11 @@ cl_board_read($s,$cueLesson,$teacher,$requestAim,microtime(true)-1.3);
 must(cl_board_read($s,$cueLesson,$student,[])['laser'] === null, 'a request held up by the server lock is not replayed');
 cl_clear_activity($s,$cueLesson['id']);
 denied(403,fn()=>cl_ink_input($active,$student,['strokes'=>[['tool'=>'erase-stroke','targets'=>['old-00000001']]]]));
-cl_set_access($s,$active,$manager,['feature'=>'board','enabled'=>false],$t+9,$rpc);
+cl_set_access($s,$cfg,$active,$manager,['feature'=>'board','enabled'=>false],$t+9,$rpc);
 $active = cl_active($s,10);
 must(!cl_activity_sync($s,$active,$student,[])['board']['write'] && cl_may_write($active,$teacher), 'group revoke resets individual exceptions and leaves staff tools');
 denied(403,fn()=>cl_ink_input($active,$student,$pupilInk));
-cl_set_access($s,$active,$teacher,['feature'=>'board','enabled'=>true],$t+9,$rpc);
+cl_set_access($s,$cfg,$active,$teacher,['feature'=>'board','enabled'=>true],$t+9,$rpc);
 $active = cl_active($s,10);
 
 $ink = static fn(array $ops, int $rev = 1) => cl_board_action($s,$active,['board'=>$rev,'strokes'=>$ops],'board-ink');
@@ -419,7 +419,9 @@ must(count($send)===3 && !$s->rows('host-outbox',20), 'dedup, normal school acco
 $targets=array_column($send,1); sort($targets);
 must($targets===['111','333','444'] && $s->get('delivery',$cl['id'])['sent']===3, 'only private linked contacts');
 foreach ($send as [$provider,$target,$text]) {
-    must(str_contains($text, 'چهارشنبه ۱۴۰۵/۰۸/۲۷') && !str_contains($text, '2026-11-18'), 'every school bot sends the stored Tehran day as Shamsi');
+    must(str_contains($text, "\nتاریخ: چهارشنبه ۱۴۰۵/۰۸/۲۷\n") && !str_contains($text, '(تهران)') && !str_contains($text, '2026-11-18'),
+        'bot date is Shamsi without a timezone suffix');
+    must(str_contains($text, "\nساعت برگزاری: ۰۸:۳۰ تا ۰۸:۳۰\n"), 'bot wall clock uses Tehran, separate from verified presence duration');
     must(str_contains($text,'۰۰:۰۰:۰۹') && str_contains($text,$target==='333'?'۰۰:۰۰:۰۰':'۰۰:۰۰:۰۶'), 'correct attendance message');
 }
 
@@ -523,6 +525,76 @@ must(!cl_active($s,10) && !isset($sfus[$secondRoom]) && cl_report_detail($s,$oth
 $fourth = strtotime('2026-11-25T06:50:00Z');
 must(array_column($at($teacher,$fourth)['choices'],'id') === [74], 'fourth bell maps to the normalized school period number');
 must(!$at($teacher,$fourth+2700)['choices'], 'bell end is exclusive, even if it was never opened');
+// A repeat lives beside, not on top of, the finished ordinary bell. Outside the original hours is intentional.
+$firstReport = cl_report_detail($s,$teacher,$firstBell['id']);
+$repeatCfg = $timed + ['repeat_bells'=>true];
+$repeat = CL_REPEAT_PREFIX . $firstBell['id'];
+$evening = strtotime('2026-11-25T14:45:00Z'); // 18:15 Tehran.
+$repeatOpen = fn($actor,$choice,$when,$class=null)=>cl_open_lesson($s,$ctx,$repeatCfg,$class??$first,$actor,['slot'=>$choice],$when,$rpc);
+$choices = cl_staff_schedule($s,$repeatCfg,$first,$teacher,$evening)['choices'];
+must(count($choices) === 1 && $choices[0]['id'] === $repeat && $choices[0]['manual'], 'only the assigned finished bell can be repeated and never automatically');
+must(!in_array($repeat, array_column(cl_staff_schedule($s,$repeatCfg,$first,$other,$evening)['choices'],'id'), true), 'another scheduled teacher may not repeat the first bell');
+denied(409,fn()=>$timedOpen($teacher,$repeat,$evening));
+denied(409,fn()=>$repeatOpen($teacher,99,$evening));
+denied(409,fn()=>$repeatOpen($teacher,CL_REPEAT_PREFIX . cl_lesson_id($first,'زنگ ۴','2026-11-25'),$evening));
+denied(403,fn()=>$repeatOpen($other,$repeat,$evening));
+denied(403,fn()=>$repeatOpen($student,$repeat,$evening));
+denied(409,fn()=>$repeatOpen($manager,$repeat,$evening,$classes[20]));
+$again = $repeatOpen($teacher,$repeat,$evening); $repeatRoom = $again['room'];
+must($again['id'] !== $firstBell['id'] && $again['repeat_of'] === $firstBell['id'] && cl_lesson_choice($again) === $repeat
+    && $again['deadline'] === $evening+60 && str_contains($again['bell'],'18:15 تا 18:16') && $again['seconds'] === [], 'repeat has a fresh session and a bounded new Tehran window');
+must($repeatOpen($teacher,$repeat,$evening+1)['id'] === $again['id'], 'a concurrent start only joins the same active repeat');
+denied(409,fn()=>$repeatOpen($teacher,99,$evening+1));
+must(!$event('room_finished',$ring,$evening+1), 'late events for the original room do not change the repeat');
+$event('room_started',$repeatRoom,$evening+1); $wire($repeatRoom,$teacherWire+$studentWire);
+$pulse(10,$teacher,'PA_Teacher',$evening+3); $pulse(10,$student,'PA_Student',$evening+3);
+$liveRepeat = $sample(10,$evening+3,$first);
+denied(409,fn()=>cl_ticket($repeatCfg,$liveRepeat,$student,$bind($firstBell,'PA_Student'),$evening+3));
+$pulse(10,$teacher,'PA_Teacher',$evening+6); $pulse(10,$student,'PA_Student',$evening+6);
+$sample(10,$evening+6,$first);
+$event('participant_left',$repeatRoom,$evening+7,'teacher-1','PA_Teacher');
+must(!isset($sfus[$repeatRoom]) && cl_active($s,10)['phase'] === 'paused', 'a repeat pauses if the last supervisor leaves');
+$resumedRepeat = $repeatOpen($teacher,$repeat,$evening+8);
+must($resumedRepeat['id']===$again['id'] && $resumedRepeat['room']!==$repeatRoom && $resumedRepeat['deadline']===$again['deadline'],
+    'resume the repeat with new transport, not the earlier original or a new occurrence');
+cl_close_lesson($s,$repeatCfg,$resumedRepeat,$evening+8,$rpc);
+$repeatReport = cl_report_detail($s,$teacher,$again['id']);
+must(cl_report_detail($s,$teacher,$firstBell['id']) === $firstReport && $repeatReport['seconds']['student-1'] === 3,
+    'each run keeps separate presence and the first report is byte-for-byte unchanged');
+$idx = array_column($s->rows('reports:teacher-1',30),'repeat_of','id');
+must(($idx[$again['id']] ?? null) === $firstBell['id'], 'the teacher’s index has an independent repeat with the original reference');
+$originalNotice = $s->get('host-pending',$firstBell['id']);
+$repeatNotice = $s->get('host-pending',$again['id']);
+$noticeTime = $evening+9;
+$beforeSend = count($send);
+foreach ([$firstBell['id']=>$originalNotice, $again['id']=>$repeatNotice] as $id=>$notice) {
+    must(isset($notice['providers']), 'a finished occurrence has its own queue marker');
+    for ($i=0; $i<2; $i++) {
+        if ($pending = $s->get('host-pending',$id)) cl_expand_outbox($s,$cfg,$host,$id,$pending,$noticeTime);
+        foreach ($s->rows('host-outbox',50) as $key=>$item) {
+            if ($item['lesson'] === $id) cl_deliver_one($s,$cfg,$host,$key,$item,$noticeTime,$activation);
+        }
+    }
+}
+$newMessages = array_slice($send,$beforeSend);
+must(count($newMessages) === 4 && count(array_filter($newMessages,fn($m)=>str_contains($m[2],'برگزاری مجدد'))) === 2
+    && str_contains($newMessages[2][2], '۱۸:۱۵ تا ۱۸:۱۵'), 'dedup is per occurrence, with a separate Tehran bot notice for the repeat');
+$db->exec("UPDATE class_schedules SET subject_name='درس تازه' WHERE id=99");
+denied(409,fn()=>$repeatOpen($teacher,$repeat,$evening+10));
+$db->prepare('UPDATE class_schedules SET subject_name=? WHERE id=99')->execute([$firstReport['subject']]);
+
+$untimedAt = $evening+180;
+$untimedRepeat = cl_open_lesson($s,$ctx,$cfg + ['repeat_bells'=>true],$first,$teacher,['slot'=>$repeat],$untimedAt,$rpc);
+must($untimedRepeat['deadline'] === $untimedAt+CL_MAX_LESSON_SECONDS, 'a repeat without set bell hours is bounded too');
+cl_close_lesson($s,$repeatCfg,$untimedRepeat,$untimedAt+1,$rpc);
+
+$midnight = cl_tehran_midnight($evening);
+$last = $repeatOpen($teacher,$repeat,$midnight-20);
+must($last['deadline'] === $midnight && $last['id'] !== $again['id'] && cl_lesson_expired($repeatCfg,$last,$midnight), 'a repeat does not spill into the next Tehran day');
+cl_close_lesson($s,$repeatCfg,$last,$midnight,$rpc);
+must($s->get('lesson',$last['id']) === null, 'a repeat with no verified class does not create a report');
+denied(409,fn()=>$repeatOpen($teacher,$repeat,$midnight));
+
 // V1.15 stores a second subject in the exact same cell. There is no persisted week parity.
 $sharedAt = $bell + 7*86400;
 $db->exec("INSERT INTO class_schedules VALUES (92,2,'هفتم1','1405/1406','چهار شنبه','زنگ ۱','آزمایشگاه')");
@@ -648,4 +720,4 @@ denied(409,fn()=>cl_ticket($trial,$real,$priorYear,$bind($real,'PA_StaffOld'),$m
 denied(409,fn()=>$trialOpen($priorYear,$first,$morning));
 cl_close_lesson($s,$trial,$real,$morning+1,$rpc);
 if ($mysql) foreach ([$table,'academic_years','settings','classes','students','teachers','admins','class_schedules','bale_bot_users','telegram_bot_users'] as $name) $db->exec("DROP TABLE `$name`");
-echo "PASS calendar, access roles, Friday practice, configured bell windows, native events, trusted presence, waiting/resume, reports, board/chat and conditional school bot delivery\n";
+echo "PASS calendar, access roles, Friday practice, configured and repeat bell windows, native events, trusted presence, waiting/resume, reports, board/chat and conditional school bot delivery\n";

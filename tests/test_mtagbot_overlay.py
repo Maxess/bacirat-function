@@ -18,9 +18,9 @@ REPLACED = ['includes/header.php', 'includes/management_hub.php', 'includes/stud
 RESTORED = ['other-settings.php', 'includes/footer.php']
 ADDED = ['includes/classroom-school-bots.php', 'school-classroom-settings.php']
 CALENDAR = ROOT / 'school-addon/upload/online-classroom/calendar.php'
-BUNDLE = 'baci-classroom-upgrade-v0.4.11.zip'
-UPDATE = 'baci-plugin-manager-update-v0.1.17.zip'
-CLASSROOM = 'school-classroom-plugin-v0.4.11.zip'
+BUNDLE = 'baci-classroom-upgrade-v0.4.12.zip'
+UPDATE = 'baci-plugin-manager-update-v0.1.18.zip'
+CLASSROOM = 'school-classroom-plugin-v0.4.12.zip'
 
 
 def check_patch(test, upstream, overlay, paths, patch, verify_pin=False):
@@ -42,7 +42,7 @@ def check_patch(test, upstream, overlay, paths, patch, verify_pin=False):
 
 class BaciOverlayTest(unittest.TestCase):
     def test_archives_ship_the_pinned_baci_overlay_and_no_watcher_or_bot_credentials(self):
-        with ZipFile(ROOT / 'artifacts/baci-plugin-manager-v0.1.17.zip') as site:
+        with ZipFile(ROOT / 'artifacts/baci-plugin-manager-v0.1.18.zip') as site:
             for path in REPLACED + RESTORED + ADDED + ['UPSTREAM.json']:
                 self.assertEqual(site.read(path), (BACI / path).read_bytes())
             self.assertEqual(site.read('includes/classroom-calendar.php'), CALENDAR.read_bytes())
@@ -70,6 +70,7 @@ class BaciOverlayTest(unittest.TestCase):
             self.assertFalse(any('token' in item['key'] for item in manifest['settings']))
             self.assertIn('0.4.9', manifest['preserve_settings_from'])
             self.assertIn('0.4.10', manifest['preserve_settings_from'])
+            self.assertIn('0.4.11', manifest['preserve_settings_from'])
             self.assertEqual(len(plugin.namelist()), 27)
             self.assertEqual(plugin.read('calendar.php'), CALENDAR.read_bytes())
             self.assertLess((ROOT / 'artifacts' / CLASSROOM).stat().st_size, 4 * 1024 * 1024)
@@ -78,6 +79,8 @@ class BaciOverlayTest(unittest.TestCase):
             self.assertEqual(plugin.read('room-view.php'), (ROOT / 'school-addon/upload/online-classroom/room-view.php').read_bytes())
             fields = {field['key']: field['type'] for field in manifest['settings']}
             self.assertEqual(fields['screen_share'], 'switch')
+            self.assertEqual(fields['camera_share'], 'switch')
+            self.assertEqual(fields['repeat_bells'], 'switch')
             self.assertEqual(plugin.read('assets/room-attention.js'), (ROOT / 'school-addon/upload/online-classroom/assets/room-attention.js').read_bytes())
             self.assertEqual(fields['bell_hours'], 'bell-hours')
             self.assertEqual(fields['friday_test'], 'friday-test')

@@ -41,7 +41,7 @@ cl_json_reply(static function (): array {
         if ($action === 'status') {
             $idle = static function (bool $ready) use ($s, $cfg, $class, $actor): array {
                 $now = time();
-                $result = ['phase'=>'idle', 'ready'=>$ready] + cl_today_view($now);
+                $result = ['phase'=>'idle', 'ready'=>$ready];
                 if (cl_is_staff($actor)) $result['schedule'] = cl_staff_schedule($s, $cfg, $class, $actor, $now);
                 elseif (cl_friday_window($cfg, $now)['students'] ?? false) $result['practiceAvailable'] = true;
                 return $result;
@@ -60,7 +60,7 @@ cl_json_reply(static function (): array {
                 if (!$isTest && function_exists('mpm_classroom_delivery_after_response')) mpm_classroom_delivery_after_response();
                 return $idle($ready);
             }
-            if (!$allowedRole) return ['phase'=>'reserved','ready'=>$ready] + cl_today_view(time());
+            if (!$allowedRole) return ['phase'=>'reserved','ready'=>$ready];
             $now = time(); // A slow SFU call must not extend a previously captured sample's validity.
             $expired = cl_lesson_expired($cfg, $lesson, $now);
             $live = $ready && !$expired && cl_lesson_live($lesson, $now);
@@ -68,14 +68,14 @@ cl_json_reply(static function (): array {
             $allowed = $live && cl_match_transport($lesson, $body) && cl_entered($lesson, $actor, $body['sid'] ?? null, $now);
             $result = ['phase'=>$phase,'ready'=>$ready, 'lesson'=>$lesson['id'], 'epoch'=>cl_epoch($lesson),
                 'callbackMissing'=>$lesson['phase'] === 'paused' && empty($lesson['event_received']),
-                'period'=>$lesson['period'], 'subject'=>$lesson['subject'], 'slot'=>$lesson['slot'], 'bell'=>$lesson['bell'] ?? null, 'admitted'=>$allowed,
-                'startTime'=>isset($lesson['started']) ? cl_day($lesson['started'])->format('H:i') : null,
+                'period'=>$lesson['period'], 'subject'=>$lesson['subject'], 'slot'=>cl_lesson_choice($lesson), 'bell'=>$lesson['bell'] ?? null, 'admitted'=>$allowed,
+                'startTime'=>isset($lesson['started']) ? cl_tehran_clock($lesson['started']) : null,
                 'joinable'=>$ready && !$expired && cl_joinable($lesson, $actor, $now),
-                'resumable'=>$ready && !$expired && $lesson['phase'] === 'paused' && $lesson['room'] === null] + cl_today_view($now);
+                'resumable'=>$ready && !$expired && $lesson['phase'] === 'paused' && $lesson['room'] === null];
             // A paused or reconnecting pupil can still see their own last verified total, not the room activity.
             if ($actor['role'] === 'student') $result['attendance'] = $lesson['seconds'][$actor['identity']] ?? 0;
             if ($allowed) {
-                $result += ['cameraCodec'=>$lesson['camera_codec'] ?? null, 'screen'=>cl_screen_enabled($cfg, $lesson) ? cl_screen_state($lesson) : null,
+                $result += ['cameraCodec'=>cl_webcam_codec($cfg, $lesson), 'screen'=>cl_screen_enabled($cfg, $lesson) ? cl_screen_state($lesson) : null,
                     'wakeMode'=>cl_wake_mode($lesson), 'wakeControl'=>cl_wake_control($lesson, $actor)]
                     + cl_status_people($lesson, $body) + cl_activity_sync($s, $lesson, $actor, $body);
                 if (cl_is_staff($actor)) $result += ['access'=>$lesson['access'] ?? [], 'members'=>$lesson['seen'],
@@ -122,7 +122,7 @@ cl_json_reply(static function (): array {
         if (!cl_is_staff($actor)) throw new ClassroomError(403, 'این عملیات فقط برای دبیر یا مسئول مجاز است.');
         if ($action === 'set-wake') return cl_set_wake($s, $lesson, $actor, $body);
         if ($action === 'screen-access') return cl_set_screen($s, $cfg, $lesson, $actor, $body, $now, $rpc);
-        if ($action === 'set-access') return cl_set_access($s, $lesson, $actor, $body, $now, $rpc);
+        if ($action === 'set-access') return cl_set_access($s, $cfg, $lesson, $actor, $body, $now, $rpc);
         if ($action === 'upload' && $isUpload) return cl_upload($s, $lesson, $body, $_FILES['file'] ?? []);
         if (in_array($action, ['board-page','board-clear'], true)) return cl_board_action($s, $lesson, $body, $action);
         throw new ClassroomError(400, 'عملیات شناخته نشد.');

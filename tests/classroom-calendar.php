@@ -34,9 +34,11 @@ date_default_timezone_set('Pacific/Honolulu');
 try {
     $friday = strtotime('2026-11-19T20:30:00Z');
     $saturday = $friday + 86400;
-    check(cl_today_view($friday - 1) === ['day'=>'2026-11-19','dayLabel'=>'پنجشنبه ۱۴۰۵/۰۸/۲۸'], 'Tehran Thursday 23:59');
-    check(cl_today_view($friday) === ['day'=>'2026-11-20','dayLabel'=>'جمعه ۱۴۰۵/۰۸/۲۹'], 'Tehran Friday, still Thursday in UTC');
-    check(cl_today_view($saturday) === ['day'=>'2026-11-21','dayLabel'=>'شنبه ۱۴۰۵/۰۸/۳۰'], 'Iranian week begins Saturday');
+    foreach ([$friday - 1=>'پنجشنبه ۱۴۰۵/۰۸/۲۸', $friday=>'جمعه ۱۴۰۵/۰۸/۲۹', $saturday=>'شنبه ۱۴۰۵/۰۸/۳۰'] as $stamp=>$label) {
+        check(cl_display_day(cl_day($stamp)->format('Y-m-d')) === $label, 'Tehran civil day, regardless of host timezone');
+    }
+    check(cl_tehran_clock($friday - 60) === '23:59' && cl_tehran_clock($friday) === '00:00', 'display uses Tehran clock at the boundary');
+    check(cl_lesson_times(['started'=>$friday - 120, 'ended'=>$friday]) === '۲۳:۵۸ تا ۰۰:۰۰ (روز بعد)', 'persisted time is rendered in Tehran, even at the midnight cutoff');
     check(date_default_timezone_get() === 'Pacific/Honolulu', 'do not change the host PHP timezone');
     check(cl_schedule_day('پنج‌شنبه') === 4 && cl_schedule_day('يك شنبه') === 0 && cl_schedule_day('شنبه') === 6, 'native Persian weekday spellings');
 } finally {

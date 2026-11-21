@@ -19,12 +19,12 @@ class ClassroomBudgetTest(unittest.TestCase):
 
     def test_marginal_video_and_colocation(self):
         _, _, tx, rx, client = budget.traffic([budget.room_arg('50:1:2:1'), budget.Room(50), budget.Room(50)], site=True)
-        self.assertAlmostEqual(tx, 6.48 + .18 + .11 + 1.2)
-        self.assertAlmostEqual(rx, .57 + .09 + .11 + .75)
-        self.assertEqual(client, 162)
+        self.assertAlmostEqual(tx, 6.48 + .18 + .07 + 1.2)
+        self.assertAlmostEqual(rx, .57 + .09 + .07 + .75)
+        self.assertEqual(client, 212)
 
-    def test_room_and_single_picture_limits(self):
-        for value in ('3', '150', '50:51', '50:1:49:2', '50:1:50', '50:1:-1'):
+    def test_room_and_viewer_limits(self):
+        for value in ('3', '150', '50:51', '50:1:50', '50:1:-1', '50:1:49:50', '50:1:49:49:0', '50:1:49:49:51'):
             with self.subTest(value=value), self.assertRaises(budget.argparse.ArgumentTypeError):
                 budget.room_arg(value)
 
@@ -36,3 +36,13 @@ class ClassroomBudgetTest(unittest.TestCase):
                 self.assertEqual(client, 142)
         _, _, tx, rx, _ = budget.traffic([budget.Room(50, talkers=2)] * 3)
         self.assertAlmostEqual(budget.volume(tx + rx, 90, 8), 70.47)
+
+    def test_two_webcams_and_screen_are_simultaneous(self):
+        rooms = [budget.room_arg('50:1:49:49:2')] * 3
+        _, _, tx, rx, client = budget.traffic(rooms)
+        self.assertAlmostEqual(tx, 40.29)
+        self.assertAlmostEqual(rx, 1.26)
+        self.assertAlmostEqual(budget.volume(tx + rx, 90, 8), 224.37)
+        self.assertEqual(client, 282)
+        _, _, tx, rx, client = budget.traffic([budget.room_arg('50:1:0:0:2')])
+        self.assertEqual((tx, rx, client), (2.16, .33, 52), 'unwatched webcams still send to the server')

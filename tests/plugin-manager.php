@@ -77,6 +77,7 @@ try {
     $timetable = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.9.zip';
     $economy = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.10.zip';
     $localCalendar = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.11.zip';
+    $webcam = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.12.zip';
     $menus = static fn() => [file_get_contents($root . '/other-settings.php'), file_get_contents($root . '/includes/header.php')];
     $managerMenus = [$other, $header];
     expect($menus() === $managerMenus, 'initialization does not rewrite the host');
@@ -271,7 +272,8 @@ try {
     denied(fn()=>mpm_post($db,$site,$site['origin'],'fixture-form-token'));
     expect(http_response_code()===403, 'only the manager CSRF form can opt in');
     http_response_code(200);
-    submit($db,$site,'friday-test',['friday_date'=>$fridayInput]);
+    $fridayNotice = submit($db,$site,'friday-test',['friday_date'=>$fridayInput]);
+    expect(str_contains($fridayNotice, Calendar::label($date)) && !str_contains($fridayNotice, $date), 'the confirmation is also Shamsi');
     $consent = mpm_settings($db,$dir,$row)['friday_test'];
     expect($consent['date']===$date && preg_match('/^[a-f0-9]{32}$/D',$consent['id']) === 1, 'single validated civil date with a generation ID');
     submit($db,$site,'friday-test',['friday_date'=>$fridayInput]);
@@ -379,7 +381,8 @@ try {
     $oldPayload = json_encode($oldEntry, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
     mpm_query($db, "INSERT INTO `$store` (bucket,item,payload) VALUES (?,?,?)", ['reports',$oldKey,$oldPayload]);
     mpm_query($db, "INSERT INTO `$store` (bucket,item,payload) VALUES (?,?,?)", ['lesson',$oldId,json_encode($oldEntry +
-        ['phase'=>'finished', 'teacher'=>7, 'roster'=>['student-1'=>'آزمایشی اول'], 'seconds'=>['student-1'=>95]], JSON_THROW_ON_ERROR)]);
+        ['phase'=>'finished', 'teacher'=>7, 'roster'=>['student-1'=>'آزمایشی اول'], 'seconds'=>['student-1'=>95],
+         'started'=>strtotime('2025-03-20T05:00:00Z'), 'ended'=>strtotime('2025-03-20T05:02:00Z')], JSON_THROW_ON_ERROR)]);
     submit($db,$site,'enable');
     denied(fn()=>mpm_install($db,$dir,$localCalendar));
     submit($db,$site,'disable');
@@ -390,12 +393,29 @@ try {
         && mpm_query($db, "SELECT payload FROM `$store` WHERE bucket='reports' AND item=?", [$oldKey])->fetchColumn()===$oldPayload,
         '0.4.10 to 0.4.11 leaves historical report rows, ISO keys, permissions and media settings intact');
     submit($db,$site,'enable');
+    denied(fn()=>mpm_install($db,$dir,$webcam));
+    submit($db,$site,'disable');
+    expect(mpm_install($db,$dir,$webcam), 'upgrade the already installed calendar release');
+    $row = mpm_row($db,$slug);
+    expect($row['version']==='0.4.12' && $row['owner']===$oldRow['owner'] && mpm_check_store($db,$row)===$store && mpm_settings($db,$dir,$row)===$savedSettings
+        && mpm_query($db, "SELECT payload FROM `$store` WHERE bucket='reports' AND item=?", [$oldKey])->fetchColumn()===$oldPayload,
+        'new video and repeat policies start off without rewriting the old settings');
+    ob_start(); mpm_render_settings($db,$site,'fixture',''); $newOptions=ob_get_clean();
+    expect(str_contains($newOptions,'name="settings[camera_share]" value="yes">')
+        && str_contains($newOptions,'name="settings[repeat_bells]" value="yes">'), 'two separately selectable, unchecked switches');
+    denied(fn()=>submit($db,$site,'settings',['settings'=>$mediaInput + ['screen_share'=>'yes','camera_share'=>'on']]));
+    submit($db,$site,'settings',['settings'=>$mediaInput + ['screen_share'=>'yes','camera_share'=>'yes','repeat_bells'=>'yes']]);
+    $withOpts = mpm_settings($db,$dir,$row);
+    expect(($withOpts['camera_share'] ?? null) === true && ($withOpts['repeat_bells'] ?? null) === true
+        && $withOpts['screen_share'] === true && $withOpts['friday_test'] === $pupilGrant && $withOpts['bell_hours'] === $hours
+        && $withOpts['api_secret'] === $secret, 'opt in without replacing screen option, Tehran hours, saved Friday or key');
+    submit($db,$site,'enable');
     $_SESSION = ['admin_id'=>1];
     foreach ([['view'=>'reports'], ['view'=>'reports', 'lesson'=>$oldId]] as $reportRequest) {
         $_GET = $reportRequest;
         ob_start(); mpm_dispatch($db,$site,$slug,'page'); $reportHtml = ob_get_clean();
         expect(str_contains($reportHtml, 'پنجشنبه ۱۴۰۳/۱۲/۳۰') && !str_contains($reportHtml, '2025-03-20'), 'old report list and detail use the stored date, including leap Esfand');
-        if (isset($reportRequest['lesson'])) expect(str_contains($reportHtml, '۰۰:۰۱:۳۵'), 'old pupil credit displayed with Persian digits');
+        if (isset($reportRequest['lesson'])) expect(str_contains($reportHtml, '۰۰:۰۱:۳۵') && str_contains($reportHtml, '۰۸:۳۰ تا ۰۸:۳۲'), 'old pupil credit and real Tehran clock displayed with Persian digits');
     }
     submit($db,$site,'friday-test',['friday_date'=>$fridayInput,'friday_students'=>'yes']);
     expect(mpm_settings($db,$dir,$row)['friday_test']===$pupilGrant, 'saving the same pupil policy does not disrupt a test');
@@ -415,7 +435,8 @@ try {
         && str_contains($body,'id="lesson-start"') && str_contains($body,'id="speaker-strip" aria-label="در حال صحبت" hidden'),
         'room shows the configured school, preserves a custom class label, and starts without voice activity');
     expect(str_contains($body, 'id="pen"') && !str_contains($body, 'id="board-clear"') && !str_contains($body, 'id="toggle-access"'), 'pupils get pen UI but no staff controls');
-    expect(str_contains($body, 'id="room-date"') && str_contains($body, Calendar::label(mpm_today()->format('Y-m-d'))), 'room shows the Tehran Shamsi date even without the native header');
+    expect(!str_contains($body, 'id="room-date"') && !str_contains($body, 'id="receive-video"')
+        && str_contains($body, 'data-bell-date="' . mpm_today()->format('Y-m-d') . '"'), 'no visible date or media mode selector, but keep the Tehran day key');
     expect(!isset($_SESSION['school_classroom_csrf']), 'managed session leaves no classroom-specific state');
     $old = $_GET ?? []; $_GET['name'] = 'assets/classroom.css';
     ob_start(); mpm_dispatch($db, $site, $slug, 'asset'); $asset = ob_get_clean(); $_GET = $old;

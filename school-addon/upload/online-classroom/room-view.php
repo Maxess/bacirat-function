@@ -39,7 +39,7 @@ function cl_room_icon(string $name): string
 }
 ?>
 <section id="classroom" class="room-shell" data-api="<?= cl_html(cl_href(['route'=>'api'])) ?>" data-csrf="<?= cl_html(cl_context()['csrf']) ?>"
-  data-class="<?= $class['id'] ?>" data-bell-date="<?= cl_html($today['day']) ?>" data-moderator="<?= $staff ? 'yes' : 'no' ?>"
+  data-class="<?= $class['id'] ?>" data-bell-date="<?= cl_html($bellDate) ?>" data-moderator="<?= $staff ? 'yes' : 'no' ?>"
   data-content="<?= cl_html(cl_href(['route'=>'content','class'=>$class['id']])) ?>"
   data-pdf="<?= cl_html(cl_asset('pdf.min.mjs')) ?>" data-pdf-worker="<?= cl_html(cl_asset('pdf.worker.min.mjs')) ?>"
   data-pdf-data="<?= cl_html(cl_href(['route'=>'pdf']) . '&name=') ?>">
@@ -63,33 +63,38 @@ function cl_room_icon(string $name): string
             <button type="button" id="toggle-chat" class="icon-button" aria-label="گفت‌وگوی کلاس" aria-controls="chat-panel" aria-expanded="true" title="نمایش یا بستن گفت‌وگو" disabled><?= cl_room_icon('chat') ?></button>
         </div>
         <div class="room-indicators">
-            <span class="status-dot" id="status-dot" title="اتاق انتظار"><span class="sr-only" id="status" role="status">اتاق انتظار</span></span>
-            <div class="room-exit">
-                <a id="leave" class="icon-button leave-button" href="<?= cl_html(cl_site_href($panel)) ?>" aria-label="خروج از اتاق" title="خروج از اتاق و بازگشت به پنل"><?= cl_room_icon('exit') ?><span>خروج</span></a>
+            <div class="room-signal">
+                <span class="status-dot" id="status-dot" title="اتاق انتظار"><span class="sr-only" id="status" role="status">اتاق انتظار</span></span>
                 <span class="lesson-start" id="lesson-start" title="ساعت شروع کلاس به وقت تهران" hidden>شروع <bdi dir="ltr" id="lesson-start-time"></bdi></span>
             </div>
             <?php if ($staff): ?>
-            <button type="button" id="close" class="icon-button finish-button" title="پایان کلاس برای همه" aria-label="پایان کلاس برای همه" hidden><?= cl_room_icon('finish') ?></button>
-            <div class="room-permissions" id="room-permissions" hidden>
-                <button type="button" class="icon-button" id="toggle-access" aria-label="دسترسی‌های کلاس" title="دسترسی‌های کلاس" aria-expanded="false" aria-controls="access-menu"><?= cl_room_icon('menu') ?></button>
+            <div class="room-permissions" id="room-permissions">
+                <button type="button" class="icon-button" id="toggle-access" aria-label="منوی کلاس" title="منوی کلاس" aria-expanded="false" aria-controls="access-menu"><?= cl_room_icon('menu') ?></button>
                 <div class="access-menu" id="access-menu" role="group" aria-labelledby="access-title" hidden>
-                    <p id="access-title">دسترسی‌های این جلسه</p>
-                    <?php foreach (['mic'=>['mic','میکروفون'], 'camera'=>['camera','دوربین'], 'board'=>['pen','نوشتن روی تخته']] as $key=>[$icon,$label]): ?>
-                    <div class="access-row">
-                        <span class="access-name"><?= cl_room_icon($icon) ?> <?= cl_html($label) ?></span>
-                        <button type="button" class="subtle-button" id="all-<?= $key ?>-give" aria-label="دادن اجازهٔ <?= cl_html($label) ?> به همه">اجازه به همه</button>
-                        <button type="button" class="subtle-button" id="all-<?= $key ?>-cut" aria-label="لغو اجازهٔ <?= cl_html($label) ?> برای همه">لغو برای همه</button>
+                    <p id="access-title">منوی کلاس</p>
+                    <div id="access-features" hidden>
+                        <?php foreach (['mic'=>['mic','میکروفون'], 'camera'=>['camera','دوربین'], 'board'=>['pen','نوشتن روی تخته']] as $key=>[$icon,$label]): ?>
+                        <div class="access-row" id="access-<?= $key ?>">
+                            <span class="access-name"><?= cl_room_icon($icon) ?> <?= cl_html($label) ?></span>
+                            <button type="button" class="subtle-button" id="all-<?= $key ?>-give" aria-label="دادن اجازهٔ <?= cl_html($label) ?> به همه">اجازه به همه</button>
+                            <button type="button" class="subtle-button" id="all-<?= $key ?>-cut" aria-label="لغو اجازهٔ <?= cl_html($label) ?> برای همه">لغو برای همه</button>
+                        </div>
+                        <?php endforeach; ?>
+                        <p class="access-hint" id="camera-unavailable" hidden>وبکم در تنظیمات یا سرور رسانهٔ این اتاق فعال نیست.</p>
+                        <p class="access-hint">میکروفون و دوربین را هر نفر خودش روشن می‌کند.</p>
                     </div>
-                    <?php endforeach; ?>
-                    <p class="access-hint" id="camera-unavailable" hidden>رسانهٔ این اتاق فعلاً فقط صدا دارد.</p>
-                    <p class="access-hint">میکروفون و دوربین را هر نفر خودش روشن می‌کند.</p>
+                    <div class="access-actions">
+                        <a id="leave" class="icon-button leave-button" href="<?= cl_html(cl_site_href($panel)) ?>" title="بازگشت به پنل بدون بستن کلاس برای دیگران"><?= cl_room_icon('exit') ?><span>خروج از اتاق</span></a>
+                        <button type="button" id="close" class="icon-button finish-button" hidden><?= cl_room_icon('finish') ?><span id="close-label">پایان کلاس برای همه</span></button>
+                    </div>
                 </div>
             </div>
             <template id="permission-icons"><?= cl_room_icon('mic') . cl_room_icon('mic-off') . cl_room_icon('camera') . cl_room_icon('camera-off') . cl_room_icon('pen') ?></template>
+            <?php else: ?>
+            <a id="leave" class="icon-button leave-button" href="<?= cl_html(cl_site_href($panel)) ?>" aria-label="خروج از اتاق" title="خروج از اتاق و بازگشت به پنل"><?= cl_room_icon('exit') ?><span>خروج</span></a>
             <?php endif; ?>
         </div>
     </header>
-    <p class="room-date"><time id="room-date" datetime="<?= cl_html($today['day']) ?>"><?= cl_html($today['dayLabel']) ?></time> · وقت تهران</p>
     <?php if ($staff): ?>
     <div class="staff-actions actions" id="staff-start">
         <label for="slot" class="sr-only">انتخاب زنگ</label>
@@ -113,12 +118,8 @@ function cl_room_icon(string $name): string
         </div>
     </section>
     <div id="live-panel" hidden>
-        <div class="receive-tools">
-            <label for="receive-video">دریافت تصویر</label>
-            <select id="receive-video" aria-describedby="receive-hint" disabled><option value="">فقط صدا و تخته</option></select>
-            <span id="receive-hint">برای اینترنت ضعیف، فقط صدا و تخته را نگه دار.</span>
-            <?php if (!$staff): ?><span id="live-attendance" hidden>حضور: <bdi id="live-attendance-time" dir="ltr"></bdi></span><?php endif; ?>
-        </div>
+        <?php if (!$staff): ?><p class="live-attendance" id="live-attendance" hidden>حضور: <bdi id="live-attendance-time" dir="ltr"></bdi></p><?php endif; ?>
+        <section class="camera-strip" id="camera-strip" aria-label="دوربین‌های روشن" hidden></section>
         <section class="screen-panel" id="screen-panel" aria-labelledby="screen-label" hidden>
             <h2 id="screen-label"></h2>
             <video id="screen-video" muted playsinline autoplay controls disablepictureinpicture></video>
@@ -206,7 +207,6 @@ function cl_room_icon(string $name): string
             <?= cl_room_icon('mic') ?>
             <ul id="speakers" class="speakers" role="list"></ul>
         </section>
-        <section class="camera-strip" id="camera-strip" aria-label="دوربین‌های روشن" hidden></section>
         <div class="room-side">
             <section class="room-panel" id="people-panel" aria-labelledby="people-title" <?= $staff ? '' : 'hidden' ?>>
                 <div class="room-panel-head">

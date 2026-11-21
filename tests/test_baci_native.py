@@ -21,8 +21,8 @@ from zipfile import ZipFile
 ROOT = Path(__file__).resolve().parents[1]
 ARTIFACTS = ROOT / 'artifacts'
 PIN = json.loads((ROOT / 'plugin-manager/baci/UPSTREAM.json').read_text())
-UPDATE = 'baci-plugin-manager-update-v0.1.17.zip'
-CLASSROOM = ARTIFACTS / 'school-classroom-plugin-v0.4.11.zip'
+UPDATE = 'baci-plugin-manager-update-v0.1.18.zip'
+CLASSROOM = ARTIFACTS / 'school-classroom-plugin-v0.4.12.zip'
 SITE_TABS = {
     'logs': ('لاگ فعالیت', 'activity-logs.php'),
     'migration': ('مایگریشن', 'migration-updater.php'),
@@ -146,6 +146,7 @@ return ['driver'=>'mysql','host'=>'127.0.0.1','port'=>%s,'database'=>'%s','chars
         env = self.env if request is None else dict(self.env, BACI_REQUEST=json.dumps(request))
         result = subprocess.run(self.php + [str(path)], env=env, capture_output=True, text=True, timeout=25)
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout[-1800:])
+        self.assertNotRegex(result.stderr + result.stdout, r'(?:Fatal|Parse) error:')
         return result.stdout.strip()
 
     def page(self, path, query=None, post=None, session=None):
@@ -158,7 +159,12 @@ return ['driver'=>'mysql','host'=>'127.0.0.1','port'=>%s,'database'=>'%s','chars
             $_SERVER['HTTPS']='on'; $_SERVER['HTTP_HOST']='school.fixture.test';
             session_start(); $_SESSION = $req['session'] + ['csrf_token'=>'fixture-csrf'];
             $_GET=$req['query'] ?? []; $_POST=$req['post'] ?? [];
-            require $req['path'];
+            if ($req['path'] === 'plugins/school-plugins.php') {
+                // Invoke the HTTP controller instead of the direct CLI job entry point.
+                $_SERVER['SCRIPT_FILENAME']=__FILE__;
+                require $req['path'];
+                mpm_run();
+            } else require $req['path'];
         ''', request={'path': path, 'query': query, 'post': post,
                       'session': session if session is not None else {'admin_id': 1, 'admin_role': 'super_admin'}})
 
@@ -266,6 +272,21 @@ return ['driver'=>'mysql','host'=>'127.0.0.1','port'=>%s,'database'=>'%s','chars
         for grid, page in links():
             self.assertEqual(grid.count(url), 1)
             self.assertIn('>کلاس مجازی<', page)
+        self.run_php(self.db + '''
+            require getenv('BACI_TEST_PLUGIN').'/school.php';
+            $db->prepare("INSERT INTO class_schedules(academic_year,class_name,day_of_week,period_num,subject_name,teacher_id)
+                VALUES ('1405/1406','هفتم1',?,'زنگ 1','علوم',11)")->execute([CL_DAYS[(int)cl_day(time())->format('w')]]);
+        ''')
+        room_query = {'plugin': 'school-classroom', 'class': '21'}
+        staff_room = self.page(url.split('?', 1)[0], room_query, session={'teacher_id': 11})
+        pupil_room = self.page(url.split('?', 1)[0], room_query, session={'student_id': 41})
+        for room in (staff_room, pupil_room):
+            self.assertIn('id="classroom"', room)
+            self.assertEqual(room.count('id="leave"'), 1)
+            self.assertNotIn('id="receive-video"', room)
+            self.assertNotIn('id="room-date"', room)
+        self.assertRegex(staff_room, r'(?s)id="access-menu".*id="access-features".*class="access-actions".*id="leave".*id="close".*</header>')
+        self.assertNotIn('id="close"', pupil_room)
         account = {'teacher_id': 14}  # Host nav must not expose a tile for inactive accounts.
         self.assertNotIn(url, Tiles(self.page('teacher-panel.php', session=account), 'tp').links)
         self.run_php(self.db + '''
