@@ -72,8 +72,6 @@ cl_json_reply(static function (): array {
                 'startTime'=>isset($lesson['started']) ? cl_tehran_clock($lesson['started']) : null,
                 'joinable'=>$ready && !$expired && cl_joinable($lesson, $actor, $now),
                 'resumable'=>$ready && !$expired && $lesson['phase'] === 'paused' && $lesson['room'] === null];
-            // A paused or reconnecting pupil can still see their own last verified total, not the room activity.
-            if ($actor['role'] === 'student') $result['attendance'] = $lesson['seconds'][$actor['identity']] ?? 0;
             if ($allowed) {
                 $result += ['cameraCodec'=>cl_webcam_codec($cfg, $lesson), 'screen'=>cl_screen_enabled($cfg, $lesson) ? cl_screen_state($lesson) : null,
                     'wakeMode'=>cl_wake_mode($lesson), 'wakeControl'=>cl_wake_control($lesson, $actor)]

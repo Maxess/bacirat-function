@@ -23,9 +23,9 @@ final class Calendar
         return (new DateTimeImmutable('@' . $timestamp))->setTimezone(new DateTimeZone('Asia/Tehran'));
     }
 
-    public static function clock(int $timestamp): string
+    public static function clock(int $timestamp, bool $withSeconds = false): string
     {
-        return self::tehran($timestamp)->format('H:i');
+        return self::tehran($timestamp)->format($withSeconds ? 'H:i:s' : 'H:i');
     }
 
     public static function digits(string $value): string

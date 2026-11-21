@@ -11,13 +11,23 @@ function cl_duration(int $seconds): string
     return sprintf('%02d:%02d:%02d', intdiv($seconds, 3600), intdiv($seconds % 3600, 60), $seconds % 60);
 }
 
+/** Historic reports without a per-student timestamp must not invent a wall time. */
+function cl_first_presence_clock(array $lesson, string $identity): ?string
+{
+    $at = $lesson['first_seen'][$identity] ?? null;
+    return is_int($at) && $at > 0 ? cl_persian_digits(cl_tehran_clock($at, true)) : null;
+}
+
 function cl_attendance_text(array $lesson, int $student): string
 {
     $id = 'student-' . $student;
     $times = cl_lesson_times($lesson);
+    $first = cl_first_presence_clock($lesson, $id);
     return 'حضور در کلاس مجازی — ' . $lesson['roster'][$id] . "\n" . $lesson['class_name'] . ' · ' . $lesson['subject'] . ' · ' . cl_persian_digits($lesson['period'])
         . (isset($lesson['repeat_of']) ? ' · برگزاری مجدد' : '') . "\nتاریخ: " . cl_display_day($lesson['date'])
-        . ($times !== '' ? "\nساعت برگزاری: " . $times : '') . "\nحضور: " . cl_persian_digits(cl_duration($lesson['seconds'][$id] ?? 0))
+        . ($times !== '' ? "\nساعت برگزاری: " . $times : '')
+        . "\nاولین حضور تأییدشده به وقت تهران: " . ($first ?? 'ثبت نشده')
+        . "\nمدت حضور: " . cl_persian_digits(cl_duration($lesson['seconds'][$id] ?? 0))
         . ' از ' . cl_persian_digits(cl_duration($lesson['active_seconds'])) . "\nزمان انتظار و وقفهٔ کلاس در این مدت منظور نشده است.";
 }
 

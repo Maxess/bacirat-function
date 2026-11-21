@@ -38,6 +38,7 @@ try {
         check(cl_display_day(cl_day($stamp)->format('Y-m-d')) === $label, 'Tehran civil day, regardless of host timezone');
     }
     check(cl_tehran_clock($friday - 60) === '23:59' && cl_tehran_clock($friday) === '00:00', 'display uses Tehran clock at the boundary');
+    check(cl_tehran_clock($friday - 1, true) === '23:59:59' && cl_tehran_clock($friday, true) === '00:00:00', 'confirmed arrival includes seconds and uses Tehran rollover');
     check(cl_lesson_times(['started'=>$friday - 120, 'ended'=>$friday]) === '۲۳:۵۸ تا ۰۰:۰۰ (روز بعد)', 'persisted time is rendered in Tehran, even at the midnight cutoff');
     check(date_default_timezone_get() === 'Pacific/Honolulu', 'do not change the host PHP timezone');
     check(cl_schedule_day('پنج‌شنبه') === 4 && cl_schedule_day('يك شنبه') === 0 && cl_schedule_day('شنبه') === 6, 'native Persian weekday spellings');

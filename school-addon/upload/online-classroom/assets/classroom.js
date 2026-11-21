@@ -41,7 +41,8 @@
     const permissionIcons = el('permission-icons')?.content;
     const cameraSource = lk?.Track.Source.Camera, micSource = lk?.Track.Source.Microphone, screenSource = lk?.Track.Source.ScreenShare;
     // One layer, no second codec. These are encoder targets, not wire rates.
-    const cameraVideo = {width:256,height:144,frameRate:10,bitrate:50000};
+    const cameraVideo = staff ? {width:256,height:144,frameRate:10,bitrate:50000}
+        : {width:128,height:128,frameRate:8,bitrate:25000,square:true};
     const shareVideo = {width:640,height:360,frameRate:2,bitrate:70000}; // Static pages and large text, not motion video.
     const canCaptureCamera = typeof window.navigator?.mediaDevices?.getUserMedia === 'function';
     const canCaptureScreen = typeof window.navigator?.mediaDevices?.getDisplayMedia === 'function';
@@ -52,6 +53,8 @@
     let statusAt = 0, inkAt = Infinity, aimAt = Infinity, inkRead = 0, inkRetryAt = 0;
     let peopleKey = '', peopleRows = new Map(), speakersKey = '', slotKey = null;
     const cameraTiles = new Map();
+    const cameraPreview = el('camera-preview'), previewVideo = el('camera-preview-video');
+    let previewTile = null;
     let shownScreen = null;
     let toastTimer, lastNotice = '', lastNoticeAt = -Infinity;
 
@@ -255,7 +258,7 @@
         for (const person of people) {
             const id = person.identity, row = peopleRows.get(id);
             if (row.timer) {
-                const value = !staff && person === room.localParticipant ? state.attendance : seconds[id];
+                const value = seconds[id];
                 put(row.timer, Number.isInteger(value) ? duration(value) : '—');
             }
             for (const [feature, btn] of Object.entries(row.controls)) {
@@ -276,8 +279,9 @@
 
     function stopCamera(link) {
         link.cameraAttempt++;
-        const track = link.cameraTrack;
-        link.cameraTrack = null;
+        const {cameraTrack:track, cameraCapture:capture} = link;
+        link.cameraTrack = link.cameraCapture = null;
+        capture?.stop();
         if (!track) return;
         // End capture immediately, even if signaling is unavailable or permission was revoked mid-publish.
         track.stop();
@@ -303,6 +307,22 @@
         }
     }
 
+    function detachCameraPreview() {
+        if (!previewTile) return;
+        previewTile.track.detach(previewVideo);
+        previewTile = null;
+    }
+    function showCameraPreview(tile) {
+        if (!hasAccess() || document.hidden || cameraPreview.open || typeof cameraPreview.showModal !== 'function') return;
+        detachCameraPreview();
+        put(el('camera-preview-name'), tile.caption.textContent);
+        cameraPreview.showModal();
+        previewTile = tile;
+        // Attach the same single-layer track. No new receiver, permission or capture.
+        tile.track.attach(previewVideo);
+    }
+    cameraPreview.addEventListener('close', () => { if (!cameraPreview.open) detachCameraPreview(); });
+
     function renderCameras() {
         const strip = el('camera-strip');
         const cameraPeople = new Map();
@@ -317,6 +337,10 @@
         }
         for (const [id, tile] of cameraTiles) {
             if (cameraPeople.get(id)?.track === tile.track) continue;
+            if (previewTile === tile) {
+                if (cameraPreview.open) cameraPreview.close();
+                detachCameraPreview();
+            }
             tile.track.detach(tile.video); tile.figure.remove(); cameraTiles.delete(id);
         }
         for (const [id,{track,name}] of cameraPeople) {
@@ -324,13 +348,23 @@
             if (!tile) {
                 const figure = document.createElement('figure'), caption = document.createElement('figcaption');
                 const video = document.createElement('video');
+                const button = document.createElement('button');
+                button.type = 'button'; button.className = 'camera-tile-button';
+                button.setAttribute('aria-haspopup', 'dialog');
                 video.autoplay = true; video.playsInline = true; video.muted = true;
                 figure.dataset.identity = id;
                 track.attach(video);
-                figure.append(video, caption); strip.append(figure);
-                tile = {track,video,caption,figure}; cameraTiles.set(id,tile);
+                button.append(video); figure.append(button, caption); strip.append(figure);
+                tile = {track,video,caption,figure,button}; cameraTiles.set(id,tile);
+                button.addEventListener('click', () => showCameraPreview(tile));
             }
             put(tile.caption, name);
+            const label = `بزرگ‌نمایی دوربین ${name}`;
+            if (tile.button.title !== label) {
+                tile.button.title = label;
+                tile.button.setAttribute('aria-label', label);
+            }
+            if (previewTile === tile) put(el('camera-preview-name'), name);
         }
         strip.hidden = !cameraTiles.size;
     }
@@ -483,12 +517,6 @@
         el('lesson-start').hidden = !start;
         put(el('lesson-start-time'), faDigits(start));
         for (const id of panels) el(`toggle-${id}`).disabled = !live;
-        if (!staff) {
-            el('live-attendance').hidden = !live || !Number.isInteger(state.attendance);
-            put(el('live-attendance-time'), duration(state.attendance));
-            el('waiting-attendance').hidden = live || !Number.isInteger(state.attendance);
-            put(el('waiting-attendance-time'), duration(state.attendance));
-        }
         if (staff) {
             const slot = el('slot');
             const currentSlot = state.slot || 0;
@@ -577,9 +605,17 @@
         for (const row of values || []) {
             if (row.n <= chatCursor) continue;
             const item = document.createElement('li');
+            const meta = document.createElement('div'); meta.className = 'chat-meta';
             const name = document.createElement('bdi'); name.className = 'chat-by'; name.textContent = row.by;
+            meta.append(name);
+            if (typeof row.clock === 'string' && /^\d{2}:\d{2}$/.test(row.clock)) {
+                const stamp = document.createElement('time'); stamp.className = 'chat-clock'; stamp.dir = 'ltr';
+                stamp.dateTime = row.clock; stamp.textContent = faDigits(row.clock);
+                stamp.title = 'ساعت ارسال به وقت تهران';
+                meta.append(stamp);
+            }
             const text = document.createElement('span'); text.className = 'chat-text'; text.textContent = row.text;
-            item.append(name,text);
+            item.append(meta,text);
             added.push(item);
             chatCursor = row.n;
             messages.push(row);
@@ -596,6 +632,7 @@
 
     function makeRoom() {
         return new lk.Room({
+            adaptiveStream:false, // Enlarging a tile must not request another receiver or quality layer.
             singlePeerConnection:false, // Preserve the tested first-speaker fix; publishing does not renegotiate the receiving PC.
             audioCaptureDefaults:{channelCount:1,echoCancellation:true,noiseSuppression:true,autoGainControl:true},
             publishDefaults:{audioPreset:{maxBitrate:12000,priority:'high'},dtx:true,red:false,forceStereo:false},
@@ -611,7 +648,7 @@
         try {
             const ticket = await getTicket();
             if (pending !== flow || !wanted || stopped || permanent) { await room.disconnect(); return; }
-            link = {room, lesson:ticket.lesson, epoch:ticket.epoch, speakers:[], cameraAttempt:0, cameraTrack:null, cameraBusy:false,
+            link = {room, lesson:ticket.lesson, epoch:ticket.epoch, speakers:[], cameraAttempt:0, cameraTrack:null, cameraCapture:null, cameraBusy:false,
                 screenAttempt:0, screenTrack:null, screenBusy:false};
             active = link;
             flow++; // Ignore status requests made before this transport was installed.
@@ -818,6 +855,62 @@
             if (local.isMicrophoneEnabled !== enabling) note(microphoneFailure(local,enabling));
         } catch (error) { if (active === link && hasAccess()) note(microphoneFailure(local,enabling,error)); }
     }));
+    // Own both the physical capture and, if needed, its pre-encoder square crop.
+    // A browser that cannot produce a square stream never falls back to publishing a large one.
+    function cameraCapture(raw, profile, ended) {
+        let output = raw, input, timer, stopped = false;
+        const stop = () => {
+            if (stopped) return;
+            stopped = true;
+            clearTimeout(timer);
+            if (output !== raw) output.stop();
+            raw.stop();
+            if (input) { input.pause(); input.srcObject = null; }
+        };
+        const prepare = async () => {
+            if (!profile.square) return raw;
+            const {width,height} = raw.getSettings();
+            if (width > 0 && width === height && width <= profile.width) {
+                // With a native crop, keep exact square dimensions even when the device rotates.
+                try {
+                    await raw.applyConstraints({width:{exact:width},height:{exact:height},aspectRatio:{exact:1},frameRate:{max:profile.frameRate}});
+                    const size = raw.getSettings();
+                    if (size.width === width && size.height === height) return raw;
+                } catch (_) { /* Use the fixed-size canvas instead. */ }
+            }
+            if (stopped || raw.readyState !== 'live') return null;
+            const canvas = document.createElement('canvas');
+            canvas.width = profile.width; canvas.height = profile.height;
+            const ctx = canvas.getContext('2d', {alpha:false});
+            const unsupported = () => new PublicError('این مرورگر نمی‌تواند تصویر مربعِ سبک وبکم را ارسال کند. (CAMERA-CROP)');
+            if (!ctx || typeof canvas.captureStream !== 'function') throw unsupported();
+            input = document.createElement('video');
+            input.muted = true; input.playsInline = true;
+            input.srcObject = new window.MediaStream([raw]);
+            try { await input.play(); }
+            catch (_) { if (stopped) return null; throw unsupported(); }
+            if (stopped || raw.readyState !== 'live') return null;
+            const stream = canvas.captureStream(profile.frameRate);
+            const [track] = stream.getVideoTracks();
+            for (const extra of stream.getTracks()) if (extra !== track) extra.stop();
+            if (!track) throw unsupported();
+            output = track;
+            const draw = () => {
+                if (stopped) return;
+                if (raw.readyState !== 'live' || output.readyState !== 'live') { ended(); return; }
+                const w = input.videoWidth, h = input.videoHeight, side = Math.min(w,h);
+                try {
+                    if (side > 0 && input.readyState >= 2) ctx.drawImage(input, (w-side)/2, (h-side)/2, side, side,
+                        0, 0, canvas.width, canvas.height);
+                } catch (_) { ended(); return; }
+                timer = setTimeout(draw, 1000/profile.frameRate);
+            };
+            draw();
+            return output;
+        };
+        return {prepare,stop};
+    }
+
     el('camera').addEventListener('click', async () => {
         const link = active, codec = state.cameraCodec;
         const local = link?.room.localParticipant;
@@ -828,41 +921,50 @@
         const valid = () => link === active && hasAccess() && scope(link).sid === sid && state.cameraCodec === codec
             && mayCamera(local) && link.cameraAttempt === attempt;
         render();
-        let raw;
+        let raw, capture, keep = false;
         try {
             if (link.cameraTrack) { await stopCamera(link); return; }
             // Only this button asks for a camera. Never fetch audio with the camera stream.
             const {width,height,frameRate} = cameraVideo;
-            const video = {facingMode:{ideal:'user'}, width:{ideal:width,max:width}, height:{ideal:height,max:height},
+            const video = {facingMode:{ideal:'user'}, width:{ideal:width,max:256}, height:{ideal:height,max:144},
                 frameRate:{ideal:frameRate,max:frameRate}};
+            if (cameraVideo.square) video.aspectRatio = {ideal:1};
             const stream = await window.navigator.mediaDevices.getUserMedia({video,audio:false});
             [raw] = stream.getVideoTracks();
             for (const track of stream.getTracks()) if (track !== raw) track.stop();
             if (!raw) throw new PublicError('مرورگر تصویر دوربین را در اختیار کلاس نگذاشت.');
-            if (!valid()) { raw.stop(); return; }
+            if (!valid()) return;
+            const ended = () => {
+                if (link.cameraCapture !== capture) return;
+                stopCamera(link);
+                if (active === link) render();
+            };
+            capture = cameraCapture(raw, cameraVideo, ended);
+            link.cameraCapture = capture;
+            raw.addEventListener('ended', ended, {once:true});
             const oversized = () => {
                 const size = raw.getSettings();
-                return size.width > width || size.height > height || size.frameRate > frameRate + .1;
+                return size.width > video.width.max || size.height > video.height.max || size.frameRate > frameRate + .1;
             };
             if (oversized()) await raw.applyConstraints(video);
-            if (oversized()) throw new PublicError('مرورگر نتوانست دوربین را به کیفیت ۱۴۴p و حداکثر ۱۰ فریم محدود کند.');
-            if (!valid() || raw.readyState !== 'live') { raw.stop(); return; }
-            raw.contentHint = 'motion';
-            const track = new lk.LocalVideoTrack(raw);
+            if (!valid()) return;
+            if (oversized()) throw new PublicError('مرورگر نتوانست اندازه یا نرخ فریم وبکم را محدود کند. (CAMERA-SIZE)');
+            const outgoing = await capture.prepare();
+            if (!valid() || outgoing?.readyState !== 'live') return;
+            if (outgoing !== raw) outgoing.addEventListener('ended', ended, {once:true});
+            outgoing.contentHint = 'motion';
+            const track = new lk.LocalVideoTrack(outgoing);
             link.cameraTrack = track;
-            raw.addEventListener('ended', () => {
-                if (link.cameraTrack === track) { stopCamera(link); if (active === link) render(); }
-            }, {once:true});
             await local.publishTrack(track, {source:cameraSource, videoCodec:codec, simulcast:false, backupCodec:false,
                 videoEncoding:{maxBitrate:cameraVideo.bitrate,maxFramerate:frameRate}});
-            if (!valid()) {
-                if (link.cameraTrack === track) stopCamera(link);
-                else { track.stop(); await local.unpublishTrack(track,true).catch(() => {}); }
+            keep = valid();
+            if (!keep && link.cameraTrack !== track) {
+                // A late SDK publication can finish after stopCamera has already taken ownership away.
+                track.stop();
+                await local.unpublishTrack(track, true).catch(() => {});
             }
         } catch (error) {
-            raw?.stop();
             if (valid()) {
-                stopCamera(link);
                 note(error instanceof PublicError ? error.message
                     : ['NotAllowedError','PermissionDeniedError','SecurityError'].includes(error?.name)
                     ? 'مرورگر اجازهٔ استفاده از دوربین را نداده است. (CAMERA-ACCESS)'
@@ -870,6 +972,11 @@
                     : 'دوربین روشن نشد؛ دستگاه یا اتصال رسانه را بررسی کن. (CAMERA-START)');
             }
         } finally {
+            if (!keep) {
+                if (capture && link.cameraCapture === capture) stopCamera(link);
+                else if (capture) capture.stop();
+                else raw?.stop();
+            }
             link.cameraBusy = false;
             if (link === active) render();
         }
@@ -975,7 +1082,7 @@
             if (!el('access-menu').hidden && !el('room-permissions').contains(event.target)) setAccessMenu(false);
         });
         document.addEventListener('keydown', event => {
-            if (event.key === 'Escape' && !el('access-menu').hidden) { event.preventDefault(); setAccessMenu(false, true); }
+            if (event.key === 'Escape' && !cameraPreview.open && !el('access-menu').hidden) { event.preventDefault(); setAccessMenu(false, true); }
         });
         for (const feature of Object.keys(features)) {
             el(`all-${feature}-give`).addEventListener('click', () => changeAccess(feature,true));

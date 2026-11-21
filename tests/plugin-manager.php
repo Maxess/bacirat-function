@@ -78,6 +78,7 @@ try {
     $economy = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.10.zip';
     $localCalendar = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.11.zip';
     $webcam = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.12.zip';
+    $square = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.13.zip';
     $menus = static fn() => [file_get_contents($root . '/other-settings.php'), file_get_contents($root . '/includes/header.php')];
     $managerMenus = [$other, $header];
     expect($menus() === $managerMenus, 'initialization does not rewrite the host');
@@ -409,13 +410,26 @@ try {
     expect(($withOpts['camera_share'] ?? null) === true && ($withOpts['repeat_bells'] ?? null) === true
         && $withOpts['screen_share'] === true && $withOpts['friday_test'] === $pupilGrant && $withOpts['bell_hours'] === $hours
         && $withOpts['api_secret'] === $secret, 'opt in without replacing screen option, Tehran hours, saved Friday or key');
+    $finishedBefore = mpm_query($db,"SELECT payload FROM `$store` WHERE bucket='lesson' AND item=?",[$oldId])->fetchColumn();
+    $encryptedBefore = mpm_owned_row($db,$row)['settings'];
+    submit($db,$site,'enable');
+    denied(fn()=>mpm_install($db,$dir,$square));
+    submit($db,$site,'disable');
+    expect(mpm_install($db,$dir,$square), 'update the activated .12 classroom to the approved square webcam release');
+    $row = mpm_row($db,$slug);
+    expect($row['version']==='0.4.13' && $row['owner']===$oldRow['owner'] && mpm_check_store($db,$row)===$store
+        && mpm_settings($db,$dir,$row)===$withOpts && mpm_owned_row($db,$row)['settings']===$encryptedBefore
+        && mpm_query($db,"SELECT payload FROM `$store` WHERE bucket='lesson' AND item=?",[$oldId])->fetchColumn()===$finishedBefore,
+        '0.4.12 upgrade preserves camera, repeat, screen, keys, hours, Friday, ownership and historic detail bytes');
     submit($db,$site,'enable');
     $_SESSION = ['admin_id'=>1];
     foreach ([['view'=>'reports'], ['view'=>'reports', 'lesson'=>$oldId]] as $reportRequest) {
         $_GET = $reportRequest;
         ob_start(); mpm_dispatch($db,$site,$slug,'page'); $reportHtml = ob_get_clean();
         expect(str_contains($reportHtml, 'پنجشنبه ۱۴۰۳/۱۲/۳۰') && !str_contains($reportHtml, '2025-03-20'), 'old report list and detail use the stored date, including leap Esfand');
-        if (isset($reportRequest['lesson'])) expect(str_contains($reportHtml, '۰۰:۰۱:۳۵') && str_contains($reportHtml, '۰۸:۳۰ تا ۰۸:۳۲'), 'old pupil credit and real Tehran clock displayed with Persian digits');
+        if (isset($reportRequest['lesson'])) expect(str_contains($reportHtml, '۰۰:۰۱:۳۵') && str_contains($reportHtml, '۰۸:۳۰ تا ۰۸:۳۲')
+            && str_contains($reportHtml,'اولین حضور تأییدشده (وقت تهران)') && str_contains($reportHtml,'<bdi dir="ltr">—</bdi>'),
+            'old report keeps its class clock and duration without backfilling an arrival time');
     }
     submit($db,$site,'friday-test',['friday_date'=>$fridayInput,'friday_students'=>'yes']);
     expect(mpm_settings($db,$dir,$row)['friday_test']===$pupilGrant, 'saving the same pupil policy does not disrupt a test');
@@ -430,13 +444,16 @@ try {
     expect(str_contains($body, 'id="classroom"') && str_contains($body, 'id="notice"') && !str_contains($body, 'id="mic-feedback"') && str_contains($body, 'route=api') && !str_contains($body, $secret), 'current classroom renders without a config file or credential leak');
     expect(str_contains($body, 'href="../student-panel.php"') && str_contains($body, 'data-api="school-plugins.php?plugin='), 'single exit to school and same-gateway API resolve from plugins/');
     expect(substr_count($body,'id="leave"')===1 && str_contains($body,'class="status-dot"')
-        && !str_contains($body,'id="attendance-time"') && !str_contains($body,'>بازگشت به پنل<'), 'compact header has a single exit and no duplicate attendance');
+        && !preg_match('/id="(?:waiting-|live-)?attendance(?:-time)?"/', $body) && !str_contains($body,'>بازگشت به پنل<'),
+        'compact room/lobby has a single exit and no standalone attendance element');
     expect(str_contains($body,'class="school-name">never change</bdi>') && str_contains($body,'class="class-name" dir="auto">۸ الف</bdi>')
         && str_contains($body,'id="lesson-start"') && str_contains($body,'id="speaker-strip" aria-label="در حال صحبت" hidden'),
         'room shows the configured school, preserves a custom class label, and starts without voice activity');
     expect(str_contains($body, 'id="pen"') && !str_contains($body, 'id="board-clear"') && !str_contains($body, 'id="toggle-access"'), 'pupils get pen UI but no staff controls');
     expect(!str_contains($body, 'id="room-date"') && !str_contains($body, 'id="receive-video"')
-        && str_contains($body, 'data-bell-date="' . mpm_today()->format('Y-m-d') . '"'), 'no visible date or media mode selector, but keep the Tehran day key');
+        && str_contains($body, 'data-bell-date="' . mpm_today()->format('Y-m-d') . '"')
+        && str_contains($body,'<dialog class="camera-preview" id="camera-preview" aria-labelledby="camera-preview-name">'),
+        'preserve Tehran day key and provide the webcam dialog without a visible date or media selector');
     expect(!isset($_SESSION['school_classroom_csrf']), 'managed session leaves no classroom-specific state');
     $old = $_GET ?? []; $_GET['name'] = 'assets/classroom.css';
     ob_start(); mpm_dispatch($db, $site, $slug, 'asset'); $asset = ob_get_clean(); $_GET = $old;

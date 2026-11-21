@@ -57,7 +57,12 @@ function cl_activity_sync(ClassroomStore $s, array $lesson, array $actor, array 
     $n = cl_id($input['chat'] ?? null);
     $chat = $n !== $state['messages'] ? array_values($s->rows('chat:' . $id, 40, cl_seq($n))) : [];
     $fresh = time() - 6;
-    foreach ($chat as &$row) if (($row['at'] ?? 0) >= $fresh) $row['recent'] = true;
+    foreach ($chat as &$row) {
+        $at = $row['at'] ?? null;
+        if (!is_int($at) || $at <= 0) continue;
+        $row['clock'] = cl_tehran_clock($at);
+        if ($at >= $fresh) $row['recent'] = true;
+    }
     unset($row);
     return ['chat'=>$chat, 'chatMore'=>($chat ? $chat[array_key_last($chat)]['n'] : $n) < $state['messages'],
         'board'=>cl_board_view($s, $id, $actor, $input, $state, $lesson)];

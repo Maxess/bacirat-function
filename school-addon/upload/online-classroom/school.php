@@ -78,9 +78,9 @@ function cl_day(int $now): DateTimeImmutable
     return Calendar::tehran($now);
 }
 
-function cl_tehran_clock(int $stamp): string
+function cl_tehran_clock(int $stamp, bool $withSeconds = false): string
 {
-    return Calendar::clock($stamp);
+    return Calendar::clock($stamp, $withSeconds);
 }
 
 function cl_tehran_midnight(int $now): int

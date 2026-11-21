@@ -341,6 +341,12 @@ function cl_observe(array $lesson, array $observed, array $staff, int $at, int $
             if (isset($lesson['roster'][$who])) $lesson['seconds'][$who] = ($lesson['seconds'][$who] ?? 0) + $elapsed;
         }
     }
+    // Timestamp the first verified sighting, not the ticket, wait, or the first credited interval.
+    if (!cl_is_friday_test($lesson)) {
+        foreach (array_intersect_key($seen, $lesson['roster']) as $who=>$sid) {
+            $lesson['first_seen'][$who] ??= $at;
+        }
+    }
     $lesson['phase'] = 'live';
     $lesson['started'] ??= $at;
     $lesson['sample'] = $at;

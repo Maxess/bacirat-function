@@ -49,9 +49,10 @@ function cl_render_reports(array $data): void
             <?php endif; ?>
         </section>
         <section class="card table-wrap">
-            <table><caption>حضور دانش‌آموزان در این زنگ</caption><thead><tr><th scope="col">دانش‌آموز</th><th scope="col">مدت حضور</th><th scope="col">درصد از زمان فعال</th></tr></thead>
+            <table><caption>حضور دانش‌آموزان در این زنگ</caption><thead><tr><th scope="col">دانش‌آموز</th><th scope="col">اولین حضور تأییدشده (وقت تهران)</th><th scope="col">مدت حضور</th><th scope="col">درصد از زمان فعال</th></tr></thead>
             <tbody><?php foreach ($r['roster'] as $who=>$name): $seconds = $r['seconds'][$who] ?? 0; ?>
-            <tr><th scope="row"><?= cl_html($name) ?></th><td><bdi dir="ltr"><?= cl_persian_digits(cl_duration($seconds)) ?></bdi></td>
+            <tr><th scope="row"><?= cl_html($name) ?></th><td><bdi dir="ltr"><?= cl_first_presence_clock($r, $who) ?? '—' ?></bdi></td>
+                <td><bdi dir="ltr"><?= cl_persian_digits(cl_duration($seconds)) ?></bdi></td>
                 <td><?= $r['active_seconds'] ? ((int)round(100 * $seconds / $r['active_seconds']) . '٪') : '—' ?></td></tr>
             <?php endforeach; ?></tbody></table>
             <?php if (!$r['roster']): ?><p>برای این زنگ دانش‌آموزی در فهرست کلاس ثبت نشده بود.</p><?php endif; ?>

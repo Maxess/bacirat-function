@@ -12,7 +12,8 @@ class Room:
     talkers: int = 1
     screen: int = 0  # concurrent remote receivers
     camera: int = 0  # concurrent remote receivers per active webcam
-    webcams: int | None = None  # default: one webcam if this room has any webcam receivers
+    webcams: int | None = None  # total, defaulting to one if the room has webcam receivers
+    staff_webcams: int = 0  # part of webcams; the rest are pupil cameras
 
     @property
     def camera_publishers(self):
@@ -25,27 +26,38 @@ def room_arg(text):
         room = Room(*parts)
         if (4 <= room.seats <= 60 and 0 <= room.talkers <= room.seats
             and 0 <= room.screen < room.seats and 0 <= room.camera < room.seats
-            and int(room.camera > 0) <= room.camera_publishers <= room.seats):
+            and int(room.camera > 0) <= room.camera_publishers <= room.seats
+            and 0 <= room.staff_webcams <= room.camera_publishers
+            and room.camera_publishers - room.staff_webcams < room.seats):
             return room
     except (TypeError, ValueError):
         pass
-    raise argparse.ArgumentTypeError('expected SEATS[:TALKERS[:SCREEN_VIEWERS[:VIEWERS_PER_WEBCAM[:WEBCAMS]]]] (4–60 seats)')
+    raise argparse.ArgumentTypeError('expected SEATS[:TALKERS[:SCREEN_VIEWERS[:VIEWERS_PER_WEBCAM[:WEBCAMS[:STAFF_WEBCAMS]]]]] (4–60 seats including staff)')
 
 
-def traffic(rooms, speech=40.0, screen=90.0, camera=70.0, site=False, site_down=8.0, site_up=5.0):
+def traffic(rooms, speech=40.0, screen=90.0, camera=40.0, site=False, site_down=8.0, site_up=5.0, *, staff_camera=70.0):
+    def camera_wire(room, listener=False):
+        pupil = room.camera_publishers - room.staff_webcams
+        staff = room.staff_webcams
+        wire = pupil * camera + staff * staff_camera
+        if listener and room.camera_publishers == room.seats:
+            # Even the busiest receiver among an all-camera room cannot receive their own camera.
+            wire -= min(rate for count, rate in ((pupil, camera), (staff, staff_camera)) if count)
+        return wire
+
     seats = sum(room.seats for room in rooms)
     tx = 4.0 * seats  # budgeted SFU per-seat control/signaling kbit/s (not a measurement)
     rx = 3.0 * seats
     copies = sum(room.talkers * (room.seats - 1) for room in rooms)
-    tx += speech * copies + sum(screen * room.screen + camera * room.camera * room.camera_publishers for room in rooms)
-    rx += sum(speech * room.talkers + screen * bool(room.screen) + camera * room.camera_publishers for room in rooms)
+    tx += speech * copies + sum(screen * room.screen + camera_wire(room) * room.camera for room in rooms)
+    rx += sum(speech * room.talkers + screen * bool(room.screen) + camera_wire(room) for room in rooms)
     if site:
         tx += site_down * seats
         rx += site_up * seats
     # A foreground listener can receive screen and webcams at once. This is a worst listener,
     # so within a room the counts overlap (but no one receives a network copy from themselves).
     client = max(speech * min(room.talkers, room.seats - 1) + screen * bool(room.screen)
-                 + camera * min(room.camera_publishers, room.seats - 1) * bool(room.camera) for room in rooms)
+                 + camera_wire(room, listener=True) * bool(room.camera) for room in rooms)
     return seats, copies, tx / 1000, rx / 1000, client + 4 + site_down
 
 
@@ -62,8 +74,8 @@ def nonnegative(value):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--room', type=room_arg, action='append', metavar='SEATS[:T[:S[:C[:K]]]]',
-                        help='per room: seats, talkers, screen viewers, viewers per webcam, webcams. Default: 3 rooms of 50, one talker each')
+    parser.add_argument('--room', type=room_arg, action='append', metavar='SEATS[:T[:S[:C[:K[:F]]]]]',
+                        help='per room: seats, talkers, screen viewers, viewers per webcam, total webcams, of which staff. Default: 3 rooms of 50, one talker each')
     parser.add_argument('--minutes-per-day', type=nonnegative, default=90)
     parser.add_argument('--days', type=int, default=8)
     parser.add_argument('--quota-gb', type=nonnegative, default=100, help='decimal GB')
@@ -75,7 +87,8 @@ def main():
     parser.add_argument('--site-on-vps', action='store_true', help='also count steady website/board HTTP on this VPS')
     parser.add_argument('--speech-kbps', type=nonnegative, default=40, help='wire budget, not Opus payload')
     parser.add_argument('--screen-kbps', type=nonnegative, default=90, help='wire budget for one light screen stream, not its encoder target')
-    parser.add_argument('--camera-kbps', type=nonnegative, default=70, help='wire budget for one 144p camera stream, not its encoder target')
+    parser.add_argument('--student-camera-kbps', '--camera-kbps', type=nonnegative, default=40, help='wire budget for one square student webcam')
+    parser.add_argument('--staff-camera-kbps', type=nonnegative, default=70, help='wire budget for one staff webcam')
     parser.add_argument('--site-down-kbps', type=nonnegative, default=8, help='steady per-user HTTP budget (not assets/downloads)')
     parser.add_argument('--site-up-kbps', type=nonnegative, default=5)
     parser.add_argument('--client-kBps', dest='client_kbytes', type=nonnegative, default=50, help='decimal kilobytes/s downstream')
@@ -84,15 +97,15 @@ def main():
             and a.client_kbytes > 0):
         parser.error('require 0 < minutes/day <= 1440, positive days/quota/client, 0 <= reserve < 100')
     rooms = a.room or [Room(50)] * 3
-    seats, copies, tx, rx, client = traffic(rooms, a.speech_kbps, a.screen_kbps, a.camera_kbps,
-                                            a.site_on_vps, a.site_down_kbps, a.site_up_kbps)
+    seats, copies, tx, rx, client = traffic(rooms, a.speech_kbps, a.screen_kbps, a.student_camera_kbps,
+                                            a.site_on_vps, a.site_down_kbps, a.site_up_kbps, staff_camera=a.staff_camera_kbps)
     usable = 1 - a.reserve_percent / 100
     used = volume(tx + (rx if a.bill == 'both' else 0), a.minutes_per_day, a.days) + a.extra_gb
     cap = a.quota_gb * usable
     average = max(0, cap - a.extra_gb) / volume(1, a.minutes_per_day, a.days)
     friendly = lambda value, limit: 'within-model-budget' if value <= limit else 'over-model-budget'
     print('ESTIMATE ONLY (no CPU, peak join or real network validation)')
-    print('rooms=' + ','.join(f'{r.seats}:{r.talkers}:{r.screen}:{r.camera}:{r.camera_publishers}' for r in rooms)
+    print('rooms=' + ','.join(f'{r.seats}:{r.talkers}:{r.screen}:{r.camera}:{r.camera_publishers}:{r.staff_webcams}' for r in rooms)
           + f' seats_including_staff={seats} forwarded_audio_copies={copies} approx_audio_packets_per_s={copies*50}')
     print(f'tx_Mbps={tx:.3f} rx_Mbps={rx:.3f} site_on_vps={str(a.site_on_vps).lower()}')
     print(f'client_down_kbps={client:.1f} ({client/8:.1f} kB/s) limit={a.client_kbytes:.1f} kB/s '

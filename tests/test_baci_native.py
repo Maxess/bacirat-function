@@ -21,8 +21,8 @@ from zipfile import ZipFile
 ROOT = Path(__file__).resolve().parents[1]
 ARTIFACTS = ROOT / 'artifacts'
 PIN = json.loads((ROOT / 'plugin-manager/baci/UPSTREAM.json').read_text())
-UPDATE = 'baci-plugin-manager-update-v0.1.18.zip'
-CLASSROOM = ARTIFACTS / 'school-classroom-plugin-v0.4.12.zip'
+UPDATE = 'baci-plugin-manager-update-v0.1.19.zip'
+CLASSROOM = ARTIFACTS / 'school-classroom-plugin-v0.4.13.zip'
 SITE_TABS = {
     'logs': ('لاگ فعالیت', 'activity-logs.php'),
     'migration': ('مایگریشن', 'migration-updater.php'),

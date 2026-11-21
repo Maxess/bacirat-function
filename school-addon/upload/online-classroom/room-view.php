@@ -112,14 +112,19 @@ function cl_room_icon(string $name): string
             <p id="wait-message"><?= $staff ? 'در حال بررسی زنگ‌های امروز…' : 'وقتی اتصال دبیر تأیید شود، خودکار وارد کلاس می‌شوی.' ?></p>
             <p class="wait-hint"><?= cl_room_icon('clock') ?> زمان انتظار در تایمر حضور حساب نمی‌شود.</p>
             <?php if (!$staff): ?>
-            <p class="waiting-attendance" id="waiting-attendance" hidden>حضور ثبت‌شده: <bdi dir="ltr" id="waiting-attendance-time"></bdi></p>
             <button type="button" id="join" hidden>بازگشت به اتاق انتظار</button>
             <?php endif; ?>
         </div>
     </section>
     <div id="live-panel" hidden>
-        <?php if (!$staff): ?><p class="live-attendance" id="live-attendance" hidden>حضور: <bdi id="live-attendance-time" dir="ltr"></bdi></p><?php endif; ?>
         <section class="camera-strip" id="camera-strip" aria-label="دوربین‌های روشن" hidden></section>
+        <dialog class="camera-preview" id="camera-preview" aria-labelledby="camera-preview-name">
+            <header>
+                <h2 id="camera-preview-name" dir="auto"></h2>
+                <form method="dialog"><button type="submit" class="icon-button" autofocus>بستن تصویر</button></form>
+            </header>
+            <video id="camera-preview-video" muted playsinline autoplay disablepictureinpicture></video>
+        </dialog>
         <section class="screen-panel" id="screen-panel" aria-labelledby="screen-label" hidden>
             <h2 id="screen-label"></h2>
             <video id="screen-video" muted playsinline autoplay controls disablepictureinpicture></video>

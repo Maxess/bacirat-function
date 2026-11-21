@@ -181,6 +181,13 @@ $sample(20,$t+6,$classes[20]);
 $a = $sample(10,$t+6,$first);
 must($a['phase']==='live' && $a['active_seconds']===0, 'verified staff and no time counted in wait');
 cl_ticket($cfg,$a,$student,$bind($a,'PA_Student'),$t+6);
+must(!isset($a['first_seen']), 'offering a ticket cannot record arrival');
+$wrongPulse = $a;
+$wrongPulse['pulses']['student-1'] = ['sid'=>'PA_Wrong','at'=>$t+8];
+must(!isset(cl_observe($wrongPulse,$teacherWire+$studentWire,['teacher-1'=>true],$t+9,$t+9)['first_seen']),
+    'wrong SID cannot record an arrival even if the SFU lists the pupil');
+$wrongPulse['pulses']['student-1']['sid'] = 'PA_Student';
+must(!isset(cl_observe($wrongPulse,$studentWire,[],$t+9,$t+9)['first_seen']), 'no arrival timestamp without verified staff');
 denied(409,fn()=>cl_check_live($cfg,$a,$student,$bind($a,'PA_Fake'),$t+6));
 denied(409,fn()=>cl_check_live($cfg,$a,$other,$bind($a,'PA_Teacher'),$t+6));
 $pulse(10,$student,'PA_Student',$t+8);
@@ -189,6 +196,8 @@ $wire($r,$teacherWire+$studentWire+$managerWire);
 $sample(10,$t+9,$first);
 $active=cl_active($s,10);
 cl_check_live($cfg,$active,$student,$bind($active,'PA_Student'),$t+9);
+must($active['first_seen'] === ['student-1'=>$t+9] && $active['seconds'] === [],
+    'the first verified sample records a clock before any consecutive interval earns time');
 $wake = $bind($active,'PA_Teacher') + ['mode'=>'idle'];
 must(cl_wake_mode($active) === 'live' && cl_wake_control($active,$teacher), 'wake defaults on and is configurable by the assigned teacher');
 denied(403,fn()=>cl_set_wake($s,$active,$student,$wake));
@@ -268,6 +277,8 @@ must($ink([$stroke])['ink']===1, 'existing ink format still accepted');
 $legacy = $stroke+['id'=>'old-00000001'];
 $sync=cl_activity_sync($s,$active,$student,[]);
 must($sync['board']['ops']==[$legacy] && $sync['chat'][0]['text']==='<b>متن است</b>' && !$sync['board']['docs'], 'newcomer gets available page and chat as plain text');
+must($sync['chat'][0]['clock'] === '08:30' && $sync['chat'][0]['at'] === $t+9
+    && !isset($s->get('chat:'.$active['id'],cl_seq(1))['clock']), 'chat returns the server Tehran wall clock without rewriting the stored epoch');
 must($view(1,1)['ops']===[], 'incremental legacy ink updates');
 denied(400,fn()=>$ink([array_replace($stroke,['points'=>[[99000,1]]])]));
 
@@ -382,7 +393,8 @@ $pulse(10,$student,'PA_NewStudent',$t+20);
 $wire($r3,['teacher-1'=>'PA_NewTeacher','student-1'=>'PA_NewStudent']);
 $sample(10,$t+21,$first);
 $sample(10,$t+24,$first);
-must(cl_active($s,10)['seconds']['student-1']===6, 'resumed interval counted once');
+must(cl_active($s,10)['seconds']['student-1']===6 && cl_active($s,10)['first_seen']['student-1']===$t+9,
+    'resume counts the same interval once and does not move the first verified presence');
 $pulse(10,$teacher,'PA_NewTeacher',$t+40);
 $a3=$sample(10,$t+41,$first);
 must($a3['phase']==='paused' && !isset($sfus[$r3]) && $a3['seconds']['student-1']===6, 'unsampled gap not counted, expired transport revoked');
@@ -392,6 +404,13 @@ must(!cl_active($s,10) && !isset($sfus[$r3]) && $s->get('activity',$cl['id'])===
 must(!isset($s->get('lesson',$cl['id'])['wake_mode']), 'wake policy is not retained in the finished lesson or report');
 $rpt=cl_report_detail($s,$teacher,$cl['id']);
 must($rpt['active_seconds']===9 && $rpt['seconds']['student-1']===6 && isset($rpt['roster']['student-4']) && !isset($rpt['seconds']['student-4']), 'report retains absence as zero and accurate denominator');
+must($rpt['first_seen'] === ['student-1'=>$t+9] && cl_first_presence_clock($rpt,'student-4') === null,
+    'the occurrence report preserves first presence separately and an absent pupil has no arrival clock');
+$historic = $rpt;
+unset($historic['first_seen']);
+$historicNotice = cl_attendance_text($historic,1);
+must(str_contains($historicNotice,"\nاولین حضور تأییدشده به وقت تهران: ثبت نشده\nمدت حضور: ۰۰:۰۰:۰۶ از ۰۰:۰۰:۰۹"),
+    'a historic notice with a credited duration has no inferred arrival');
 must(cl_report_detail($s,$deputy,$cl['id'])===$rpt && cl_report_detail($s,$manager,$cl['id'])===$rpt && cl_report_detail($s,$other,$cl['id'])===null, 'historical report scopes');
 denied(403,fn()=>cl_report_detail($s,$student,$cl['id']));
 denied(409,fn()=>$open($teacher,11,$t+42));
@@ -422,7 +441,10 @@ foreach ($send as [$provider,$target,$text]) {
     must(str_contains($text, "\nتاریخ: چهارشنبه ۱۴۰۵/۰۸/۲۷\n") && !str_contains($text, '(تهران)') && !str_contains($text, '2026-11-18'),
         'bot date is Shamsi without a timezone suffix');
     must(str_contains($text, "\nساعت برگزاری: ۰۸:۳۰ تا ۰۸:۳۰\n"), 'bot wall clock uses Tehran, separate from verified presence duration');
-    must(str_contains($text,'۰۰:۰۰:۰۹') && str_contains($text,$target==='333'?'۰۰:۰۰:۰۰':'۰۰:۰۰:۰۶'), 'correct attendance message');
+    $arrival = $target === '333' ? 'ثبت نشده' : '۰۸:۳۰:۰۹';
+    $duration = $target === '333' ? '۰۰:۰۰:۰۰' : '۰۰:۰۰:۰۶';
+    must(str_contains($text,"\nاولین حضور تأییدشده به وقت تهران: $arrival\nمدت حضور: $duration از ۰۰:۰۰:۰۹"),
+        'bot distinguishes Tehran first presence, absence and an unshifted elapsed duration');
 }
 
 // Simulated unlink, inactive provider, changed bot, and ambiguous send after the packet was queued.
@@ -559,7 +581,8 @@ must($resumedRepeat['id']===$again['id'] && $resumedRepeat['room']!==$repeatRoom
     'resume the repeat with new transport, not the earlier original or a new occurrence');
 cl_close_lesson($s,$repeatCfg,$resumedRepeat,$evening+8,$rpc);
 $repeatReport = cl_report_detail($s,$teacher,$again['id']);
-must(cl_report_detail($s,$teacher,$firstBell['id']) === $firstReport && $repeatReport['seconds']['student-1'] === 3,
+must(cl_report_detail($s,$teacher,$firstBell['id']) === $firstReport && $repeatReport['seconds']['student-1'] === 3
+    && $repeatReport['first_seen'] === ['student-1'=>$evening+3],
     'each run keeps separate presence and the first report is byte-for-byte unchanged');
 $idx = array_column($s->rows('reports:teacher-1',30),'repeat_of','id');
 must(($idx[$again['id']] ?? null) === $firstBell['id'], 'the teacher’s index has an independent repeat with the original reference');
@@ -578,7 +601,9 @@ foreach ([$firstBell['id']=>$originalNotice, $again['id']=>$repeatNotice] as $id
 }
 $newMessages = array_slice($send,$beforeSend);
 must(count($newMessages) === 4 && count(array_filter($newMessages,fn($m)=>str_contains($m[2],'برگزاری مجدد'))) === 2
-    && str_contains($newMessages[2][2], '۱۸:۱۵ تا ۱۸:۱۵'), 'dedup is per occurrence, with a separate Tehran bot notice for the repeat');
+    && str_contains($newMessages[2][2], '۱۸:۱۵ تا ۱۸:۱۵')
+    && count(array_filter($newMessages,fn($m)=>str_contains($m[2],'۱۸:۱۵:۰۳'))) === 1,
+    'dedup is per occurrence, with the repeat’s own Tehran arrival for the pupil who attended');
 $db->exec("UPDATE class_schedules SET subject_name='درس تازه' WHERE id=99");
 denied(409,fn()=>$repeatOpen($teacher,$repeat,$evening+10));
 $db->prepare('UPDATE class_schedules SET subject_name=? WHERE id=99')->execute([$firstReport['subject']]);
@@ -696,7 +721,7 @@ $pulse(10,$student,'PA_Student',$start+4);
 $practicing = cl_reconcile($s,$withPupils,$first,cl_active($s,10),$start+5,$rpc);
 must($practicing['seconds'] === [] && array_keys($practicing['roster']) === ['student-1'], 'only consecutive verified intervals count');
 $practicing = cl_reconcile($s,$withPupils,$first,cl_active($s,10),$start+8,$rpc);
-must($practicing['seconds'] === ['student-1'=>3], 'same server-clock accounting used for pupil practice');
+must($practicing['seconds'] === ['student-1'=>3] && !isset($practicing['first_seen']), 'same duration for pupil practice without an official arrival clock');
 cl_chat($s,cl_check_live($withPupils,$practicing,$student,$bind($practicing,'PA_Student'),$start+8),$student,'پیام تمرینی',$start+8);
 cl_event_apply($s,$withPupils,['event'=>'participant_left','room'=>['name'=>$room],'participant'=>['identity'=>'teacher-4','sid'=>'PA_PilotStaff']],$start+9,$rpc);
 $paused = cl_active($s,10);
