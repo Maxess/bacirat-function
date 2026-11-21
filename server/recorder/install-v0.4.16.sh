@@ -9,6 +9,9 @@ readonly config=/etc/school-classroom-recorder.json
 readonly unit_file="/etc/systemd/system/$unit"
 readonly credential_dropin="$unit_file.d/10-recorder-credential.conf"
 readonly spool=/var/lib/school-classroom-recorder
+readonly chromium_slot="$target/browsers/chromium_headless_shell-1223/chrome-headless-shell-linux64"
+readonly npm_chromium_sha256=53a15d6c3a3d27dfb54c4ba60278b1683136f70cf1e67e989da7dfbd3d451ef0
+readonly apparmor_dir=/etc/apparmor.d
 readonly archive=baci-classroom-recorder-v0.4.16.zip
 readonly ref=9405d1e84bdde0cf1903ac44addec5501948a34f
 readonly digest=de02931ed2c0247d0ae387fb4797ea78bb65bdec1db9a50cf05994d81c8e9b28
@@ -72,11 +75,8 @@ PY
     [[ $encoders == *' libx264 '* && $encoders == *' aac '* ]] || fail 'The installed FFmpeg needs libx264 and aac encoders.'
 }
 
-write_credential_dropin() {
-    # systemd can grant a named-user ACL, reflected in st_mode as a group mask.
-    # .16 accepts owner-only mode, so make a 0600 copy in a 0700 volatile service directory.
-    [[ ! -L "$unit_file.d" && ! -L "$credential_dropin" ]] || fail 'Unexpected symlink at the recorder drop-in path.'
-    cat > "$work/credential.conf" <<'UNIT'
+credential_dropin_text() {
+    cat <<'UNIT'
 [Service]
 RuntimeDirectory=school-classroom-recorder-credential
 RuntimeDirectoryMode=0700
@@ -84,6 +84,13 @@ ExecStartPre=/usr/bin/install -T -m 0600 ${CREDENTIALS_DIRECTORY}/config.json %t
 ExecStart=
 ExecStart=/opt/school-classroom-recorder/venv/bin/python -Esu /opt/school-classroom-recorder/recording.py %t/school-classroom-recorder-credential/config.json
 UNIT
+}
+
+write_credential_dropin() {
+    # systemd can grant a named-user ACL, reflected in st_mode as a group mask.
+    # .16 accepts owner-only mode, so make a 0600 copy in a 0700 volatile service directory.
+    [[ ! -L "$unit_file.d" && ! -L "$credential_dropin" ]] || fail 'Unexpected symlink at the recorder drop-in path.'
+    credential_dropin_text > "$work/credential.conf"
     if [[ -e "$credential_dropin" ]]; then
         cmp -s -- "$work/credential.conf" "$credential_dropin" || fail 'An existing recorder drop-in was modified; it was not overwritten.'
         return
@@ -93,18 +100,30 @@ UNIT
 }
 
 wait_for_startup() {
-    local deadline=$((SECONDS + 25)) status invocation logs
+    local stable_seconds=${1:-0} confirmed='' since=0
+    local deadline=$((SECONDS + 25 + stable_seconds)) status invocation logs
     stage='wait for local recorder startup'
     while (( SECONDS < deadline )); do
         status=$(systemctl show -p SubState --value "$unit")
-        case "$status" in dead|failed|auto-restart|auto-restart-queued) break ;; esac
+        case "$status" in
+            dead|failed) break ;;
+            auto-restart|auto-restart-queued) (( stable_seconds > 0 )) || break ;;
+        esac
         invocation=$(systemctl show -p InvocationID --value "$unit")
         if [[ $status == running && $invocation =~ ^[a-f0-9]{32}$ ]]; then
-            logs=$(journalctl --no-pager -n 25 -o cat "_SYSTEMD_INVOCATION_ID=$invocation")
-            if grep -Fxq 'recorder: compositor and encoder available' <<< "$logs"; then
+            if [[ $confirmed != "$invocation" ]]; then
+                logs=$(journalctl --no-pager -n 25 -o cat "_SYSTEMD_INVOCATION_ID=$invocation")
+                if grep -Fxq 'recorder: compositor and encoder available' <<< "$logs"; then
+                    confirmed=$invocation
+                    since=$SECONDS
+                fi
+            fi
+            if [[ $confirmed == "$invocation" ]] && (( SECONDS - since >= stable_seconds )); then
                 printf '\nRecorder compositor started. Check school readiness in the recording settings.\n'
                 return 0
             fi
+        else
+            confirmed=''
         fi
         sleep 1
     done
@@ -112,8 +131,8 @@ wait_for_startup() {
     fail 'The recorder did not confirm local startup. See the current journal above.'
 }
 
-repair_startup() {
-    local status existing
+check_installed_recorder() {
+    local existing
     stage='check the installed 0.4.16 recorder'
     [[ -f "$unit_file" && ! -L "$unit_file" && -f "$target/recording.py" && ! -L "$target/recording.py" && ! -L "$target" ]] \
         || fail 'The expected installed recorder unit and program were not found.'
@@ -123,6 +142,11 @@ repair_startup() {
     [[ $(systemctl show -p FragmentPath --value "$unit") == "$unit_file" ]] || fail 'The loaded unit is not the stock recorder service.'
     existing=$(systemctl show -p DropInPaths --value "$unit")
     [[ -z "$existing" || $existing == "$credential_dropin" ]] || fail 'Custom service drop-ins exist; no changes were made.'
+}
+
+repair_startup() {
+    local status
+    check_installed_recorder
     status=$(systemctl show -p SubState --value "$unit")
     case "$status" in dead|failed|auto-restart|auto-restart-queued) ;; *) fail 'The recorder may be running. Do not repair it during recording.' ;; esac
     check_startup_inputs
@@ -134,15 +158,92 @@ repair_startup() {
     wait_for_startup
 }
 
+allow_chromium_userns() {
+    local browser="$chromium_slot/chrome-headless-shell" name=baci-school-classroom-recorder-chromium profile
+    profile="$apparmor_dir/$name"
+    check_installed_recorder
+    if [[ $(systemctl show -p DropInPaths --value "$unit") != "$credential_dropin" ]] \
+        || [[ ! -f "$credential_dropin" || -L "$credential_dropin" ]] \
+        || ! credential_dropin_text | cmp -s - "$credential_dropin"; then
+        fail 'The stock private-credential repair must already be applied (--repair-startup). No changes were made.'
+    fi
+    stage='verify restricted AppArmor user namespaces and the pinned browser'
+    command -v apparmor_parser >/dev/null || fail 'apparmor_parser is missing. Ask the VPS administrator to install the host AppArmor policy tools.'
+    [[ -r /sys/module/apparmor/parameters/enabled && $(< /sys/module/apparmor/parameters/enabled) == Y \
+        && -r /proc/sys/kernel/apparmor_restrict_unprivileged_userns \
+        && $(< /proc/sys/kernel/apparmor_restrict_unprivileged_userns) == 1 \
+        && -r "$apparmor_dir/abi/4.0" ]] \
+        || fail 'This host does not expose the expected AppArmor userns policy and ABI. No policy was changed.'
+    if [[ -r /proc/sys/kernel/unprivileged_userns_clone && $(< /proc/sys/kernel/unprivileged_userns_clone) == 0 ]] \
+        || [[ -r /proc/sys/user/max_user_namespaces && $(< /proc/sys/user/max_user_namespaces) == 0 ]]; then
+        fail 'A separate host setting disables user namespaces. Ask the VPS administrator; do not disable Chromium sandboxing.'
+    fi
+    # AppArmor grants by path. No unprivileged user may be able to replace that executable or a path component.
+    python3 -I - "$browser" "$profile" <<'PY'
+from pathlib import Path
+import os
+import stat
+import sys
+
+browser, profile = map(Path, sys.argv[1:])
+paths = [browser, *browser.parents, *profile.parents]
+if os.path.lexists(profile):
+    paths.append(profile)
+try:
+    for path in paths:
+        info = path.lstat()
+        is_expected_type = stat.S_ISREG if path in (browser, profile) else stat.S_ISDIR
+        if not is_expected_type(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+            raise SystemExit(f"Not a protected root-owned path: {path}")
+    if browser.stat().st_mode & 0o6000 or not os.access(browser, os.X_OK):
+        raise SystemExit("Expected a normal non-setuid executable for Chromium.")
+except OSError:
+    raise SystemExit("Could not verify the installed Chromium and AppArmor paths.") from None
+PY
+    printf '%s  %s\n' "$npm_chromium_sha256" "$browser" | sha256sum -c -
+
+    stage='load the exact-path AppArmor profile'
+    work=$(mktemp -d)
+    # As documented by Chromium for Ubuntu's AppArmor userns restriction.
+    # The Chrome namespace/seccomp sandbox and the recorder's systemd restrictions remain enabled.
+    cat > "$work/chromium.apparmor" <<POLICY
+abi <abi/4.0>,
+include <tunables/global>
+
+profile $name $browser flags=(unconfined) {
+  userns,
+}
+POLICY
+    if [[ -e "$profile" ]]; then
+        cmp -s -- "$work/chromium.apparmor" "$profile" || fail 'An existing AppArmor profile differs; it was not overwritten.'
+        apparmor_parser -T -r "$profile"
+    else
+        apparmor_parser -T -Q "$work/chromium.apparmor"
+        install -T -o root -g root -m 0644 -- "$work/chromium.apparmor" "$profile"
+        if ! apparmor_parser -T -a "$profile"; then
+            rm -f -- "$profile"
+            fail 'The kernel did not load this AppArmor profile. Ask the VPS administrator to check policy loading.'
+        fi
+    fi
+    printf '\nLoaded a userns profile for only the pinned Recorder Chromium executable.\n'
+
+    # Start is a no-op if already running; a crash-looping unit also retries with the new profile.
+    stage='start only the recorder if needed'
+    systemctl start "$unit"
+    wait_for_startup 8
+}
+
 (( EUID == 0 )) || fail 'Run this installer as root on the existing LiveKit VPS.'
-if [[ ${1:-} == --repair-startup && $# -eq 1 ]]; then
-    repair_startup
-    exit 0
+if (( $# == 1 )); then
+    case "$1" in
+        --repair-startup) repair_startup; exit 0 ;;
+        --allow-chromium-userns) allow_chromium_userns; exit 0 ;;
+    esac
 fi
 chromium='playwright'
 local_browser=''
 if (( $# > 0 )); then
-    [[ $1 == --chromium-npm && $# -le 2 ]] || fail 'Usage: install-v0.4.16.sh [--chromium-npm [chromium-153.0.0.tgz] | --repair-startup]'
+    [[ $1 == --chromium-npm && $# -le 2 ]] || fail 'Usage: install-v0.4.16.sh [--chromium-npm [chromium-153.0.0.tgz] | --repair-startup | --allow-chromium-userns]'
     [[ $(uname -m) == x86_64 ]] || fail 'The pinned npm Chromium package is for Linux x86_64 only.'
     chromium='npm'
     local_browser=${2:-}
@@ -222,15 +323,13 @@ pipeline(process.stdin, createBrotliDecompress(), process.stdout).catch(error =>
     process.exitCode = 1;
 });
 ' > "$work/chrome-headless-shell"
-    printf '%s  %s\n' '53a15d6c3a3d27dfb54c4ba60278b1683136f70cf1e67e989da7dfbd3d451ef0' \
-        "$work/chrome-headless-shell" | sha256sum -c -
+    printf '%s  %s\n' "$npm_chromium_sha256" "$work/chrome-headless-shell" | sha256sum -c -
     # Only the executable is substituted, at the exact Linux x64 slot of the pinned Playwright.
     # Do not use Sparticuz's launcher flags. recording.py still requires Chromium's sandbox.
-    shell_dir="$target/browsers/chromium_headless_shell-1223/chrome-headless-shell-linux64"
-    install -d -o root -g root -m 0755 "$shell_dir"
-    install -T -o root -g root -m 0755 "$work/chrome-headless-shell" "$shell_dir/chrome-headless-shell"
+    install -d -o root -g root -m 0755 "$chromium_slot"
+    install -T -o root -g root -m 0755 "$work/chrome-headless-shell" "$chromium_slot/chrome-headless-shell"
     tar -xOzf "$work/chromium.tgz" package/LICENSE > "$work/npm-LICENSE"
-    install -T -m 0644 "$work/npm-LICENSE" "$shell_dir/SPARTICUZ-LICENSE.txt"
+    install -T -m 0644 "$work/npm-LICENSE" "$chromium_slot/SPARTICUZ-LICENSE.txt"
 else
     stage='download Chromium from Playwright'
     printf '\n== %s ==\n' "$stage"
