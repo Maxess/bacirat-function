@@ -7,6 +7,8 @@ readonly unit=school-classroom-recorder.service
 readonly target=/opt/school-classroom-recorder
 readonly config=/etc/school-classroom-recorder.json
 readonly unit_file="/etc/systemd/system/$unit"
+readonly credential_dropin="$unit_file.d/10-recorder-credential.conf"
+readonly spool=/var/lib/school-classroom-recorder
 readonly archive=baci-classroom-recorder-v0.4.16.zip
 readonly ref=9405d1e84bdde0cf1903ac44addec5501948a34f
 readonly digest=de02931ed2c0247d0ae387fb4797ea78bb65bdec1db9a50cf05994d81c8e9b28
@@ -23,11 +25,124 @@ finish() {
 }
 trap finish EXIT
 
+check_startup_inputs() {
+    local uid encoders
+    uid=$(id -u school-recorder) || fail 'The school-recorder service account is missing.'
+    [[ $uid =~ ^[1-9][0-9]*$ ]] || fail 'The recorder must run under a non-root service account.'
+    python3 -I - "$config" "$spool" "$uid" <<'PY'
+import json
+from pathlib import Path
+import re
+import stat
+import sys
+
+config, spool = map(Path, sys.argv[1:3])
+try:
+    info = config.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o600:
+        raise SystemExit("The original recorder configuration must be a root-owned regular file with mode 0600.")
+    if not 0 < info.st_size <= 8192:
+        raise ValueError
+    obj = json.loads(config.read_bytes())
+    if not isinstance(obj, dict) or set(obj) != {"site", "secret"}:
+        raise ValueError
+    if not re.fullmatch(r"https://(?:[A-Za-z0-9-]+\.)+[A-Za-z0-9-]+(?:/[A-Za-z0-9_-][A-Za-z0-9_.-]{0,63})*", obj["site"]):
+        raise ValueError
+    if not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", obj["secret"]):
+        raise ValueError
+except (OSError, ValueError, TypeError):
+    raise SystemExit("Recorder configuration is missing or invalid. Check the HTTPS site and the independent key privately.") from None
+
+try:
+    if spool.exists() or spool.is_symlink():
+        info = spool.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o077 or info.st_uid != int(sys.argv[3]) or spool.resolve() != spool:
+            raise SystemExit("Recorder state directory must be private, owned by school-recorder, and not a symlink. Nothing was deleted.")
+        worker = spool / "worker.json"
+        if worker.exists() or worker.is_symlink():
+            if worker.is_symlink() or not worker.is_file() or worker.stat().st_size > 8192:
+                raise ValueError
+            if not re.fullmatch(r"[a-f0-9]{32}", json.loads(worker.read_bytes())["id"]):
+                raise ValueError
+except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+    raise SystemExit("Could not validate the recorder state or worker identity. Nothing was deleted.") from None
+print("Private configuration and recorder state checks passed (no credential values printed).")
+PY
+    encoders=$(/usr/bin/ffmpeg -hide_banner -encoders 2>/dev/null) || fail 'FFmpeg could not list its installed encoders.'
+    [[ $encoders == *' libx264 '* && $encoders == *' aac '* ]] || fail 'The installed FFmpeg needs libx264 and aac encoders.'
+}
+
+write_credential_dropin() {
+    # systemd can grant a named-user ACL, reflected in st_mode as a group mask.
+    # .16 accepts owner-only mode, so make a 0600 copy in a 0700 volatile service directory.
+    [[ ! -L "$unit_file.d" && ! -L "$credential_dropin" ]] || fail 'Unexpected symlink at the recorder drop-in path.'
+    cat > "$work/credential.conf" <<'UNIT'
+[Service]
+RuntimeDirectory=school-classroom-recorder-credential
+RuntimeDirectoryMode=0700
+ExecStartPre=/usr/bin/install -T -m 0600 ${CREDENTIALS_DIRECTORY}/config.json %t/school-classroom-recorder-credential/config.json
+ExecStart=
+ExecStart=/opt/school-classroom-recorder/venv/bin/python -Esu /opt/school-classroom-recorder/recording.py %t/school-classroom-recorder-credential/config.json
+UNIT
+    if [[ -e "$credential_dropin" ]]; then
+        cmp -s -- "$work/credential.conf" "$credential_dropin" || fail 'An existing recorder drop-in was modified; it was not overwritten.'
+        return
+    fi
+    install -d -m 0755 -- "$unit_file.d"
+    install -T -m 0644 -- "$work/credential.conf" "$credential_dropin"
+}
+
+wait_for_startup() {
+    local deadline=$((SECONDS + 25)) status invocation logs
+    stage='wait for local recorder startup'
+    while (( SECONDS < deadline )); do
+        status=$(systemctl show -p SubState --value "$unit")
+        case "$status" in dead|failed|auto-restart|auto-restart-queued) break ;; esac
+        invocation=$(systemctl show -p InvocationID --value "$unit")
+        if [[ $status == running && $invocation =~ ^[a-f0-9]{32}$ ]]; then
+            logs=$(journalctl --no-pager -n 25 -o cat "_SYSTEMD_INVOCATION_ID=$invocation")
+            if grep -Fxq 'recorder: compositor and encoder available' <<< "$logs"; then
+                printf '\nRecorder compositor started. Check school readiness in the recording settings.\n'
+                return 0
+            fi
+        fi
+        sleep 1
+    done
+    journalctl -u "$unit" -n 15 --no-pager -l || true
+    fail 'The recorder did not confirm local startup. See the current journal above.'
+}
+
+repair_startup() {
+    local status existing
+    stage='check the installed 0.4.16 recorder'
+    [[ -f "$unit_file" && ! -L "$unit_file" && -f "$target/recording.py" && ! -L "$target/recording.py" && ! -L "$target" ]] \
+        || fail 'The expected installed recorder unit and program were not found.'
+    # Do not replace a custom unit or a different release.
+    printf '%s  %s\n' 'cd3543f13478fccddf934d9d15fc1fe79f6f863753c3d7ae27e555c540ec93e0' "$unit_file" \
+        'd6e47b29ebd94d68152e176bd4d64205a0faae77b92c6c10a432788869a6aedd' "$target/recording.py" | sha256sum -c -
+    [[ $(systemctl show -p FragmentPath --value "$unit") == "$unit_file" ]] || fail 'The loaded unit is not the stock recorder service.'
+    existing=$(systemctl show -p DropInPaths --value "$unit")
+    [[ -z "$existing" || $existing == "$credential_dropin" ]] || fail 'Custom service drop-ins exist; no changes were made.'
+    status=$(systemctl show -p SubState --value "$unit")
+    case "$status" in dead|failed|auto-restart|auto-restart-queued) ;; *) fail 'The recorder may be running. Do not repair it during recording.' ;; esac
+    check_startup_inputs
+    stage='repair the private runtime credential'
+    work=$(mktemp -d)
+    write_credential_dropin
+    systemctl daemon-reload
+    systemctl restart "$unit"
+    wait_for_startup
+}
+
 (( EUID == 0 )) || fail 'Run this installer as root on the existing LiveKit VPS.'
+if [[ ${1:-} == --repair-startup && $# -eq 1 ]]; then
+    repair_startup
+    exit 0
+fi
 chromium='playwright'
 local_browser=''
 if (( $# > 0 )); then
-    [[ $1 == --chromium-npm && $# -le 2 ]] || fail 'Usage: install-v0.4.16.sh [--chromium-npm [chromium-153.0.0.tgz]]'
+    [[ $1 == --chromium-npm && $# -le 2 ]] || fail 'Usage: install-v0.4.16.sh [--chromium-npm [chromium-153.0.0.tgz] | --repair-startup]'
     [[ $(uname -m) == x86_64 ]] || fail 'The pinned npm Chromium package is for Linux x86_64 only.'
     chromium='npm'
     local_browser=${2:-}
@@ -40,6 +155,8 @@ state=$(systemctl show -p ActiveState --value "$unit")
 case "$state" in
     active|activating|reloading|deactivating) fail 'The recorder is already running or changing state. Do not interrupt a recording.' ;;
 esac
+existing=$(systemctl show -p DropInPaths --value "$unit")
+[[ -z "$existing" || $existing == "$credential_dropin" ]] || fail 'Custom service drop-ins exist; no changes were made.'
 ss -H -ltn 'sport = :7880' | awk '$4 == "127.0.0.1:7880" { found=1 } END { exit !found }' \
     || fail 'LiveKit is not listening on 127.0.0.1:7880. Check that this is the LiveKit VPS before installing.'
 [[ ! -L "$target" && ! -L "$config" && ! -L "$unit_file" ]] \
@@ -147,8 +264,9 @@ chmod 0600 "$config"
 
 stage='register and start the recorder service'
 printf '\n== %s ==\n' "$stage"
+check_startup_inputs
+write_credential_dropin
 install -T -m 0644 "$work/pkg/$unit" "$unit_file"
 systemctl daemon-reload
 systemctl enable --now "$unit"
-systemctl status --no-pager "$unit"
-printf '\nService installed. Check the recording readiness in the school settings.\n'
+wait_for_startup
