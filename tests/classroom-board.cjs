@@ -287,7 +287,8 @@ test('a laser sweep coalesces into one existing reader request and is never writ
     f.draw('pointerdown',250,100); f.draw('pointerup',250,100); f.frame(16);
     assert.equal(f.el('board-laser-local-trail').children.length,0,'do not connect independent gestures');
     assert.deepEqual(structuredClone(f.board.takeAim()),{aim:[[2500,2000,16]]});
-    f.frame(1200); assert.equal(f.el('board-laser-local').hidden,true);
+    f.frame(1200); assert.equal(f.el('board-laser-local').hidden,false);
+    f.frame(700); assert.equal(f.el('board-laser-local').hidden,true);
     await f.flush(); assert.deepEqual(f.calls,[]); assert.deepEqual(f.display.paths,[]);
 });
 
@@ -316,7 +317,7 @@ test('fast movement is bounded and unsent laser samples expire without refreshin
     for (let n=1;n<=125;n++) { f.frame(10); f.draw('pointermove',200+n*2,200+n); }
     const {aim}=f.board.takeAim();
     assert.equal(aim.length,20); assert.deepEqual(Array.from(aim.at(-1)),[4500,6500,0]);
-    assert.ok(aim.every(([, , age],i)=>age>=0 && age<1200 && (i===0 || age<=aim[i-1][2])));
+    assert.ok(aim.every(([, , age],i)=>age>=0 && age<1900 && (i===0 || age<=aim[i-1][2])));
     f.draw('pointermove',500,270); f.frame(860); assert.deepEqual(structuredClone(f.board.takeAim()),{});
     f.draw('pointermove',600,300); f.access(false);
     assert.deepEqual(structuredClone(f.board.takeAim()),{});

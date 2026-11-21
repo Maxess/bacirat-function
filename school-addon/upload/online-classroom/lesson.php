@@ -2,6 +2,7 @@
 declare(strict_types=1);
 require_once __DIR__ . '/school.php';
 require_once __DIR__ . '/store.php';
+require_once __DIR__ . '/quality.php';
 
 const CL_SAMPLE_TTL = 11;
 const CL_SAMPLE_INTERVAL = 3;
@@ -143,7 +144,11 @@ function cl_staff_schedule(ClassroomStore $s, array $cfg, array $class, array $a
         $choices[] = ['id'=>CL_FRIDAY_SLOT, 'label'=>CL_FRIDAY_TITLE . ' · ' . CL_FRIDAY_HOURS];
     }
     foreach (cl_today_slots($s->db, $class, $actor, $now) as $slot) {
-        $label = $slot['period'] . ' · ' . $slot['subject'] . ($slot['shared'] ? ' · ' . $slot['teacher_name'] . ' · تک‌زنگ' : '');
+        $label = $slot['period'] . ' · ' . $slot['subject'];
+        if ($slot['shared']) {
+            $teacher = cl_school_account($s->db, 'teacher', $slot['teacher'], $class['year']);
+            $label .= ' · ' . ($teacher['room_name'] ?? 'دبیر') . ' · تک‌زنگ';
+        }
         $base = cl_lesson_id($class, $slot['period'], $date);
         $previous = $s->get('lesson', $base);
         if (($previous['phase'] ?? null) === 'finished') {
@@ -539,15 +544,10 @@ function cl_set_wake(ClassroomStore $s, array $lesson, array $actor, array $body
 
 const CL_SCREEN_LEASE = 40;
 
-function cl_screen_enabled(array $cfg, array $lesson): bool
-{
-    return ($cfg['screen_share'] ?? false) === true && ($lesson['camera_codec'] ?? null) === 'vp8';
-}
-
-function cl_screen_state(array $lesson): ?array
+function cl_screen_state(array $cfg, array $lesson): ?array
 {
     $owner = $lesson['screen'] ?? null;
-    return $owner && ($lesson['staff'][$owner['identity']] ?? null) === $owner['sid']
+    return $owner && cl_screen_eligible($cfg, $lesson, $owner['identity'], $owner['sid'])
         ? ['identity'=>$owner['identity'],'sid'=>$owner['sid']] : null;
 }
 
@@ -557,7 +557,7 @@ function cl_refresh_screen(array &$lesson, array $cfg, array $peers, int $now): 
     if (!$owner) return;
     $id = $owner['identity'];
     $peer = $peers[$id] ?? [];
-    if (!cl_screen_enabled($cfg, $lesson) || ($lesson['staff'][$id] ?? null) !== $owner['sid'] || ($peer['sid'] ?? null) !== $owner['sid']) {
+    if (!cl_screen_eligible($cfg, $lesson, $id, $owner['sid']) || ($peer['sid'] ?? null) !== $owner['sid']) {
         unset($lesson['screen']);
         return;
     }
@@ -574,15 +574,28 @@ function cl_refresh_screen(array &$lesson, array $cfg, array $peers, int $now): 
 /** One presenter per transport. Revoke an old source before assigning a new one. */
 function cl_set_screen(ClassroomStore $s, array $cfg, array $lesson, array $actor, array $body, int $now, callable $rpc): array
 {
-    if (!cl_is_staff($actor)) throw new ClassroomError(403, 'اشتراک صفحه فقط برای دبیر یا مسئول مجاز است.');
     $enable = $body['enabled'] ?? null;
-    if (!is_bool($enable)) throw new ClassroomError(400, 'وضعیت اشتراک صفحه معتبر نیست.');
-    if ($enable && !cl_screen_enabled($cfg, $lesson)) throw new ClassroomError(409, 'آزمایش اشتراک صفحه در این اتاق فعال نیست.');
-    $id = $actor['identity'];
+    $target = $body['identity'] ?? null;
+    if (!is_bool($enable) || ($target !== null && !cl_media_identity($target, true))) {
+        throw new ClassroomError(400, 'وضعیت یا شرکت‌کنندهٔ اشتراک صفحه معتبر نیست.');
+    }
+    $staff = cl_is_staff($actor);
+    if (!$staff && ($enable || $target !== null || !cl_pupil_screen_enabled($cfg))) {
+        throw new ClassroomError(403, 'فقط دبیر یا مسئول می‌تواند اجازهٔ اشتراک صفحه بدهد.');
+    }
+    if ($target !== null && !cl_pupil_screen_enabled($cfg)) throw new ClassroomError(403, 'اشتراک صفحهٔ دانش‌آموز در تنظیمات فعال نیست.');
+    if ($enable && !cl_screen_enabled($cfg, $lesson)) throw new ClassroomError(409, 'اشتراک صفحه در این اتاق فعال نیست.');
     $sid = $body['sid'] ?? null;
-    if (!cl_sid($sid) || ($lesson['staff'][$id] ?? null) !== $sid) throw new ClassroomError(409, 'ورود ارائه‌دهنده تأیید نشده است.');
+    if (!cl_entered($lesson, $actor, $sid, $now) || ($staff && ($lesson['staff'][$actor['identity']] ?? null) !== $sid)) {
+        throw new ClassroomError(409, 'ورود حساب هنوز تأیید نشده است.');
+    }
+    $id = $target ?? $actor['identity'];
+    if ($target !== null) {
+        $sid = $body['targetSid'] ?? null;
+        if (!cl_entered($lesson, ['identity'=>$id], $sid, $now)) throw new ClassroomError(409, 'اتصال دانش‌آموز عوض شده یا هنوز تأیید نشده است.');
+    }
     $room = $lesson['room'];
-    $owner = cl_screen_state($lesson);
+    $owner = cl_screen_state($cfg, $lesson);
     $mine = ['identity'=>$id,'sid'=>$sid];
     if ($owner && $owner !== $mine) throw new ClassroomError(409, 'اشتراک صفحه در اختیار ارائه‌دهندهٔ دیگری است.');
     if (!$enable && !$owner) return ['screen'=>null];
@@ -605,7 +618,7 @@ function cl_set_screen(ClassroomStore $s, array $cfg, array $lesson, array $acto
     if (!$confirmed) $lesson['media_pending'] = true;
     $s->put('lesson', $lesson['id'], $lesson);
     if (!$confirmed) throw cl_media_bad_reply();
-    return ['screen'=>cl_screen_state($lesson)];
+    return ['screen'=>cl_screen_state($cfg, $lesson)];
 }
 
 function cl_finish_lesson(ClassroomStore $s, array $cfg, array $lesson, int $now): void

@@ -10,6 +10,19 @@
     font-weight: 700;
     font-display: swap;
 }
+/* Reuse Baci's local font bytes. This alias is used only for missing PDF glyphs in Arabic script. */
+@font-face {
+    font-family: ClassroomPDFPersian;
+    src: url('../assets/fonts/screen/Vazirmatn-Regular.woff2') format('woff2');
+    font-weight: 400;
+    unicode-range: U+0600-06FF, U+0750-077F, U+08A0-08FF, U+FB50-FDFF, U+FE70-FEFF;
+}
+@font-face {
+    font-family: ClassroomPDFPersian;
+    src: url('../assets/fonts/screen/Vazirmatn-Bold.woff2') format('woff2');
+    font-weight: 700;
+    unicode-range: U+0600-06FF, U+0750-077F, U+08A0-08FF, U+FB50-FDFF, U+FE70-FEFF;
+}
 :root {
     color-scheme: dark;
     --page: #0b1320;
@@ -155,6 +168,14 @@ caption { font-weight: 700; text-align: start; margin: 0 0 .45rem; }
 .access-hint { color: var(--muted); font-size: .72rem; margin: .35rem .18rem 0; }
 .access-actions { display: grid; gap: .32rem; border-block-start: 1px solid var(--edge); margin-block-start: .5rem; padding-block-start: .5rem; }
 .access-actions .icon-button { justify-content: flex-start; white-space: normal; text-align: start; }
+.quality-dialog { inline-size: min(30rem, calc(100% - 1.5rem)); max-block-size: calc(100% - 1.5rem);
+    border: 1px solid var(--edge); border-radius: .85rem; padding: 1rem; color: var(--ink); background: var(--panel); }
+.quality-dialog::backdrop { background: #050911c9; }
+.quality-dialog p { color: var(--muted); font-size: .86rem; }
+.quality-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(11rem,100%),1fr)); gap: .65rem; margin-block: .75rem; }
+.quality-fields label { display: grid; gap: .25rem; }
+.quality-fields select { inline-size: 100%; }
+#quality-message { color: var(--danger); }
 .room-toast { position: fixed; z-index: 20; inset-inline: .8rem; inset-block-end: max(.8rem,env(safe-area-inset-bottom));
     inline-size: max-content; max-inline-size: min(28rem, calc(100vw - 1.6rem)); margin: auto; padding: .6rem .85rem; pointer-events: none;
     border: 1px solid #586c83; border-radius: .68rem; background: #192739; box-shadow: 0 4px 22px #05091199; color: var(--ink);
@@ -225,10 +246,13 @@ caption { font-weight: 700; text-align: start; margin: 0 0 .45rem; }
 .ink-writer[data-left=true][data-below=true] { transform: translate(calc(-100% - .4rem),.4rem); }
 .ink-writer.fading { opacity: 0; }
 .laser-trails { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
-.laser-trails line { stroke: #ff403b; stroke-width: 4px; stroke-linecap: round; vector-effect: non-scaling-stroke; }
-.laser-dot { position: absolute; pointer-events: none; width: .54rem; height: .54rem; border-radius: 50%;
-    transform: translate(-50%,-50%); background: #ff403b; border: 1px solid #ffe3d8;
-    box-shadow: 0 0 0 .19rem #ff322b49, 0 0 .58rem #ff322bb0; }
+.laser-trails line { stroke: #ff5646; stroke-width: 5px; stroke-linecap: round; vector-effect: non-scaling-stroke;
+    filter: drop-shadow(0 1px 1px #3c1010e6); }
+.laser-dot { position: absolute; pointer-events: none; width: 1.42rem; height: 1.42rem; border-radius: 50%;
+    transform: translate(-50%,-50%); border: 2px solid #ff5d4e;
+    box-shadow: 0 0 0 1px #fff5e7, 0 0 0 2px #541612, 0 0 .66rem #ff322bb0; }
+.laser-dot::after { content: ''; position: absolute; inset: 50% auto auto 50%; transform: translate(-50%,-50%);
+    width: .35rem; height: .35rem; border-radius: 50%; background: #ff403b; box-shadow: 0 0 0 1px #fff5e7; }
 #board-laser[aria-pressed=true] { color: #ff9d8e; }
 
 .board-stage.editable:not(.pan) #board-ink { cursor: crosshair; }

@@ -57,7 +57,7 @@ $panel = match ($actor['office'] ?? $actor['role'] ?? '') {
     'student'=>'student-panel.php', 'teacher'=>'teacher-panel.php', 'deputy'=>'deputy-panel.php', 'admin'=>'index.php?view=dashboard', default=>'index.php?view=login',
 };
 $roomPage = $class !== null && $errorMessage === null;
-if ($roomPage) cl_headers(true, $staff && ($cfg['screen_share'] ?? false) === true, ($cfg['camera_share'] ?? false) === true);
+if ($roomPage) cl_headers(true, ($staff && ($cfg['screen_share'] ?? false) === true) || cl_pupil_screen_enabled($cfg), ($cfg['camera_share'] ?? false) === true);
 $pageTitle = $roomPage ? trim($schoolName . ' ' . $classLabel)
     : ($reports !== null ? 'حضور و غیاب کلاس مجازی' : 'کلاس مجازی');
 ?>

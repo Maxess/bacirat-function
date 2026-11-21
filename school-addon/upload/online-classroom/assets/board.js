@@ -20,7 +20,7 @@
         let drag = null, pointerType = '', candidate = null, pinch = null, pinchFrame, touchBlocked = false, penUntil = 0, space = false;
         const contacts = new Map();
         const writers = el('board-writers'), labels = new Map();
-        const laserTtl = 1200, laserLimit = 20, laserSampleMs = 48; // Wire limits match activity.php.
+        const laserTtl = 1900, laserLimit = 20, laserSampleMs = 48; // Wire limits match activity.php.
         const laserTrail = side => ({dot:el(`board-laser-${side}`), layer:el(`board-laser-${side}-trail`), samples:[], lines:[]});
         const localLaser = laserTrail('local'), remoteLaser = laserTrail('remote');
         let aimPending = null, laserFrame;
@@ -45,7 +45,11 @@
             imageFile?.close?.(); imageFile = null;
         }
         function pdfLib() {
-            if (!library) library = import(url(root.dataset.pdf)).then(lib => {
+            if (!library) library = Promise.all([
+                import(url(root.dataset.pdf)),
+                // Load on demand, before painting to a canvas (which will not repaint when a font arrives).
+                Promise.allSettled([400,700].map(weight => document.fonts?.load(`${weight} 16px ClassroomPDFPersian`, 'گچپژکی'))),
+            ]).then(([lib]) => {
                 lib.GlobalWorkerOptions.workerSrc = url(root.dataset.pdfWorker);
                 return lib;
             }).catch(e => { library = null; throw e; });
@@ -56,7 +60,8 @@
             return {
                 cMapUrl:`${prefix}cmaps/`, cMapPacked:true, standardFontDataUrl:`${prefix}standard_fonts/`,
                 wasmUrl:`${prefix}wasm/`, iccUrl:`${prefix}iccs/`, useWorkerFetch:true, enableXfa:false,
-                isEvalSupported:false, maxImageSize:24_000_000, canvasMaxAreaInBytes:24_000_000,
+                // Parse/decode in the PDF worker; paint in the document so its local fallback font is available.
+                disableWorkerRendering:true, isEvalSupported:false, maxImageSize:24_000_000, canvasMaxAreaInBytes:24_000_000,
             };
         }
         function documentURL(doc, scope) {
@@ -292,7 +297,7 @@
             const head = last(samples);
             if (trail.head !== head) { trail.head = head; locate(dot,head); }
             dot.hidden = false;
-            dot.style.opacity = String(Math.min(1,(head[2]-now)/320));
+            dot.style.opacity = String(Math.min(1,(head[2]-now)/500));
             // Each segment loses opacity with its own age, so the tail fades before the tip.
             for (let i = 1; i < samples.length; i++) {
                 const a = samples[i-1], b = samples[i];
@@ -307,7 +312,7 @@
                     line.node.setAttribute('x2', b[0]); line.node.setAttribute('y2', b[1]);
                     line.from = a; line.to = b;
                 }
-                line.node.style.opacity = String(Math.min(1,(a[2]-now)/(laserTtl-300)));
+                line.node.style.opacity = String(Math.min(1,(a[2]-now)/1200));
             }
             while (lines.length >= samples.length) lines.pop().node.remove();
             return true;
@@ -458,7 +463,7 @@
                     if (ticket !== renderVersion) return;
                     const base = page.getViewport({scale:1});
                     const scale = fit(base.width,base.height);
-                    const task = page.render({canvas:paper,canvasContext:background,viewport:page.getViewport({scale}), annotationMode:pdf.AnnotationMode.DISABLE});
+                    const task = page.render({canvasContext:background,viewport:page.getViewport({scale}), annotationMode:pdf.AnnotationMode.DISABLE});
                     rendering = task;
                     await task.promise;
                     if (rendering === task) rendering = null;

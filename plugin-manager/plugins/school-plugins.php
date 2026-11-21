@@ -4,13 +4,13 @@ declare(strict_types=1);
 use BaciClassroom\Calendar;
 
 // School plugin runtime and gateway. Settings are exposed by the reviewed host overlay.
-const MPM_VERSION = '0.1.19';
+const MPM_VERSION = '0.1.20';
 const MPM_CLASSROOM_NATIVE = '0.4.0';
 const MPM_CLASSROOM_PUPIL_TRIAL = '0.4.3';
 const MPM_REGISTRY = 'mtg_plugin_registry';
 const MPM_SITE = 'mtg_plugin_site';
 const MPM_MAX_ZIP = 4 * 1024 * 1024;
-const MPM_MAX_FILES = 26; // Reviewed payload files, excluding plugin.json.
+const MPM_MAX_FILES = 28; // Reviewed payload files, excluding plugin.json.
 const MPM_BELL_LABELS = [1=>'۱', 2=>'۲', 3=>'۳', 4=>'۴'];
 const MPM_CATALOG = [
     'school-classroom' => [
@@ -33,6 +33,7 @@ const MPM_CATALOG = [
         '0.4.11' => '88d32ab3f56ea0c52e59c9cbfb41e178bfb5bcf9e5ae1ae88433be6997202964',
         '0.4.12' => 'fbfdc731b25c38dff963f5d98069807aaef117902824011272abae3a781d9369',
         '0.4.13' => '8a4746726dda14bbb243de3cb55310da46dfeb14625eee4a27b961beb6e0bf0b',
+        '0.4.14' => 'f0a14a694a35f53b2b739ca71134bf49130e72d76527b3a8ffa5204cd0ace5f3',
     ],
 ];
 
@@ -612,7 +613,7 @@ function mpm_save_settings(PDO $db, string $dir, array $row, array $manifest, ar
             if (isset($previous[$key])) $settings[$key] = $previous[$key];
             continue;
         }
-        $value = $input[$key] ?? '';
+        $value = $input[$key] ?? ($field['type'] === 'select' ? ($previous[$key] ?? $field['default']) : '');
         if (!is_string($value)) throw new MpmNotice('مقدار تنظیم معتبر نیست.');
         $value = trim($value);
         if ($field['type'] === 'class') {
@@ -628,6 +629,8 @@ function mpm_save_settings(PDO $db, string $dir, array $row, array $manifest, ar
         } elseif ($field['type'] === 'integer') {
             $value = filter_var($value, FILTER_VALIDATE_INT, ['options' => ['min_range' => $field['min'], 'max_range' => $field['max']]]);
             if ($value === false) throw new MpmNotice('عدد تنظیم از محدودهٔ مجاز خارج است.');
+        } elseif ($field['type'] === 'select') {
+            if (!in_array($value, $field['options'], true)) throw new MpmNotice('این وضوح تصویر یا نرخ فریم مجاز نیست.');
         } elseif (in_array($field['type'], ['token', 'secret'], true)) {
             if ($field['type'] === 'secret' && $value === '') $value = $previous[$key] ?? '';
             if (!preg_match('/^[A-Za-z0-9_-]+$/D', $value) || strlen($value) < $field['min'] || strlen($value) > $field['max']) throw new MpmNotice('شناسه یا کلید سرویس رسانه کامل نیست.');
@@ -930,7 +933,7 @@ function mpm_call(PDO $db, array $site, string $dir, array $row, array $manifest
     $settings = mpm_settings($db, $dir, $row);
     if ($settings === []) throw new MpmNotice('مدیر باید تنظیمات افزونه را ذخیره کند.');
     foreach ($manifest['files'] as $name => $hash) {
-        if (str_ends_with($name, '.php')) mpm_verified_file($dir, $row, $manifest, $name);
+        if (str_ends_with($name, '.php') || $name === 'video-presets.json') mpm_verified_file($dir, $row, $manifest, $name);
     }
     $table = mpm_data_table($row['slug']);
     $GLOBALS['MTAG_PLUGIN_CONTEXT'] = [
@@ -1253,6 +1256,14 @@ function mpm_render_settings(PDO $db, ?array $site, string $csrf, string $notice
                     if ($key === 'notify_school_rubika' && !$rubikaBridge) echo '<small>اتصال بومی روبیکا در این نسخهٔ سایت تأیید نشده و ارسال نمی‌شود.</small>';
                 } elseif ($field['type'] === 'integer') {
                     echo '<input type="number" class="form-input" dir="ltr" name="' . $name . '" value="' . (int)($values[$key] ?? $field['default']) . '" min="' . $field['min'] . '" max="' . $field['max'] . '" required>';
+                } elseif ($field['type'] === 'select') {
+                    $chosen = $values[$key] ?? $field['default'];
+                    echo '<select class="form-input" dir="ltr" name="' . $name . '" required>';
+                    foreach ($field['options'] as $option) {
+                        $label = preg_match('/^\d+x\d+$/D', $option) ? str_replace('x', '×', $option) : $option;
+                        echo '<option value="' . mpm_html($option) . '"' . ($option === $chosen ? ' selected' : '') . '>' . mpm_html($label) . '</option>';
+                    }
+                    echo '</select>';
                 } elseif ($field['type'] === 'secret') {
                     echo '<input type="password" class="form-input" dir="ltr" name="' . $name . '" autocomplete="new-password"' . ($value === '' && $field['type'] === 'secret' ? ' required' : '') . '>';
                     if ($value !== '') echo '<small>ذخیره شده؛ برای حفظ مقدار فعلی خالی بگذار.</small>';

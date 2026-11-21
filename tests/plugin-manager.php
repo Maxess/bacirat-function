@@ -79,6 +79,7 @@ try {
     $localCalendar = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.11.zip';
     $webcam = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.12.zip';
     $square = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.13.zip';
+    $quality = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.14.zip';
     $menus = static fn() => [file_get_contents($root . '/other-settings.php'), file_get_contents($root . '/includes/header.php')];
     $managerMenus = [$other, $header];
     expect($menus() === $managerMenus, 'initialization does not rewrite the host');
@@ -421,6 +422,34 @@ try {
         && mpm_settings($db,$dir,$row)===$withOpts && mpm_owned_row($db,$row)['settings']===$encryptedBefore
         && mpm_query($db,"SELECT payload FROM `$store` WHERE bucket='lesson' AND item=?",[$oldId])->fetchColumn()===$finishedBefore,
         '0.4.12 upgrade preserves camera, repeat, screen, keys, hours, Friday, ownership and historic detail bytes');
+    submit($db,$site,'enable');
+    denied(fn()=>mpm_install($db,$dir,$quality));
+    submit($db,$site,'disable');
+    expect(mpm_install($db,$dir,$quality), 'upgrade the installed .13 release without removing data');
+    $row = mpm_row($db,$slug);
+    expect($row['version']==='0.4.14' && $row['owner']===$oldRow['owner'] && mpm_check_store($db,$row)===$store
+        && mpm_owned_row($db,$row)['settings']===$encryptedBefore
+        && mpm_query($db,"SELECT payload FROM `$store` WHERE bucket='lesson' AND item=?",[$oldId])->fetchColumn()===$finishedBefore,
+        'quality controls do not need to migrate settings, store or report data');
+    ob_start(); mpm_render_settings($db,$site,'fixture',''); $newOptions=ob_get_clean();
+    expect(str_contains($newOptions,'name="settings[room_video_quality]" value="yes">')
+        && str_contains($newOptions,'name="settings[student_screen_share]" value="yes">')
+        && preg_match_all('/<select[^>]+name="settings\[(?:camera|screen)_(?:low|medium|high)_(?:size|fps)\]"/', $newOptions) === 12
+        && str_contains($newOptions,'<option value="128x128" selected>128×128</option>'),
+        'two opt-ins are off by default and admin has separate resolution and rate selectors for all six presets');
+    $qualityInput = $mediaInput + ['screen_share'=>'yes','camera_share'=>'yes','repeat_bells'=>'yes','room_video_quality'=>'yes',
+        'student_screen_share'=>'yes','camera_low_size'=>'32x32','camera_low_fps'=>'5','camera_high_fps'=>'20', 'screen_medium_size'=>'854x480'];
+    foreach ([['camera_low_size'=>'640x360'],['screen_medium_size'=>'480x480'],['camera_high_fps'=>'21'],
+        ['camera_low_fps'=>'4'],['screen_medium_fps'=>'5.5'],['screen_medium_fps'=>['20']]] as $invalid) {
+        denied(fn()=>submit($db,$site,'settings',['settings'=>array_replace($qualityInput,$invalid)]));
+    }
+    expect(mpm_owned_row($db,$row)['settings']===$encryptedBefore, 'invalid presets do not partially save');
+    submit($db,$site,'settings',['settings'=>$qualityInput]);
+    $newSettings=mpm_settings($db,$dir,$row);
+    expect($newSettings['camera_low_size']==='32x32' && $newSettings['camera_low_fps']==='5' && $newSettings['camera_high_fps']==='20'
+        && $newSettings['screen_medium_size']==='854x480' && $newSettings['room_video_quality']===true && $newSettings['student_screen_share']===true
+        && $newSettings['friday_test']===$pupilGrant && $newSettings['bell_hours']===$hours && $newSettings['api_secret']===$secret,
+        'valid range endpoints, independent presets, intact site settings and credentials');
     submit($db,$site,'enable');
     $_SESSION = ['admin_id'=>1];
     foreach ([['view'=>'reports'], ['view'=>'reports', 'lesson'=>$oldId]] as $reportRequest) {

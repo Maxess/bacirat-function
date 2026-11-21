@@ -73,11 +73,16 @@ cl_json_reply(static function (): array {
                 'joinable'=>$ready && !$expired && cl_joinable($lesson, $actor, $now),
                 'resumable'=>$ready && !$expired && $lesson['phase'] === 'paused' && $lesson['room'] === null];
             if ($allowed) {
-                $result += ['cameraCodec'=>cl_webcam_codec($cfg, $lesson), 'screen'=>cl_screen_enabled($cfg, $lesson) ? cl_screen_state($lesson) : null,
+                $result += ['cameraCodec'=>cl_webcam_codec($cfg, $lesson), 'screen'=>cl_screen_state($cfg, $lesson),
                     'wakeMode'=>cl_wake_mode($lesson), 'wakeControl'=>cl_wake_control($lesson, $actor)]
-                    + cl_status_people($lesson, $body) + cl_activity_sync($s, $lesson, $actor, $body);
+                    + cl_status_people($lesson, $body) + cl_quality_status($s, $cfg, $class, $lesson, $actor, $body)
+                    + cl_activity_sync($s, $lesson, $actor, $body);
+                if (cl_screen_enabled($cfg, $lesson)) {
+                    if (cl_is_staff($actor) || cl_pupil_screen_enabled($cfg)) $result['screenEnabled'] = true;
+                    if (cl_is_staff($actor) && cl_pupil_screen_enabled($cfg)) $result['pupilScreenEnabled'] = true;
+                }
                 if (cl_is_staff($actor)) $result += ['access'=>$lesson['access'] ?? [], 'members'=>$lesson['seen'],
-                    'mediaPending'=>($lesson['media_pending'] ?? false) === true, 'screenEnabled'=>cl_screen_enabled($cfg, $lesson)];
+                    'mediaPending'=>($lesson['media_pending'] ?? false) === true];
             }
             return $result;
         }
@@ -117,9 +122,10 @@ cl_json_reply(static function (): array {
             return [];
         }
         if ($action === 'board-ink') return cl_board_action($s, $lesson, cl_ink_input($lesson, $actor, $body), $action);
+        if ($action === 'screen-access') return cl_set_screen($s, $cfg, $lesson, $actor, $body, $now, $rpc);
         if (!cl_is_staff($actor)) throw new ClassroomError(403, 'این عملیات فقط برای دبیر یا مسئول مجاز است.');
         if ($action === 'set-wake') return cl_set_wake($s, $lesson, $actor, $body);
-        if ($action === 'screen-access') return cl_set_screen($s, $cfg, $lesson, $actor, $body, $now, $rpc);
+        if ($action === 'set-quality') return cl_set_quality($s, $cfg, $class, $lesson, $actor, $body, $now);
         if ($action === 'set-access') return cl_set_access($s, $cfg, $lesson, $actor, $body, $now, $rpc);
         if ($action === 'upload' && $isUpload) return cl_upload($s, $lesson, $body, $_FILES['file'] ?? []);
         if (in_array($action, ['board-page','board-clear'], true)) return cl_board_action($s, $lesson, $body, $action);

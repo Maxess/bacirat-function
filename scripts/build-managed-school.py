@@ -16,8 +16,8 @@ HOST = ROOT / 'plugin-manager'
 SRC = ROOT / 'school-addon/upload/online-classroom'
 LEGACY = ARTIFACTS / 'school-classroom-pilot-v0.1.0.zip'
 LEGACY_SHA = 'bebc35a02f57346880373a034ee493b757a8017a12812a133ab957358d9de161'
-VERSION = '0.4.13'
-MANAGER_VERSION = '0.1.19'
+VERSION = '0.4.14'
+MANAGER_VERSION = '0.1.20'
 BACI = HOST / 'baci'
 BACI_PATCH = 'baci-4.221.0-e0f3f686.patch'
 BACI_FILES = ('other-settings.php', 'includes/header.php', 'includes/footer.php', 'includes/management_hub.php',
@@ -49,6 +49,15 @@ def pdf_entries(archive_path):
             with tar.extractfile(members[name]) as f:
                 return f.read()
         files = {f'assets/{n}': read(f'legacy/build/{n}') for n in ('pdf.min.mjs','pdf.worker.min.mjs')}
+        # A small, checked change on top of the pinned upstream: only fonts not embedded in the PDF
+        # get the site's Arabic-script fallback. Preserve embedded fonts, glyph positions and advances.
+        main = 'assets/pdf.min.mjs'
+        original = b'a=n.systemFontInfo?.css||`"${s}", ${n.fallbackName}`;'
+        fallback = b'a=(n.missingFile?\'"ClassroomPDFPersian", \' : "")+(n.systemFontInfo?.css||`"${s}", ${n.fallbackName}`);'
+        if files[main].count(original) != 1:
+            raise ValueError('Review the PDF.js missing-font fallback for this upstream version')
+        files[main] = (b'/* Baci: add a local Arabic-script fallback for unembedded fonts. */\n'
+                       + files[main].replace(original, fallback, 1))
         files['assets/pdf.LICENSE.txt'] = read('LICENSE')
         selected = {n: read(n) for n in members if re.fullmatch(
             r'(?:cmaps|standard_fonts|iccs|wasm)/(?:[A-Za-z0-9_.-]+\.(?:bcmap|ttf|pfb|icc)|(?:jbig2|openjpeg|qcms_bg)\.wasm|(?:jbig2|openjpeg)_nowasm_fallback\.js|LICENSE[A-Z0-9_]*)', n)}
@@ -58,10 +67,23 @@ def pdf_entries(archive_path):
         return files
 
 
+def video_settings(presets):
+    for kind in ('camera', 'screen'):
+        group = presets[kind]
+        for level, label in presets['levels'].items():
+            size, fps = group['defaults'][level]
+            title = f"{group['label']} — {label}"
+            yield {'key': f'{kind}_{level}_size', 'type': 'select', 'label': f'{title} · وضوح',
+                   'default': size, 'options': group['sizes']}
+            yield {'key': f'{kind}_{level}_fps', 'type': 'select', 'label': f'{title} · فریم بر ثانیه',
+                   'default': str(fps), 'options': [str(n) for n in range(presets['fps']['min'], presets['fps']['max'] + 1)]}
+
+
 def plugin_entries(pdf_archive):
     files = {name: (SRC / name).read_bytes() for name in (
         'index.php', 'core.php', 'calendar.php', 'api.php', 'deactivate.php', 'media.php', 'school.php', 'store.php', 'lesson.php',
         'activity.php', 'content.php', 'events.php', 'reports.php', 'notifications.php', 'job.php', 'room-view.php',
+        'quality.php', 'video-presets.json',
         'assets/classroom.js', 'assets/classroom.css', 'assets/board.js', 'assets/room-attention.js',
     )}
     if hashlib.sha256(LEGACY.read_bytes()).hexdigest() != LEGACY_SHA:
@@ -70,21 +92,25 @@ def plugin_entries(pdf_archive):
         for name in ('assets/livekit-client.umd.js', 'assets/livekit-client.LICENSE.txt'):
             files[name] = archive.read(f'upload/online-classroom/{name}')
     files.update(pdf_entries(pdf_archive))
+    presets = json.loads(files['video-presets.json'])
     manifest = {
         'format': 1, 'id': 'school-classroom', 'version': VERSION, 'title': 'کلاس مجازی',
         'menus': {role: 'کلاس مجازی' for role in ('student', 'teacher', 'admin', 'deputy')},
         'report_menus': {role: 'حضور و غیاب کلاس مجازی' for role in ('teacher', 'admin', 'deputy')},
         'routes': {'page': 'index.php', 'api': 'api.php', 'content': 'content.php', 'events': 'events.php', 'job': 'job.php'},
         'store': True, 'pdf_resources': 'assets/pdf-resources.zip',
-        'preserve_settings_from': ['0.2.0', '0.2.1', '0.2.2', '0.2.3', '0.3.0', '0.4.0', '0.4.1', '0.4.2', '0.4.3', '0.4.4', '0.4.5', '0.4.6', '0.4.7', '0.4.8', '0.4.9', '0.4.10', '0.4.11', '0.4.12'],
+        'preserve_settings_from': ['0.2.0', '0.2.1', '0.2.2', '0.2.3', '0.3.0', '0.4.0', '0.4.1', '0.4.2', '0.4.3', '0.4.4', '0.4.5', '0.4.6', '0.4.7', '0.4.8', '0.4.9', '0.4.10', '0.4.11', '0.4.12', '0.4.13'],
         'hooks': {'deactivate': 'deactivate.php'},
         'settings': [
             {'key': 'signal_url', 'type': 'wss', 'label': 'آدرس رسانه (wss://)'},
             {'key': 'api_key', 'type': 'token', 'label': 'شناسهٔ رسانه (API Key)', 'min': 12, 'max': 64},
             {'key': 'api_secret', 'type': 'secret', 'label': 'کلید خصوصی رسانه (API Secret)', 'min': 32, 'max': 128},
             {'key': 'max_participants', 'type': 'integer', 'min': 4, 'max': 60, 'default': 4, 'label': 'سقف اتصال هر اتاق، شامل دبیر/مسئول (پایلوت: ۴)'},
-            {'key': 'screen_share', 'type': 'switch', 'label': 'آزمایش اشتراک سبک صفحه (فقط دبیر و مسئول، بدون صدای سیستم)'},
-            {'key': 'camera_share', 'type': 'switch', 'label': 'وبکم کم‌مصرف (دانش‌آموز مربع، فقط تصویر، با اجازهٔ دبیر)'},
+            {'key': 'screen_share', 'type': 'switch', 'label': 'اشتراک سبک صفحه (بدون صدای سیستم)'},
+            {'key': 'student_screen_share', 'type': 'switch', 'label': 'اشتراک صفحهٔ دانش‌آموز (با اجازهٔ موردی دبیر؛ نیازمند اشتراک صفحه)'},
+            {'key': 'camera_share', 'type': 'switch', 'label': 'وبکم کم‌مصرف (تصویر مربع، با اجازهٔ دبیر)'},
+            {'key': 'room_video_quality', 'type': 'switch', 'label': 'اجازهٔ تغییر کیفیت تصویر در اتاق هر کلاس (دبیر یا مسئول مجاز)'},
+            *video_settings(presets),
             {'key': 'repeat_bells', 'type': 'switch', 'label': 'اجازهٔ برگزاری مجدد زنگ پایان‌یافته در همان روز (دستی، با گزارش جدا)'},
             {'key': 'notify_school_bale', 'type': 'switch', 'label': 'ارسال حضور به گفت‌وگوهای خصوصی ربات بله'},
             {'key': 'notify_school_telegram', 'type': 'switch', 'label': 'ارسال حضور به گفت‌وگوهای خصوصی ربات تلگرام'},

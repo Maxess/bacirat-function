@@ -146,6 +146,9 @@ function cl_school_account(PDO $db, string $role, int $id, string $year): ?array
         $row = cl_query($db, 'SELECT * FROM teachers WHERE id=?', [$id])->fetch(PDO::FETCH_ASSOC);
         if (!$row || (int)$row['status'] !== 1) return null;
         $name = (string)$row['full_name'];
+        // Native school_roles.php adds last_name to older schema snapshots. Do not infer it from full_name.
+        $surname = cl_safe_label((string)($row['last_name'] ?? ''), 90);
+        $roomName = $surname !== '' ? 'آقای ' . $surname : 'دبیر';
         // Baci v4.40+: teachers and their roles are global. class_schedules owns the year of each allocation.
         if ((int)($row['is_deputy'] ?? 0) === 1) $office = 'deputy';
     } elseif ($role === 'admin') {
@@ -159,7 +162,7 @@ function cl_school_account(PDO $db, string $role, int $id, string $year): ?array
         return null;
     }
     return ['id'=>$id, 'identity'=>$role . '-' . $id, 'name'=>cl_safe_label($name ?: $role, 90), 'role'=>$role,
-        'class'=>$class ?? null, 'office'=>$office ?? null, 'year'=>$year];
+        'class'=>$class ?? null, 'office'=>$office ?? null, 'year'=>$year] + (isset($roomName) ? ['room_name'=>$roomName] : []);
 }
 
 function cl_safe_label(string $name, int $limit): string

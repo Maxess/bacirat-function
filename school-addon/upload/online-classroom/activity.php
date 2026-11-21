@@ -10,7 +10,7 @@ const CL_INK_BATCH = 6;
 const CL_INK_TARGETS = 32;
 const CL_INK_CUE_SECONDS = 1.1; // A fresh delta can arrive on the approximately one-second idle read.
 const CL_LASER_POINTS = 20;
-const CL_LASER_TTL_MS = 1200;
+const CL_LASER_TTL_MS = 1900;
 
 function cl_activity(ClassroomStore $s, string $lesson): array
 {
@@ -32,7 +32,7 @@ function cl_chat(ClassroomStore $s, array $lesson, array $actor, mixed $body, in
     $activity['last_chat'][$actor['identity']] = $now;
     $item = ++$activity['messages'];
     $s->tx(static function () use ($s, $id, $activity, $item, $actor, $text, $now) {
-        $s->put('chat:' . $id, cl_seq($item), ['n'=>$item, 'by'=>$actor['name'], 'author'=>$actor['identity'], 'text'=>$text, 'at'=>$now]);
+        $s->put('chat:' . $id, cl_seq($item), ['n'=>$item, 'by'=>cl_room_actor_name($actor), 'author'=>$actor['identity'], 'text'=>$text, 'at'=>$now]);
         if ($item > CL_CHAT_LIMIT) $s->delete('chat:' . $id, cl_seq($item - CL_CHAT_LIMIT));
         $s->put('activity', $id, $activity);
     });

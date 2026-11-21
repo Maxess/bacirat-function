@@ -12,6 +12,7 @@ function cl_room_icon(string $name): string
         'camera' => '<rect x="3" y="6" width="13" height="12" rx="2"/><path d="m16 10 5-3v10l-5-3"/>',
         'camera-off' => '<path d="m3 3 18 18M3 7v9a2 2 0 0 0 2 2h11M9 6h5a2 2 0 0 1 2 2v2l5-3v9"/>',
         'menu' => '<path d="M4 6h16M4 12h16M4 18h16"/>',
+        'settings' => '<path d="M4 6h16M4 12h16M4 18h16M8 4v4m8 2v4m-5 2v4"/>',
         'wake' => '<rect x="3" y="5" width="18" height="13" rx="2"/><path d="M9 21h6m-1-13-4 4h4l-2 3"/>',
         'laser' => '<path d="m4 20 8-8m1-6V3m4 6 3-2m-4 6h5"/><circle cx="12" cy="12" r="2"/>',
         'present' => '<rect x="3" y="4" width="18" height="14" rx="2"/><path d="M8 22h8m-4-4v4m0-7V8m-3 3 3-3 3 3"/>',
@@ -55,7 +56,7 @@ function cl_room_icon(string $name): string
             <button type="button" id="camera" class="icon-button camera-toggle" aria-pressed="false" aria-label="روشن‌کردن دوربین" title="روشن‌کردن دوربین" hidden>
                 <?= cl_room_icon('camera-off') . cl_room_icon('camera') ?>
             </button>
-            <?php if ($staff): ?>
+            <?php if ($staff || cl_pupil_screen_enabled($cfg)): ?>
             <button type="button" id="screen-toggle" class="icon-button" aria-pressed="false" aria-label="آماده‌سازی اشتراک صفحه" title="آماده‌سازی اشتراک صفحه" hidden><?= cl_room_icon('present') ?></button>
             <?php endif; ?>
             <button type="button" id="enable-audio" class="icon-button audio-toggle" aria-label="فعال‌کردن پخش صدا" title="فعال‌کردن پخش صدا" hidden><?= cl_room_icon('sound') ?></button>
@@ -82,19 +83,47 @@ function cl_room_icon(string $name): string
                         <?php endforeach; ?>
                         <p class="access-hint" id="camera-unavailable" hidden>وبکم در تنظیمات یا سرور رسانهٔ این اتاق فعال نیست.</p>
                         <p class="access-hint">میکروفون و دوربین را هر نفر خودش روشن می‌کند.</p>
+                        <p class="access-hint" id="pupil-screen-hint" hidden>برای اجازهٔ اشتراک صفحه، دکمهٔ کنار نام دانش‌آموز را بزن. در هر لحظه فقط یک نفر می‌تواند ارائه کند.</p>
                     </div>
                     <div class="access-actions">
+                        <?php if (cl_quality_enabled($cfg)): ?>
+                        <button type="button" id="quality-open" class="icon-button" aria-haspopup="dialog" aria-controls="quality-dialog" hidden><?= cl_room_icon('settings') ?><span>تنظیمات</span></button>
+                        <?php endif; ?>
                         <a id="leave" class="icon-button leave-button" href="<?= cl_html(cl_site_href($panel)) ?>" title="بازگشت به پنل بدون بستن کلاس برای دیگران"><?= cl_room_icon('exit') ?><span>خروج از اتاق</span></a>
                         <button type="button" id="close" class="icon-button finish-button" hidden><?= cl_room_icon('finish') ?><span id="close-label">پایان کلاس برای همه</span></button>
                     </div>
                 </div>
             </div>
-            <template id="permission-icons"><?= cl_room_icon('mic') . cl_room_icon('mic-off') . cl_room_icon('camera') . cl_room_icon('camera-off') . cl_room_icon('pen') ?></template>
+            <template id="permission-icons"><?= cl_room_icon('mic') . cl_room_icon('mic-off') . cl_room_icon('camera') . cl_room_icon('camera-off') . cl_room_icon('pen') . cl_room_icon('present') ?></template>
             <?php else: ?>
             <a id="leave" class="icon-button leave-button" href="<?= cl_html(cl_site_href($panel)) ?>" aria-label="خروج از اتاق" title="خروج از اتاق و بازگشت به پنل"><?= cl_room_icon('exit') ?><span>خروج</span></a>
             <?php endif; ?>
         </div>
     </header>
+    <?php if ($staff && cl_quality_enabled($cfg)): ?>
+    <dialog class="quality-dialog" id="quality-dialog" aria-labelledby="quality-title" aria-describedby="quality-help">
+        <form id="quality-form">
+            <h2 id="quality-title">تنظیمات کیفیت تصویر</h2>
+            <p id="quality-help">این انتخاب‌ها برای زنگ‌های بعدی همین کلاس هم می‌مانند. تغییر کیفیت مجوز ارسال نمی‌دهد. اگر تصویری در حال ارسال باشد و کیفیتش تغییر کند، فرستنده باید آن را دوباره روشن کند.</p>
+            <div class="quality-fields">
+                <?php foreach (CL_QUALITY_FIELDS as $key=>$label): ?>
+                <label for="quality-<?= $key ?>"><?= cl_html($label) ?>
+                    <select id="quality-<?= $key ?>" name="<?= $key ?>" required>
+                        <?php foreach (cl_video_presets()['levels'] as $level=>$name): ?>
+                        <option value="<?= $level ?>"><?= cl_html($name) ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </label>
+                <?php endforeach; ?>
+            </div>
+            <p id="quality-message" role="status" hidden></p>
+            <div class="actions">
+                <button type="submit" id="quality-save">ذخیره برای این کلاس</button>
+                <button type="button" id="quality-cancel" class="secondary">بستن</button>
+            </div>
+        </form>
+    </dialog>
+    <?php endif; ?>
     <?php if ($staff): ?>
     <div class="staff-actions actions" id="staff-start">
         <label for="slot" class="sr-only">انتخاب زنگ</label>

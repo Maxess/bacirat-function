@@ -63,6 +63,12 @@ $db->exec("INSERT INTO classes VALUES (31,'هفتم۱','1405/1406')");
 must(array_keys(cl_classes($db,$year)) === [20], 'ambiguous class name fails closed');
 $db->exec('DELETE FROM classes WHERE id=31');
 $student = cl_school_user($db, ['student_id'=>1], $year);
+// The pinned native migration supplies these fields, sometimes empty on old records.
+must(cl_room_actor_name(cl_school_user($db, ['teacher_id'=>1], $year)) === 'دبیر', 'no full-name heuristic with a legacy schema');
+$db->exec('ALTER TABLE teachers ADD COLUMN first_name VARCHAR(150)');
+$db->exec('ALTER TABLE teachers ADD COLUMN last_name VARCHAR(150)');
+$db->exec("UPDATE teachers SET first_name='علیرضا',last_name='جهان تیغ',full_name='علیرضا جهان تیغ' WHERE id=1");
+$db->exec("UPDATE teachers SET first_name='مهدی',last_name='صدیقی نیا' WHERE id=2");
 $teacher = cl_school_user($db, ['teacher_id'=>1], $year);
 $other = cl_school_user($db, ['teacher_id'=>2], $year);
 $deputy = cl_school_user($db, ['teacher_id'=>3], $year);
@@ -159,6 +165,11 @@ denied(409,fn()=>cl_ticket($cfg,$a,$student,$bind($a,'PA_Student'),$t));
 denied(409,fn()=>cl_check_live($cfg,$a,$teacher,$bind($a,'PA_Teacher'),$t));
 $ticket = cl_ticket($cfg,$a,$teacher,$bind($a,'PA_Teacher'),$t);
 must($ticket['epoch'] === cl_epoch($a), 'staff ticket before media is live; no independent watcher');
+$claims = json_decode(base64_decode(strtr(explode('.', $ticket['token'])[1], '-_', '+/')), true);
+must($claims['name'] === 'آقای جهان تیغ' && $a['teacher_name'] === 'علیرضا جهان تیغ',
+    'room token uses the actual multi-word family name, while the report stores the full name');
+must(cl_room_actor_name($other) === 'آقای صدیقی نیا' && cl_room_actor_name($deputy) === 'دبیر',
+    'family name comes from the field rather than a token of full_name; empty means a generic title');
 $raw = json_encode(['event'=>'room_started','room'=>['name'=>$r]]);
 $jwt = $sign($raw,$t+300,$cfg['api_key']);
 must(cl_event_verify($cfg,$raw,$jwt,$t)['room']['name']===$r, 'native signed LiveKit event');
@@ -196,6 +207,37 @@ $wire($r,$teacherWire+$studentWire+$managerWire);
 $sample(10,$t+9,$first);
 $active=cl_active($s,10);
 cl_check_live($cfg,$active,$student,$bind($active,'PA_Student'),$t+9);
+$qualityCfg = $cfg + ['room_video_quality'=>true, 'camera_high_size'=>'360x360','camera_high_fps'=>'20',
+    'screen_medium_size'=>'854x480','screen_medium_fps'=>'5','screen_high_size'=>'480x480','screen_high_fps'=>'21'];
+$defaultLevels = array_fill_keys(array_keys(CL_QUALITY_FIELDS), 'low');
+$levels = ['teacherCamera'=>'high','studentCamera'=>'low','teacherScreen'=>'medium','studentScreen'=>'high'];
+$qbody = $bind($active,'PA_Teacher') + ['levels'=>$levels];
+$changeQuality = fn($policy,$who,$input) => cl_set_quality($s,$policy,$first,$active,$who,$input,$t+9);
+$defaults = cl_quality_status($s,$qualityCfg,$first,$active,$teacher)['quality'];
+must($defaults['levels'] === $defaultLevels && $defaults['camera'] === ['width'=>128,'height'=>128,'frameRate'=>8,'bitrate'=>25000]
+    && $defaults['screen'] === ['width'=>640,'height'=>360,'frameRate'=>5,'bitrate'=>70000], 'every class and role begins at low');
+denied(403,fn()=>$changeQuality($cfg,$teacher,$qbody));
+denied(403,fn()=>$changeQuality($qualityCfg,$student,array_replace($qbody,['sid'=>'PA_Student'])));
+denied(403,fn()=>$changeQuality($qualityCfg,$other,$qbody));
+denied(409,fn()=>$changeQuality($qualityCfg,$teacher,array_replace($qbody,['epoch'=>str_repeat('0',24)])));
+foreach ([['teacherCamera'=>'high'], $levels+['bitrate'=>10000], array_replace($levels,['studentScreen'=>['low']]),
+    array_replace($levels,['teacherCamera'=>'ultra'])] as $invalid) {
+    denied(400,fn()=>$changeQuality($qualityCfg,$teacher,array_replace($qbody,['levels'=>$invalid])));
+}
+must($s->get('video-quality',cl_quality_key($first)) === null, 'invalid writes do not create a preference');
+$teacherQuality = $changeQuality($qualityCfg,$teacher,$qbody);
+$pupilQuality = cl_quality_status($s,$qualityCfg,$first,$active,$student)['quality'];
+must($teacherQuality['quality']['levels'] === $levels && $teacherQuality['quality']['camera'] === ['width'=>360,'height'=>360,'frameRate'=>20,'bitrate'=>350000]
+    && $teacherQuality['quality']['screen']['width'] === 854 && $teacherQuality['quality']['screen']['frameRate'] === 5,
+    'administrator caps and staff quality reach the actual publish profiles');
+must($pupilQuality['camera'] === $defaults['camera'] && !isset($pupilQuality['levels']) && $pupilQuality['screen'] === cl_video_profile($cfg,'screen','high'),
+    'student uses its independent selections and invalid central presets fall back to validated defaults');
+must(cl_quality_status($s,$qualityCfg,$first,$active,$teacher,$teacherQuality) === ['qualityRev'=>$teacherQuality['qualityRev']]
+    && cl_active($s,10) === $active, 'a matching validator avoids repeated payloads; saving is independent of media and attendance');
+must(cl_quality_levels($s,$qualityCfg,$classes[20]) === $defaultLevels
+    && cl_quality_levels($s,$qualityCfg,array_replace($first,['year'=>'1406/1407'])) === $defaultLevels
+    && cl_quality_levels($s,$cfg,$first) === $defaultLevels && cl_quality_levels($s,$qualityCfg,$first) === $levels,
+    'isolation by class and year, opt-out uses low but retains class settings');
 must($active['first_seen'] === ['student-1'=>$t+9] && $active['seconds'] === [],
     'the first verified sample records a clock before any consecutive interval earns time');
 $wake = $bind($active,'PA_Teacher') + ['mode'=>'idle'];
@@ -239,7 +281,7 @@ $s->put($inkBucket,cl_seq(2),$agedPoint);
 must(!isset(cl_board_read($s,$cueLesson,$student,['board'=>1,'ink'=>0])['ops'][0]['live']), 'a late delta still paints ink, not a fresh name');
 $requestAim=['board'=>1,'sid'=>'PA_Teacher','aim'=>[[3300,6200,600],[4500,6700,250],[7000,6800,10]]];
 denied(403,fn()=>cl_board_read($s,$cueLesson,$student,$requestAim));
-foreach ([[[3300,16000,50]], [[3300,6200,1200]], [[1,2,10],[3,4,50]], array_fill(0,CL_LASER_POINTS+1,[100,200,0])] as $invalid) {
+foreach ([[[3300,16000,50]], [[3300,6200,CL_LASER_TTL_MS]], [[1,2,10],[3,4,50]], array_fill(0,CL_LASER_POINTS+1,[100,200,0])] as $invalid) {
     denied(400,fn()=>cl_board_read($s,$cueLesson,$teacher,array_replace($requestAim,['aim'=>$invalid])));
 }
 denied(409,fn()=>cl_board_read($s,$cueLesson,$teacher,array_replace($requestAim,['sid'=>'PA_Wrong'])));
@@ -249,7 +291,7 @@ $withTrail=cl_board_read($s,$cueLesson,$student,['board'=>1,'ink'=>2]);
 $coords=static fn($samples) => array_map(static fn($point)=>array_slice($point,0,2),$samples);
 must($coords($withTrail['laser']['points']) === $coords($requestAim['aim']) && $withTrail['cursor'] === 2 && $withTrail['ops'] === [],
     'laser is one rate-limited snapshot of a sweep, not an ink operation');
-$oldPointer = cl_activity($s,$cueLesson['id']); $oldPointer['laser']['at']-=.65;
+$oldPointer = cl_activity($s,$cueLesson['id']); $oldPointer['laser']['at']-=(CL_LASER_TTL_MS-550)/1000;
 $s->put('activity',$cueLesson['id'],$oldPointer);
 $tail=cl_board_read($s,$cueLesson,$student,['board'=>1,'ink'=>2])['laser']['points'];
 must($coords($tail) === [[4500,6700],[7000,6800]] && $tail[0][2] < $tail[1][2], 'the oldest segment expires before the tip');
@@ -260,7 +302,7 @@ $s->put('activity',$cueLesson['id'],$oldPointer);
 must(cl_board_read($s,$cueLesson,$student,[])['laser'] === null, 'old laser disappears without storing a durable trail');
 cl_board_read($s,$cueLesson,$teacher,array_replace($requestAim,['board'=>2]));
 must(cl_board_read($s,$cueLesson,$student,[])['laser'] === null, 'a stale page cannot insert a new laser trail');
-cl_board_read($s,$cueLesson,$teacher,$requestAim,microtime(true)-1.3);
+cl_board_read($s,$cueLesson,$teacher,$requestAim,microtime(true)-CL_LASER_TTL_MS/1000-.1);
 must(cl_board_read($s,$cueLesson,$student,[])['laser'] === null, 'a request held up by the server lock is not replayed');
 cl_clear_activity($s,$cueLesson['id']);
 denied(403,fn()=>cl_ink_input($active,$student,['strokes'=>[['tool'=>'erase-stroke','targets'=>['old-00000001']]]]));
@@ -400,6 +442,7 @@ $a3=$sample(10,$t+41,$first);
 must($a3['phase']==='paused' && !isset($sfus[$r3]) && $a3['seconds']['student-1']===6, 'unsampled gap not counted, expired transport revoked');
 $cl=cl_active($s,10);
 cl_close_lesson($s,$cfg,$cl,$t+42,$rpc);
+must(cl_quality_levels($s,$qualityCfg,$first) === $levels, 'closing a lesson does not reset the class quality');
 must(!cl_active($s,10) && !isset($sfus[$r3]) && $s->get('activity',$cl['id'])===null, 'close and purge activity');
 must(!isset($s->get('lesson',$cl['id'])['wake_mode']), 'wake policy is not retained in the finished lesson or report');
 $rpt=cl_report_detail($s,$teacher,$cl['id']);
@@ -409,7 +452,7 @@ must($rpt['first_seen'] === ['student-1'=>$t+9] && cl_first_presence_clock($rpt,
 $historic = $rpt;
 unset($historic['first_seen']);
 $historicNotice = cl_attendance_text($historic,1);
-must(str_contains($historicNotice,"\nاولین حضور تأییدشده به وقت تهران: ثبت نشده\nمدت حضور: ۰۰:۰۰:۰۶ از ۰۰:۰۰:۰۹"),
+must(str_contains($historicNotice,"\nاولین حضور تأییدشده: ثبت نشده\nمدت حضور: ۰ دقیقه حضور از ۰ دقیقه کلاس"),
     'a historic notice with a credited duration has no inferred arrival');
 must(cl_report_detail($s,$deputy,$cl['id'])===$rpt && cl_report_detail($s,$manager,$cl['id'])===$rpt && cl_report_detail($s,$other,$cl['id'])===null, 'historical report scopes');
 denied(403,fn()=>cl_report_detail($s,$student,$cl['id']));
@@ -442,10 +485,23 @@ foreach ($send as [$provider,$target,$text]) {
         'bot date is Shamsi without a timezone suffix');
     must(str_contains($text, "\nساعت برگزاری: ۰۸:۳۰ تا ۰۸:۳۰\n"), 'bot wall clock uses Tehran, separate from verified presence duration');
     $arrival = $target === '333' ? 'ثبت نشده' : '۰۸:۳۰:۰۹';
-    $duration = $target === '333' ? '۰۰:۰۰:۰۰' : '۰۰:۰۰:۰۶';
-    must(str_contains($text,"\nاولین حضور تأییدشده به وقت تهران: $arrival\nمدت حضور: $duration از ۰۰:۰۰:۰۹"),
-        'bot distinguishes Tehran first presence, absence and an unshifted elapsed duration');
+    must(str_contains($text,"\nاولین حضور تأییدشده: $arrival\nمدت حضور: ۰ دقیقه حضور از ۰ دقیقه کلاس") && !str_contains($text,'تهران'),
+        'bot distinguishes a real first clock from absence, omits the timezone and prints whole minutes');
 }
+
+$exampleStart = (new DateTimeImmutable('2026-11-21 08:00:00', new DateTimeZone('Asia/Tehran')))->getTimestamp();
+$example = ['date'=>'2026-11-21','class_name'=>'هفتم ۱','subject'=>'ریاضی','period'=>'زنگ 1', 'started'=>$exampleStart,
+    'ended'=>$exampleStart+50*60,'first_seen'=>['student-1'=>$exampleStart+7*60], 'roster'=>['student-1'=>'حسن محمدی'],
+    'seconds'=>['student-1'=>30*60+59], 'active_seconds'=>40*60+12];
+must(cl_attendance_text($example,1) === <<<'TEXT'
+حضور در کلاس مجازی — حسن محمدی
+هفتم ۱ · ریاضی · زنگ ۱
+تاریخ: شنبه ۱۴۰۵/۰۸/۳۰
+ساعت برگزاری: ۰۸:۰۰ تا ۰۸:۵۰
+اولین حضور تأییدشده: ۰۸:۰۷:۰۰
+مدت حضور: ۳۰ دقیقه حضور از ۴۰ دقیقه کلاس
+زمان انتظار و وقفهٔ کلاس در این مدت منظور نشده است.
+TEXT, 'full bot layout and active, not wall-clock minutes');
 
 // Simulated unlink, inactive provider, changed bot, and ambiguous send after the packet was queued.
 $makeNotice = static function (string $provider, string $chat, int $student) use ($s,$cl,$t) {
@@ -627,6 +683,8 @@ must(array_column($at($deputy,$sharedAt)['choices'],'id') === [92,99] && str_con
     'the two native alternatives occupy one timed bell');
 must(array_column($at($teacher,$sharedAt)['choices'],'id') === [99] && $at($teacher,$sharedAt)['choices'][0]['manual'],
     'only the assigned alternative is exposed to the teacher, and never auto-started');
+must(str_contains($at($teacher,$sharedAt)['choices'][0]['label'], 'آقای جهان تیغ') && !str_contains($at($teacher,$sharedAt)['choices'][0]['label'], 'علیرضا'),
+    'shared bell selection in the room also omits the given name');
 $db->exec('UPDATE teachers SET status=0 WHERE id=2');
 must(array_column($at($deputy,$sharedAt)['choices'],'id') === [99] && $at($deputy,$sharedAt)['choices'][0]['manual'],
     'a disabled partner is not eligible and does not make the bell automatic');

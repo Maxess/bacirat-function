@@ -171,13 +171,18 @@ function cl_b64url(string $value): string
     return rtrim(strtr(base64_encode($value), '+/', '-_'), '=');
 }
 
+function cl_room_actor_name(array $actor): string
+{
+    return str_starts_with($actor['identity'], 'teacher-') ? ($actor['room_name'] ?? 'دبیر') : $actor['name'];
+}
+
 function cl_jwt(array $cfg, array $video, int $ttl, ?array $actor = null, ?int $now = null): string
 {
     $now ??= time();
     $body = ['iss' => $cfg['api_key'], 'nbf' => $now - 5, 'iat' => $now, 'exp' => $now + $ttl, 'video' => $video];
     if ($actor !== null) {
         $body['sub'] = $actor['identity'];
-        $body['name'] = $actor['name'];
+        $body['name'] = cl_room_actor_name($actor);
     }
     $unsigned = cl_b64url('{"alg":"HS256","typ":"JWT"}') . '.' . cl_b64url(json_encode($body, JSON_THROW_ON_ERROR));
     return $unsigned . '.' . cl_b64url(hash_hmac('sha256', $unsigned, $cfg['api_secret'], true));

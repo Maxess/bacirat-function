@@ -40,10 +40,10 @@
         camera:{label:'دوربین',icons:['camera','camera-off'],source:1}, board:{label:'نوشتن روی تخته',icons:['pen']}};
     const permissionIcons = el('permission-icons')?.content;
     const cameraSource = lk?.Track.Source.Camera, micSource = lk?.Track.Source.Microphone, screenSource = lk?.Track.Source.ScreenShare;
-    // One layer, no second codec. These are encoder targets, not wire rates.
-    const cameraVideo = staff ? {width:256,height:144,frameRate:10,bitrate:50000}
-        : {width:128,height:128,frameRate:8,bitrate:25000,square:true};
-    const shareVideo = {width:640,height:360,frameRate:2,bitrate:70000}; // Static pages and large text, not motion video.
+    const profileKey = p => p && `${p.width}×${p.height}/${p.frameRate}/${p.bitrate}`;
+    const screenToggle = el('screen-toggle');
+    const qualityButton = el('quality-open'), qualityDialog = el('quality-dialog');
+    const qualityFields = ['teacherCamera','studentCamera','teacherScreen','studentScreen'];
     const canCaptureCamera = typeof window.navigator?.mediaDevices?.getUserMedia === 'function';
     const canCaptureScreen = typeof window.navigator?.mediaDevices?.getDisplayMedia === 'function';
     const attention = window.ClassroomAttention(changeWake);
@@ -183,6 +183,22 @@
         });
     }
 
+    function changePupilScreen(person) {
+        return run(async () => {
+            const link = active, {identity,sid} = person, local = scope();
+            if (!staff || !hasAccess() || !state.pupilScreenEnabled || state.members?.[identity] !== sid) return;
+            const selected = state.screen;
+            if (selected && (selected.identity !== identity || selected.sid !== sid)) return;
+            try {
+                const result = await api('screen-access', {...local,identity,targetSid:sid,enabled:!selected});
+                if (active !== link || !hasAccess() || scope().sid !== local.sid) return;
+                flow++;
+                state = {...state,screen:result.screen};
+                if (result.screen) note('اجازه داده شد؛ دانش‌آموز باید خودش صفحه را انتخاب کند.');
+            } finally { refresh(); }
+        });
+    }
+
     function personButton(identity, feature) {
         const btn = document.createElement('button');
         btn.type = 'button'; btn.className = 'icon-button';
@@ -228,6 +244,13 @@
                 if (feature === 'board' && !student(id)) continue;
                 controls[feature] = personButton(id, feature); box.append(controls[feature]);
             }
+            if (student(id)) {
+                const btn = document.createElement('button');
+                btn.type = 'button'; btn.className = 'icon-button'; btn.dataset.feature = 'screen';
+                btn.append(permissionIcons.querySelector('.icon-present').cloneNode(true));
+                btn.addEventListener('click', () => changePupilScreen(person));
+                box.append(controls.screen = btn);
+            }
             li.append(box);
         }
         return {key, li, timer, controls};
@@ -262,6 +285,16 @@
                 put(row.timer, Number.isInteger(value) ? duration(value) : '—');
             }
             for (const [feature, btn] of Object.entries(row.controls)) {
+                if (feature === 'screen') {
+                    const selected = state.screen?.identity === id && state.screen.sid === person.sid;
+                    const label = `${selected ? 'لغو اجازهٔ' : 'دادن اجازهٔ'} اشتراک صفحه · ${personName(person)}`;
+                    btn.hidden = state.pupilScreenEnabled !== true;
+                    btn.disabled = busy || state.members?.[id] !== person.sid || (!!state.screen && !selected);
+                    btn.dataset.granted = String(selected);
+                    btn.setAttribute('aria-pressed', String(selected));
+                    btn.setAttribute('aria-label', label); btn.title = label;
+                    continue;
+                }
                 const on = feature === 'mic' ? maySpeak(person) && person.isMicrophoneEnabled
                     : feature === 'camera' ? mayCamera(person) && person.isCameraEnabled : false;
                 const enabled = granted(feature, id);
@@ -280,7 +313,7 @@
     function stopCamera(link) {
         link.cameraAttempt++;
         const {cameraTrack:track, cameraCapture:capture} = link;
-        link.cameraTrack = link.cameraCapture = null;
+        link.cameraTrack = link.cameraCapture = link.cameraProfile = null;
         capture?.stop();
         if (!track) return;
         // End capture immediately, even if signaling is unavailable or permission was revoked mid-publish.
@@ -375,7 +408,7 @@
     function stopScreen(link) {
         link.screenAttempt++;
         const track = link.screenTrack;
-        link.screenTrack = null;
+        link.screenTrack = link.screenProfile = null;
         if (!track) return;
         track.stop();
         return link.room.localParticipant.unpublishTrack(track,true).catch(() => {});
@@ -397,7 +430,7 @@
         const selected = state.screen;
         const local = active?.room.localParticipant;
         const mine = live && itsScreen(active);
-        if (active?.screenTrack && (!mine || !state.screenEnabled || !mayScreen(local))) stopScreen(active);
+        if (active?.screenProfile && (!mine || !state.screenEnabled || !mayScreen(local))) stopScreen(active);
         let person, display = null;
         if (live && selected && !document.hidden) {
             person = mine ? local : active.room.remoteParticipants.get(selected.identity);
@@ -413,9 +446,9 @@
         }
         el('screen-panel').hidden = !display;
         if (display) put(el('screen-label'), `اشتراک صفحهٔ ${personName(person)}`);
-        if (!staff) return false;
-        const button = el('screen-toggle');
-        const show = live && state.screenEnabled === true && canCaptureScreen;
+        if (!screenToggle) return false;
+        const button = screenToggle;
+        const show = live && state.screenEnabled === true && !!state.quality?.screen && canCaptureScreen && (staff || mine);
         const sharing = !!(mine && active.screenTrack);
         button.hidden = !show;
         button.disabled = !show || busy || !!active?.screenBusy || (!!selected && !mine) || (!!mine && !mayScreen(local) && !sharing);
@@ -437,6 +470,13 @@
         el('access-features').hidden = !live;
         el('access-camera').hidden = !state.cameraCodec;
         el('camera-unavailable').hidden = !!state.cameraCodec;
+        el('pupil-screen-hint').hidden = state.pupilScreenEnabled !== true;
+        if (qualityButton) {
+            qualityButton.hidden = !live || !state.quality?.levels;
+            qualityButton.disabled = busy;
+            el('quality-save').disabled = busy;
+            if (qualityButton.hidden && qualityDialog.open) qualityDialog.close();
+        }
         for (const feature of Object.keys(features)) {
             const anyException = Object.keys(state.access?.[feature]?.members || {}).length > 0;
             const all = granted(feature);
@@ -554,8 +594,16 @@
         el('microphone').title = live && !maySpeak(local) ? 'برای روشن‌کردن میکروفون از دبیر نوبت بگیر' : micAction;
         const cam = el('camera');
         if ((active?.cameraTrack || active?.cameraBusy) && (!live || !state.cameraCodec || !mayCamera(local))) stopCamera(active);
+        if (live) {
+            // Do not reopen a device or browser picker automatically after a profile change.
+            const cameraChanged = active.cameraProfile && active.cameraProfile !== profileKey(state.quality?.camera);
+            const screenChanged = active.screenProfile && active.screenProfile !== profileKey(state.quality?.screen);
+            if (cameraChanged) stopCamera(active);
+            if (screenChanged) stopScreen(active);
+            if (cameraChanged || screenChanged) note('کیفیت تصویر تغییر کرد؛ برای ادامه، دوربین یا اشتراک صفحه را دوباره روشن کن.');
+        }
         const camOn = live && !!active.cameraTrack && !!local.isCameraEnabled;
-        const canCamera = live && canCaptureCamera && !!state.cameraCodec && mayCamera(local);
+        const canCamera = live && canCaptureCamera && !!state.cameraCodec && !!state.quality?.camera && mayCamera(local);
         const camAction = camOn ? 'خاموش‌کردن دوربین' : 'روشن‌کردن دوربین';
         cam.hidden = !canCamera;
         cam.disabled = !canCamera || !!active?.cameraBusy;
@@ -583,6 +631,7 @@
         admitted = false; inkAt = aimAt = Infinity; inkRetryAt = 0;
         chatCursor = 0; seconds = {};
         delete state.profiles; delete state.profilesRev;
+        delete state.quality; delete state.qualityRev;
     }
     function release(link = active, warn = false) {
         if (!link || active !== link) return;
@@ -729,7 +778,9 @@
         if (!view) return;
         board.sync(view, local, requestedAt);
         inkRead = performance.now();
-        inkAt = inkRead + (view.more ? 85 : (view.moving || view.laser ? 280 : 850)) + Math.random()*(view.more ? 35 : 140);
+        // Keep the pointer visible while it fades, without continuing fast polling for an old snapshot.
+        const freshLaser = (view.laser?.points?.at(-1)?.[2] ?? 0) - (inkRead - requestedAt) > 1200;
+        inkAt = inkRead + (view.more ? 85 : (view.moving || freshLaser ? 280 : 850)) + Math.random()*(view.more ? 35 : 140);
     }
     async function poll(boardOnly) {
         if (polling || stopped || permanent) return;
@@ -749,11 +800,13 @@
             }
             const people = !document.hidden && !el('people-panel').hidden;
             const result = await api('status', {...local, ...position, chat:chatCursor, people,
-                profilesRev:hasAccess() ? state.profilesRev : undefined});
+                profilesRev:hasAccess() ? state.profilesRev : undefined, qualityRev:hasAccess() ? state.qualityRev : undefined});
             if (captured !== flow || stopped) return;
             const prior = state;
-            if (result.admitted && result.epoch === prior.epoch && result.lesson === prior.lesson
-                && result.profilesRev && result.profilesRev === prior.profilesRev) result.profiles ??= prior.profiles;
+            if (result.admitted && result.epoch === prior.epoch && result.lesson === prior.lesson) {
+                if (result.profilesRev && result.profilesRev === prior.profilesRev) result.profiles ??= prior.profiles;
+                if (result.qualityRev && result.qualityRev === prior.qualityRev) result.quality ??= prior.quality;
+            }
             state = result;
             syncSlots();
             if (active && (active.epoch !== state.epoch || active.lesson !== state.lesson || !result.ready
@@ -767,6 +820,10 @@
             if (active && local.sid && scope().sid === local.sid && connected() && result.admitted === true) {
                 admitted = true; seconds = result.seconds || {};
                 render();
+                if (!staff && canCaptureScreen && result.screenEnabled && itsScreen(active)
+                    && (prior.screen?.identity !== result.screen.identity || prior.screen?.sid !== result.screen.sid)) {
+                    note('دبیر اجازهٔ اشتراک صفحه داده است؛ برای شروع، خودت صفحه را انتخاب کن.');
+                }
                 attention.snapshot(result.profiles, pushChat(result.chat), result.chatMore, active.room.localParticipant.identity);
                 receiveBoard(result.board, scope(), requestedAt);
                 needsRefresh ||= !!result.chatMore;
@@ -855,8 +912,41 @@
             if (local.isMicrophoneEnabled !== enabling) note(microphoneFailure(local,enabling));
         } catch (error) { if (active === link && hasAccess()) note(microphoneFailure(local,enabling,error)); }
     }));
+    if (qualityButton) {
+        const errorMessage = el('quality-message');
+        qualityButton.addEventListener('click', () => {
+            if (!hasAccess() || !state.quality?.levels || busy) return;
+            for (const key of qualityFields) el(`quality-${key}`).value = state.quality.levels[key];
+            errorMessage.hidden = true;
+            setAccessMenu(false);
+            qualityDialog.showModal();
+        });
+        el('quality-cancel').addEventListener('click', () => qualityDialog.close());
+        qualityDialog.addEventListener('close', () => el('toggle-access').focus());
+        el('quality-form').addEventListener('submit', event => {
+            event.preventDefault();
+            return run(async () => {
+                if (!hasAccess() || !state.quality?.levels) return;
+                const link = active, local = scope();
+                const levels = Object.fromEntries(qualityFields.map(key => [key,el(`quality-${key}`).value]));
+                errorMessage.hidden = true;
+                try {
+                    const result = await api('set-quality', {...local,levels});
+                    if (active !== link || !hasAccess() || scope().sid !== local.sid) return;
+                    flow++;
+                    state = {...state,quality:result.quality,qualityRev:result.qualityRev};
+                    qualityDialog.close();
+                    note('کیفیت تصویر برای این کلاس ذخیره شد.');
+                } catch (err) {
+                    put(errorMessage, err instanceof PublicError ? err.message : 'ذخیرهٔ کیفیت کامل نشد؛ دوباره تلاش کن.');
+                    errorMessage.hidden = false;
+                } finally { refresh(); }
+            });
+        });
+    }
+
     // Own both the physical capture and, if needed, its pre-encoder square crop.
-    // A browser that cannot produce a square stream never falls back to publishing a large one.
+    // Never publish a camera image in a size larger than the selected profile.
     function cameraCapture(raw, profile, ended) {
         let output = raw, input, timer, stopped = false;
         const stop = () => {
@@ -868,14 +958,13 @@
             if (input) { input.pause(); input.srcObject = null; }
         };
         const prepare = async () => {
-            if (!profile.square) return raw;
             const {width,height} = raw.getSettings();
-            if (width > 0 && width === height && width <= profile.width) {
+            if (width === profile.width && height === profile.height) {
                 // With a native crop, keep exact square dimensions even when the device rotates.
                 try {
                     await raw.applyConstraints({width:{exact:width},height:{exact:height},aspectRatio:{exact:1},frameRate:{max:profile.frameRate}});
                     const size = raw.getSettings();
-                    if (size.width === width && size.height === height) return raw;
+                    if (size.width === width && size.height === height && !(size.frameRate > profile.frameRate + .1)) return raw;
                 } catch (_) { /* Use the fixed-size canvas instead. */ }
             }
             if (stopped || raw.readyState !== 'live') return null;
@@ -912,24 +1001,32 @@
     }
 
     el('camera').addEventListener('click', async () => {
-        const link = active, codec = state.cameraCodec;
+        const link = active, codec = state.cameraCodec, cameraVideo = state.quality?.camera;
         const local = link?.room.localParticipant;
-        if (!hasAccess() || !codec || !canCaptureCamera || !mayCamera(local) || link.cameraBusy) return;
+        if (!hasAccess() || !codec || !cameraVideo || !canCaptureCamera || !mayCamera(local) || link.cameraBusy) return;
         link.cameraBusy = true;
         const {sid} = scope(link);
-        const attempt = ++link.cameraAttempt;
+        const attempt = ++link.cameraAttempt, profile = profileKey(cameraVideo);
         const valid = () => link === active && hasAccess() && scope(link).sid === sid && state.cameraCodec === codec
-            && mayCamera(local) && link.cameraAttempt === attempt;
+            && mayCamera(local) && link.cameraAttempt === attempt && profile === profileKey(state.quality?.camera);
         render();
         let raw, capture, keep = false;
         try {
             if (link.cameraTrack) { await stopCamera(link); return; }
-            // Only this button asks for a camera. Never fetch audio with the camera stream.
+            link.cameraProfile = profile;
+            // The source can be larger than the encoded square to accommodate ordinary camera modes.
             const {width,height,frameRate} = cameraVideo;
-            const video = {facingMode:{ideal:'user'}, width:{ideal:width,max:256}, height:{ideal:height,max:144},
-                frameRate:{ideal:frameRate,max:frameRate}};
-            if (cameraVideo.square) video.aspectRatio = {ideal:1};
-            const stream = await window.navigator.mediaDevices.getUserMedia({video,audio:false});
+            const video = {facingMode:{ideal:'user'}, width:{ideal:width,max:Math.max(width,256)}, height:{ideal:height,max:Math.max(height,144)},
+                aspectRatio:{ideal:1}, frameRate:{ideal:frameRate,max:frameRate}};
+            const openCamera = () => window.navigator.mediaDevices.getUserMedia({video,audio:false});
+            let stream;
+            try { stream = await openCamera(); }
+            catch (error) {
+                if (error?.name !== 'OverconstrainedError' || !valid()) throw error;
+                // Devices with a higher minimum native mode still send only the configured square.
+                video.width.max = 640; video.height.max = 480;
+                stream = await openCamera();
+            }
             [raw] = stream.getVideoTracks();
             for (const track of stream.getTracks()) if (track !== raw) track.stop();
             if (!raw) throw new PublicError('مرورگر تصویر دوربین را در اختیار کلاس نگذاشت.');
@@ -956,7 +1053,7 @@
             const track = new lk.LocalVideoTrack(outgoing);
             link.cameraTrack = track;
             await local.publishTrack(track, {source:cameraSource, videoCodec:codec, simulcast:false, backupCodec:false,
-                videoEncoding:{maxBitrate:cameraVideo.bitrate,maxFramerate:frameRate}});
+                videoEncoding:{maxBitrate:cameraVideo.bitrate,maxFramerate:frameRate},degradationPreference:'maintain-resolution'});
             keep = valid();
             if (!keep && link.cameraTrack !== track) {
                 // A late SDK publication can finish after stopCamera has already taken ownership away.
@@ -976,21 +1073,23 @@
                 if (capture && link.cameraCapture === capture) stopCamera(link);
                 else if (capture) capture.stop();
                 else raw?.stop();
+                if (link.cameraAttempt === attempt) link.cameraProfile = null;
             }
             link.cameraBusy = false;
             if (link === active) render();
         }
     });
-    if (staff) el('screen-toggle').addEventListener('click', async () => {
-        const link = active;
-        if (!hasAccess() || !state.screenEnabled || !canCaptureScreen || link.screenBusy || busy) return;
+    screenToggle?.addEventListener('click', async () => {
+        const link = active, shareVideo = state.quality?.screen;
+        if (!hasAccess() || !state.screenEnabled || !shareVideo || !canCaptureScreen || link.screenBusy || busy) return;
         if (state.screen && !itsScreen(link)) return;
         const local = scope(link), person = link.room.localParticipant;
         link.screenBusy = true;
         render();
-        let raw;
+        let raw, attempt;
         try {
             if (!itsScreen(link)) {
+                if (!staff) return; // A pupil can use a confirmed invitation, never grant one.
                 const result = await api('screen-access',{...local,enabled:true});
                 if (link !== active || !hasAccess() || scope().sid !== local.sid) return;
                 flow++;
@@ -1000,10 +1099,11 @@
             }
             if (link.screenTrack) { await giveBackScreen(link); return; }
             if (!mayScreen(person)) return;
-            const attempt = ++link.screenAttempt;
+            attempt = ++link.screenAttempt;
+            const profile = link.screenProfile = profileKey(shareVideo);
             const current = () => link === active && hasAccess() && scope().sid === local.sid && link.screenAttempt === attempt
-                && state.screenEnabled && itsScreen(link) && mayScreen(person);
-            // Only this second, explicit click may open the browser picker. No saved capture or system sound.
+                && state.screenEnabled && itsScreen(link) && mayScreen(person) && profile === profileKey(state.quality?.screen);
+            // A confirmed lease plus an explicit click is required. No saved capture or system sound.
             const {width,height,frameRate} = shareVideo;
             const limits = {width:{max:width},height:{max:height},frameRate:{ideal:frameRate,max:frameRate}};
             const stream = await window.navigator.mediaDevices.getDisplayMedia({video:limits,audio:false,systemAudio:'exclude',
@@ -1035,12 +1135,13 @@
             }
         } catch (error) {
             raw?.stop();
-            if (link === active && hasAccess()) {
+            if (link === active && hasAccess() && (attempt === undefined || link.screenAttempt === attempt)) {
                 await giveBackScreen(link).catch(() => {});
                 if (link === active) note(error instanceof PublicError ? error.message : error?.name === 'NotAllowedError'
                     ? 'انتخاب صفحه لغو شد یا مرورگر اجازه نداد.' : 'اشتراک صفحه شروع نشد؛ مرورگر و اتصال را بررسی کن. (SCREEN-START)');
             }
         } finally {
+            if (!link.screenTrack && link.screenAttempt === attempt) link.screenProfile = null;
             link.screenBusy = false;
             if (link === active) { refresh(); render(); }
         }

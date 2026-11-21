@@ -27,9 +27,11 @@ class Element {
 }
 function fixture(staff, autoSlot = 0) {
     const elements = Object.fromEntries(['classroom','status','status-dot','notice','people','live-panel','waiting','wait-title','wait-message',
-        'camera','camera-strip','camera-preview','camera-preview-video','camera-preview-name','screen-panel','screen-video','screen-label','audio-tracks','chat-log','chat-form','chat-text','leave','microphone','enable-audio','people-count',
+        'camera','screen-toggle','camera-strip','camera-preview','camera-preview-video','camera-preview-name','screen-panel','screen-video','screen-label','audio-tracks','chat-log','chat-form','chat-text','leave','microphone','enable-audio','people-count',
         'toggle-people','toggle-chat','people-panel','chat-panel','chat-empty','lesson-start','lesson-start-time','speaker-strip','speakers',
-        ...(staff ? ['screen-toggle','slot','open','close','close-label','staff-start','toggle-access','room-permissions','access-menu','access-features','access-camera','camera-unavailable','permission-icons',
+        ...(staff ? ['slot','open','close','close-label','staff-start','toggle-access','room-permissions','access-menu','access-features','access-camera','camera-unavailable','pupil-screen-hint','permission-icons',
+            'quality-open','quality-dialog','quality-form','quality-message','quality-save','quality-cancel',
+            ...['teacherCamera','studentCamera','teacherScreen','studentScreen'].map(k=>`quality-${k}`),
             ...['mic','camera','board'].flatMap(f=>[`all-${f}-give`,`all-${f}-cut`])] : ['join'])].map(id => [id,new Element(id)]));
     elements['speaker-strip'].hidden = elements.notice.hidden = true;
     elements['people-panel'].hidden = !staff;
@@ -47,6 +49,15 @@ function fixture(staff, autoSlot = 0) {
     const id=staff?'teacher-1':'student-1';
     const srv={phase:'idle',lesson:'lesson-11',epoch:'epoch-A',ready:true, staffCanJoin:false,seconds:{'student-1':9,'student-2':21},
         hidden:false, chat:[], moving:false, cameraCodec:'vp8',access:{},profiles:{'student-1':{name:'آزمایشی',photo:false},'student-2':{name:'دوم',photo:false}}, schedule:{date, timed:false, choices:autoSlot ? [choice(autoSlot,'ریاضی')] : [choice(11,'ریاضی'),choice(12,'علوم')], next:null}};
+    const levels = () => srv.levels || {teacherCamera:'low',studentCamera:'low',teacherScreen:'low',studentScreen:'low'};
+    const quality = () => {
+        const role = staff ? 'teacher' : 'student', choices = srv.qualityEnabled ? levels() : {};
+        const camera = {low:[128,128,8,25000], medium:[256,256,12,150000], high:[360,360,20,350000]};
+        const screen = {low:[640,360,5,70000], medium:[854,480,10,249000], high:[1280,720,15,500000]};
+        const profile = ([width,height,frameRate,bitrate]) => ({width,height,frameRate,bitrate});
+        return {camera:profile(camera[choices[role+'Camera'] || 'low']),screen:profile(screen[choices[role+'Screen'] || 'low']),
+            ...(staff && srv.qualityEnabled ? {levels:{...choices}} : {})};
+    };
     const person = (identity) => ({identity, name:identity, sid:`PA_${identity}`, permissions:listener, micCalls:[], isMicrophoneEnabled:false,
         isCameraEnabled:false, publications:new Map(), trackPublications:new Map(), getTrackPublication(source) { return this.publications.get(source); },
         async publishTrack(track, opts) {
@@ -78,7 +89,7 @@ function fixture(staff, autoSlot = 0) {
     }
     const fixtureVideo = (source='camera') => ({kind:'video',source,stopped:false, mediaStreamTrack:{addEventListener(){}},
         attach(node) { node.track=this; }, detach(node) { if (node.track===this) node.track=null; }, stop() { this.stopped=true; }});
-    const rawVideo = (settings={width:256,height:144,frameRate:staff?10:8}) => ({readyState:'live',handlers:{},
+    const rawVideo = (settings={width:256,height:144,frameRate:8}) => ({readyState:'live',handlers:{},
         addEventListener(k,f){this.handlers[k]=f;}, stop(){this.readyState='ended';}, getSettings(){return settings;},
         async applyConstraints(constraints){this.limitsApplied=true; this.constraints=constraints;}});
     const stream = raw => ({getVideoTracks:()=>[raw],getTracks:()=>[raw]});
@@ -120,8 +131,7 @@ function fixture(staff, autoSlot = 0) {
                 cameraAttempts++; cameraCaptures.push(opts); return srv.capture ? await srv.capture : stream(rawVideo());
             },async getDisplayMedia(opts) {
                 captures.push(opts); if (srv.screenPrompt) return srv.screenPrompt;
-                const raw={readyState:'live', handlers:{}, addEventListener(k,fn){this.handlers[k]=fn;},stop(){this.readyState='ended';},
-                    getSettings(){return {width:640,height:360,frameRate:2};}};
+                const raw=rawVideo({width:opts.video.width.max,height:opts.video.height.max,frameRate:opts.video.frameRate.max});
                 return {getVideoTracks:()=>[raw],getTracks:()=>[raw]};
             }}},
             ClassroomAttention:choose=>{wakeChoice=choose;return {setLive(...args){wakeStates.push(args);},snapshot(){},expand(){}};},
@@ -145,15 +155,19 @@ function fixture(staff, autoSlot = 0) {
                     const profilesRev=JSON.stringify(srv.profiles);
                     if (input.people) reply.seconds=srv.seconds;
                     if (input.profilesRev!==profilesRev) reply.profiles=srv.profiles;
-                    Object.assign(reply,{admitted:true,profilesRev,chat:srv.chat,board:{rev:1,moving:srv.moving,write:srv.write},
+                    Object.assign(reply,{admitted:true,profilesRev,chat:srv.chat,board:{rev:1,moving:srv.moving,write:srv.write,laser:srv.laser},
                         cameraCodec:srv.cameraCodec,screen:srv.screen || null,
                         wakeMode:srv.wakeMode || 'live',wakeControl:staff && srv.wakeControl !== false});
-                    if (staff) Object.assign(reply,{screenEnabled:!!srv.screenEnabled,access:structuredClone(srv.access),members:Object.fromEntries([lastRoom.localParticipant,
+                    const current = quality();
+                    reply.qualityRev=JSON.stringify(current);
+                    if (input.qualityRev!==reply.qualityRev) reply.quality=current;
+                    if (srv.screenEnabled && (staff || srv.pupilScreenEnabled)) reply.screenEnabled=true;
+                    if (staff) Object.assign(reply,{pupilScreenEnabled:!!srv.pupilScreenEnabled,access:structuredClone(srv.access),members:Object.fromEntries([lastRoom.localParticipant,
                         ...lastRoom.remoteParticipants.values()].map(p=>[p.identity,p.sid]))});
                 }
                 if (srv.afterStatus) await srv.afterStatus();
             } else if (input.action==='board-sync') {
-                if (srv.phase==='live' && input.epoch===srv.epoch) reply.board={rev:1,moving:srv.moving,write:srv.write};
+                if (srv.phase==='live' && input.epoch===srv.epoch) reply.board={rev:1,moving:srv.moving,write:srv.write,laser:srv.laser};
                 else { status=409; reply={ok:false}; }
             } else if(input.action==='open'||input.action==='ticket') {
                 if (input.action === 'open' && srv.phase !== 'live') srv.phase = 'starting';
@@ -174,8 +188,13 @@ function fixture(staff, autoSlot = 0) {
             } else if(input.action==='set-wake') {
                 if (!staff || srv.wakeControl === false) { status=403; reply={ok:false}; }
                 else { srv.wakeMode=input.mode; reply.wakeMode=input.mode; }
+            } else if(input.action==='set-quality') {
+                assert.ok(staff && srv.qualityEnabled);
+                srv.levels=input.levels;
+                reply.quality=quality(); reply.qualityRev=JSON.stringify(reply.quality);
             } else if(input.action==='screen-access') {
-                const p=lastRoom.localParticipant;
+                const p=input.identity ? lastRoom.remoteParticipants.get(input.identity) : lastRoom.localParticipant;
+                if (input.identity) assert.equal(input.targetSid,p.sid);
                 const src=p.permissions.canPublishSources.filter(x=>x!==3);
                 if (input.enabled) { srv.screen={identity:p.identity,sid:p.sid}; src.push(3); }
                 else srv.screen=null;
@@ -194,7 +213,7 @@ function fixture(staff, autoSlot = 0) {
     }
     async function status() {
         const before = requests.filter(r=>r.action==='status').length;
-        for (let i=0;i<12 && requests.filter(r=>r.action==='status').length===before;i++) await time();
+        for (let i=0;i<140 && requests.filter(r=>r.action==='status').length===before;i++) await time();
         assert.ok(requests.filter(r=>r.action==='status').length>before, 'status heartbeat is not starved');
     }
     async function advance(ms) {
@@ -263,7 +282,7 @@ test('a moderator uses icon-only individual toggles and one menu for class permi
     await f.elements['toggle-access'].click();
     assert.equal(f.elements['access-menu'].hidden,false);
     assert.equal(f.elements['access-features'].hidden,false);
-    const toggles = f.controls('student-1');
+    const toggles = f.controls('student-1').filter(button => !button.hidden);
     const [micIcon,camIcon,penIcon] = toggles;
     assert.deepEqual(toggles.map(b=>[b.dataset.feature,b.textContent,b['aria-pressed']]),[['mic','','false'],['camera','','false'],['board','','false']]);
     await micIcon.click(); assert.equal(micIcon.dataset.granted,'true');
@@ -644,15 +663,40 @@ test('a native-looking square that cannot be locked still publishes a fixed-size
     assert.equal(raw.readyState,'ended'); assert.equal(f.crops[0].track.readyState,'ended');
 });
 
-test('staff webcam keeps its earlier profile and uses no crop', async()=>{
+test('staff quality is admin gated, saves four choices, and replaces only the affected capture', async()=>{
     const f=fixture(true); f.srv.phase='live'; await f.time(); await f.time();
+    const button = f.elements['quality-open'], dialog = f.elements['quality-dialog'];
+    assert.equal(button.hidden,true);
     f.change('teacher-1',camera);
-    const raw=f.rawVideo(); f.srv.capture=f.stream(raw);
     await f.elements.camera.click();
-    assert.equal(f.publications[0].track.mediaStreamTrack,raw); assert.equal(f.crops.length,0);
-    assert.deepEqual(raw.getSettings(),{width:256,height:144,frameRate:10});
-    assert.equal(f.publications[0].opts.videoEncoding.maxBitrate,50000);
-    assert.equal(f.publications[0].opts.videoEncoding.maxFramerate,10);
+    const first=f.publications[0];
+    assert.deepEqual(first.track.mediaStreamTrack.getSettings(),{width:128,height:128,frameRate:8});
+    f.srv.qualityEnabled=true; await f.status();
+    assert.equal(button.hidden,false);
+    await button.click(); assert.equal(dialog.open,true);
+    const choices={teacherCamera:'high',studentCamera:'medium',teacherScreen:'low',studentScreen:'high'};
+    for (const [key,value] of Object.entries(choices)) {
+        const field=f.elements['quality-'+key]; assert.equal(field.value,'low'); field.value=value;
+    }
+    await f.elements['quality-form'].handlers.submit({preventDefault(){}});
+    assert.deepEqual(f.requests.find(r=>r.action==='set-quality'),{
+        action:'set-quality', class:22,lesson:'lesson-11',epoch:'epoch-A',sid:'PA_teacher-1',levels:choices,
+    });
+    assert.equal(dialog.open,false); assert.equal(first.track.stopped,true);
+    assert.equal(f.cameraAttempts,1,'no automatic new capture');
+    await f.elements.camera.click();
+    const next=f.publications.at(-1);
+    assert.deepEqual(next.track.mediaStreamTrack.getSettings(),{width:360,height:360,frameRate:20});
+    assert.equal(next.opts.videoEncoding.maxBitrate,350000);
+    assert.equal(next.opts.videoEncoding.maxFramerate,20);
+    assert.equal(next.opts.degradationPreference,'maintain-resolution');
+    await f.status();
+    assert.ok(f.requests.filter(r=>r.action==='status').at(-1).qualityRev);
+    assert.equal(next.track.stopped,false,'not repeating profiles does not stop video');
+    f.srv.levels.studentCamera='low'; await f.status();
+    assert.equal(next.track.stopped,false,'pupil-only change does not affect staff camera');
+    await button.click(); assert.equal(f.elements['quality-teacherCamera'].value,'high');
+    f.srv.phase='paused'; await f.status(); assert.equal(dialog.open,false); assert.equal(next.track.stopped,true);
 });
 
 test('missing square-crop capability fails closed without publishing the raw rectangle',async()=>{
@@ -761,12 +805,12 @@ test('the pilot screen needs two explicit actions, never asks for system audio, 
     await button.click(); assert.equal(button.dataset.prepared,'true'); assert.equal(f.captures.length,0);
     await button.click();
     assert.equal(f.captures.length,1); assert.equal(f.captures[0].audio,false);
-    assert.equal(f.captures[0].video.frameRate.max,2);
+    assert.equal(f.captures[0].video.frameRate.max,5);
     assert.equal(f.captures[0].video.width.max,640);
     assert.equal(f.captures[0].video.height.max,360);
     const {track,opts}=f.publications.at(-1);
     assert.equal(opts.source,'screen_share'); assert.equal(opts.screenShareEncoding.maxBitrate,70000);
-    assert.equal(opts.screenShareEncoding.maxFramerate,2);
+    assert.equal(opts.screenShareEncoding.maxFramerate,5);
     assert.equal(opts.simulcast,false); assert.equal(opts.backupCodec,false);
     assert.equal(track.mediaStreamTrack.contentHint,'detail');
     assert.equal(f.elements['screen-panel'].hidden,false);
@@ -863,4 +907,63 @@ test('a finished bell is a distinct manual repeat choice, never automatic on arr
     await f.elements['toggle-access'].click(); await f.elements.close.click(); await f.time(); await f.time();
     assert.equal(f.requests.filter(r=>r.action==='open').length,1);
     assert.equal(f.requests.find(r=>r.action==='close').lesson,f.srv.lesson);
+});
+
+test('individual pupil screen grant is targeted, opt-in, and never opens the staff picker',async()=>{
+    const f=fixture(true); f.srv.phase='live'; f.srv.screenEnabled=true;
+    await f.time(); await f.time();
+    const button = () => f.controls('student-1').find(item=>item.dataset.feature==='screen');
+    assert.equal(button().hidden,true);
+    f.srv.pupilScreenEnabled=true; await f.status();
+    await button().click();
+    assert.deepEqual(f.requests.find(r=>r.action==='screen-access'),{
+        action:'screen-access',class:22,lesson:'lesson-11',epoch:'epoch-A',sid:'PA_teacher-1',
+        identity:'student-1',targetSid:'PA_student-1',enabled:true,
+    });
+    assert.equal(f.captures.length,0);
+    assert.equal(f.elements['screen-toggle'].disabled,true,'there is only one presenter');
+    assert.equal(button()['aria-pressed'],'true');
+    await button().click();
+    assert.equal(f.requests.filter(r=>r.action==='screen-access').at(-1).enabled,false);
+    assert.equal(f.elements['screen-toggle'].disabled,false);
+});
+
+test('pupil screen needs a matching lease and uses the independent pupil profile',async()=>{
+    const f=fixture(false); Object.assign(f.srv,{phase:'live',screenEnabled:true,pupilScreenEnabled:true,qualityEnabled:true,
+        levels:{teacherCamera:'high',studentCamera:'low',teacherScreen:'low',studentScreen:'high'}});
+    await f.time(); await f.time();
+    const toggle = f.elements['screen-toggle'];
+    f.change('student-1',{canPublish:true,canPublishSources:[3]});
+    assert.equal(toggle.hidden,true); assert.equal(f.elements['quality-open'],undefined);
+    f.srv.screen={identity:'student-1',sid:'PA_stale'}; await f.status();
+    assert.equal(toggle.hidden,true,'a previous connection cannot use an invitation');
+    f.srv.screen={identity:'student-1',sid:f.room.localParticipant.sid}; await f.status();
+    assert.equal(toggle.hidden,false); assert.equal(f.captures.length,0);
+    await toggle.click();
+    const first=f.publications[0];
+    assert.equal(f.captures[0].audio,false);
+    assert.deepEqual(first.track.mediaStreamTrack.getSettings(),{width:1280,height:720,frameRate:15});
+    assert.equal(first.opts.screenShareEncoding.maxBitrate,500000);
+    assert.equal(f.requests.some(r=>r.action==='screen-access'),false,'using an invitation does not grant a second lease');
+    f.srv.levels.studentScreen='medium'; await f.status();
+    assert.equal(first.track.stopped,true); assert.equal(f.captures.length,1);
+    await toggle.click();
+    assert.deepEqual(f.publications[1].track.mediaStreamTrack.getSettings(),{width:854,height:480,frameRate:10});
+    await toggle.click();
+    assert.equal(f.publications[1].track.stopped,true);
+    assert.equal(f.requests.at(-1).enabled,false);
+    assert.equal(toggle.hidden,true);
+});
+
+test('a lingering laser cue does not keep the quick board poll active',async()=>{
+    const f=fixture(false); f.srv.phase='live';
+    f.srv.laser={by:'teacher-1',points:[[1000,2000,950]]};
+    await f.time(); await f.time();
+    let before = f.requests.length;
+    await f.advance(600);
+    assert.equal(f.requests.length,before,'already fading: no new fast poll');
+    f.srv.laser={by:'teacher-1',points:[[2000,2000,1800]]};
+    await f.time(); // Normal read sees the new point.
+    before=f.requests.length; await f.advance(440);
+    assert.ok(f.requests.slice(before).some(r=>r.action==='board-sync'),'fresh movement uses the existing fast channel');
 });

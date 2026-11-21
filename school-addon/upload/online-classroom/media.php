@@ -119,6 +119,22 @@ function cl_media_matches(array $peer, string $identity, array $wanted): bool
     return true;
 }
 
+function cl_screen_enabled(array $cfg, array $lesson): bool
+{
+    return ($cfg['screen_share'] ?? false) === true && ($lesson['camera_codec'] ?? null) === 'vp8';
+}
+
+function cl_pupil_screen_enabled(array $cfg): bool
+{
+    return ($cfg['screen_share'] ?? false) === true && ($cfg['student_screen_share'] ?? false) === true;
+}
+
+function cl_screen_eligible(array $cfg, array $lesson, string $id, string $sid): bool
+{
+    return cl_screen_enabled($cfg, $lesson) && ($lesson['seen'][$id] ?? null) === $sid
+        && (cl_media_identity($id, true) ? cl_pupil_screen_enabled($cfg) : ($lesson['staff'][$id] ?? null) === $sid);
+}
+
 /** Apply the lesson policy to real SFU participants. Listener tickets never carry a reusable publish grant. */
 function cl_sync_media(array $cfg, array $lesson, array $peers, callable $rpc, bool $strict = false): bool
 {
@@ -134,7 +150,7 @@ function cl_sync_media(array $cfg, array $lesson, array $peers, callable $rpc, b
                 if (($feature !== 'camera' || $camera) && cl_access_enabled($lesson, $feature, $id)) $sources[] = $source;
             }
             if (($lesson['screen']['identity'] ?? null) === $id && ($lesson['screen']['sid'] ?? null) === $peer['sid']
-                && ($lesson['staff'][$id] ?? null) === $peer['sid']) $sources[] = 'SCREEN_SHARE';
+                && cl_screen_eligible($cfg, $lesson, $id, $peer['sid'])) $sources[] = 'SCREEN_SHARE';
         }
         // Canonical order also makes a comparison independent of the SFU's enum order.
         $permission = ['canSubscribe'=>true, 'canPublish'=>count($sources)>0, 'canPublishData'=>false,

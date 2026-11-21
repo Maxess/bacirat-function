@@ -23,12 +23,13 @@ function cl_attendance_text(array $lesson, int $student): string
     $id = 'student-' . $student;
     $times = cl_lesson_times($lesson);
     $first = cl_first_presence_clock($lesson, $id);
+    $minutes = static fn(int $seconds): string => cl_persian_digits((string)intdiv(max(0, $seconds), 60));
     return 'حضور در کلاس مجازی — ' . $lesson['roster'][$id] . "\n" . $lesson['class_name'] . ' · ' . $lesson['subject'] . ' · ' . cl_persian_digits($lesson['period'])
         . (isset($lesson['repeat_of']) ? ' · برگزاری مجدد' : '') . "\nتاریخ: " . cl_display_day($lesson['date'])
-        . ($times !== '' ? "\nساعت برگزاری: " . $times : '')
-        . "\nاولین حضور تأییدشده به وقت تهران: " . ($first ?? 'ثبت نشده')
-        . "\nمدت حضور: " . cl_persian_digits(cl_duration($lesson['seconds'][$id] ?? 0))
-        . ' از ' . cl_persian_digits(cl_duration($lesson['active_seconds'])) . "\nزمان انتظار و وقفهٔ کلاس در این مدت منظور نشده است.";
+        . "\nساعت برگزاری: " . ($times !== '' ? $times : 'ثبت نشده')
+        . "\nاولین حضور تأییدشده: " . ($first ?? 'ثبت نشده')
+        . "\nمدت حضور: " . $minutes($lesson['seconds'][$id] ?? 0) . ' دقیقه حضور از '
+        . $minutes($lesson['active_seconds']) . " دقیقه کلاس\nزمان انتظار و وقفهٔ کلاس در این مدت منظور نشده است.";
 }
 
 function cl_delivery_add(ClassroomStore $s, string $lesson, string $type, int $delta = 1): void
