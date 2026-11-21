@@ -72,6 +72,7 @@ cl_json_reply(static function (): array {
                 'startTime'=>isset($lesson['started']) ? cl_tehran_clock($lesson['started']) : null,
                 'joinable'=>$ready && !$expired && cl_joinable($lesson, $actor, $now),
                 'resumable'=>$ready && !$expired && $lesson['phase'] === 'paused' && $lesson['room'] === null];
+            $result += cl_rec_status($s, $cfg, $lesson, $actor);
             if ($allowed) {
                 $result += ['cameraCodec'=>cl_webcam_codec($cfg, $lesson), 'screen'=>cl_screen_state($cfg, $lesson),
                     'wakeMode'=>cl_wake_mode($lesson), 'wakeControl'=>cl_wake_control($lesson, $actor)]
@@ -108,9 +109,11 @@ cl_json_reply(static function (): array {
         if ($action === 'close') {
             if (!cl_is_staff($actor)) throw new ClassroomError(403, 'پایان کلاس فقط برای دبیر یا مسئول مجاز است.');
             if (!$lesson || ($body['lesson'] ?? null) !== $lesson['id']) throw new ClassroomError(409, 'این زنگ دیگر باز نیست.');
+            $decision = cl_rec_close_choice($s, $cfg, $lesson, $actor, $body, $now);
+            if ($lesson['phase'] !== 'closing') $lesson['recording_consent'] = $decision === 'queued';
             cl_close_lesson($s, $cfg, $lesson, $now, $rpc);
             if (!cl_is_friday_test($lesson) && function_exists('mpm_classroom_delivery_after_response')) mpm_classroom_delivery_after_response();
-            return [];
+            return $decision === null ? [] : ['recording'=>$decision];
         }
         $lesson = cl_check_live($cfg, $lesson, $actor, $body, $now);
         if ($action === 'board-sync') {
@@ -124,6 +127,7 @@ cl_json_reply(static function (): array {
         if ($action === 'board-ink') return cl_board_action($s, $lesson, cl_ink_input($lesson, $actor, $body), $action);
         if ($action === 'screen-access') return cl_set_screen($s, $cfg, $lesson, $actor, $body, $now, $rpc);
         if (!cl_is_staff($actor)) throw new ClassroomError(403, 'این عملیات فقط برای دبیر یا مسئول مجاز است.');
+        if ($action === 'start-recording') return cl_rec_start($s, $cfg, $class, $lesson, $actor, $now);
         if ($action === 'set-wake') return cl_set_wake($s, $lesson, $actor, $body);
         if ($action === 'set-quality') return cl_set_quality($s, $cfg, $class, $lesson, $actor, $body, $now);
         if ($action === 'set-access') return cl_set_access($s, $cfg, $lesson, $actor, $body, $now, $rpc);

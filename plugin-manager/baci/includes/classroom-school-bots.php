@@ -59,3 +59,29 @@ function mpm_school_bot_adapter(PDO $db, string $provider, string $siteBase): ?a
         },
     ];
 }
+
+/** Recording delivery is separate from the private attendance adapter and its switches. */
+function mpm_school_recording_bot(PDO $db, string $provider): ?array
+{
+    if (!in_array($provider, ['bale','rubika','telegram'], true) || !is_file(__DIR__ . '/bot_helpers.php')) return null;
+    // Read the current settings, not a cached webhook identity or an old upload job's token.
+    $token = mpm_query($db, 'SELECT key_value FROM settings WHERE key_name=?', [$provider . '_bot_token'])->fetchColumn();
+    if (!is_string($token) || !preg_match('/^[A-Za-z0-9_:\-]{12,180}$/D', $token)) return null;
+    $prefix = match ($provider) {
+        'bale' => "https://tapi.bale.ai/bot$token/",
+        'rubika' => "https://botapi.rubika.ir/v3/$token/",
+        'telegram' => "https://api.telegram.org/bot$token/",
+    };
+    if ($provider === 'telegram') {
+        $base = rtrim(trim((string)mpm_query($db, 'SELECT key_value FROM settings WHERE key_name=?', ['telegram_api_base'])->fetchColumn()), '/');
+        if ($base !== '') {
+            if (!str_contains($base, '://')) $base = 'https://' . $base;
+            $parts = parse_url($base);
+            if (!is_array($parts) || !mpm_hostname($parts['host'] ?? '') || ($parts['scheme'] ?? '') !== 'https'
+                || array_intersect(['user','pass','port','query','fragment'], array_keys($parts))
+                || !preg_match('~^(?:/[A-Za-z0-9_-][A-Za-z0-9_.-]{0,63})*$~D', $parts['path'] ?? '')) return null;
+            $prefix = "$base/bot$token/";
+        }
+    }
+    return ['prefix'=>$prefix,'revision'=>hash('sha256', $prefix)];
+}

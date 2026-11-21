@@ -44,6 +44,9 @@
     const screenToggle = el('screen-toggle'), screenAction = el('screen-action');
     const screenHint = el('screen-hint'), boardScreenHint = el('board-screen-hint');
     const qualityButton = el('quality-open'), qualityDialog = el('quality-dialog');
+    const recordButton = el('record-start'), recordStart = el('record-start-dialog'), recordClose = el('record-close-dialog');
+    const recordNotice = el('recording-notice');
+    let closeIntent = null;
     const qualityFields = ['teacherCamera','studentCamera','teacherScreen','studentScreen'];
     const canCaptureCamera = typeof window.navigator?.mediaDevices?.getUserMedia === 'function';
     const displayPolicy = document.permissionsPolicy ?? document.featurePolicy;
@@ -488,6 +491,11 @@
         el('access-camera').hidden = !state.cameraCodec;
         el('camera-unavailable').hidden = !!state.cameraCodec;
         el('pupil-screen-hint').hidden = state.pupilScreenEnabled !== true;
+        if (recordButton) {
+            recordButton.hidden = !live || state.recording?.start !== true;
+            recordButton.disabled = busy;
+            if (recordButton.hidden && recordStart.open) recordStart.close();
+        }
         if (qualityButton) {
             qualityButton.hidden = !live || !state.quality?.levels;
             qualityButton.disabled = busy;
@@ -563,6 +571,15 @@
         const live = hasAccess();
         const phase = state.phase;
         const connectingNow = connecting || (!!active && !live);
+        const recording = state.recording;
+        if (recordNotice) {
+            const text = recording?.notice === 'live' ? 'کلاس در حال ضبط است'
+                : recording?.notice === 'preparing' ? 'ضبط کلاس روشن است؛ آماده‌سازی یا انتظار'
+                : recording?.notice === 'stopped' ? 'ضبط متوقف شد و فیلم ارسال نمی‌شود؛ وضعیت سرویس و گروه را بررسی کن.' : '';
+            put(recordNotice, text);
+            recordNotice.hidden = !text;
+        }
+        if (recordClose?.open && closeIntent?.lesson !== state.lesson) recordClose.close();
         el('live-panel').hidden = !live;
         el('waiting').hidden = live;
         root.dataset.live = live ? 'yes' : 'no';
@@ -584,7 +601,7 @@
             const test = (currentSlot || slot.value) === fridaySlot;
             el('open').textContent = test ? 'ورود به آزمایش جمعه' : phase === 'paused' ? 'ادامهٔ زنگ' : currentSlot ? 'پیوستن به زنگ'
                 : isRepeatSlot(slot.value) ? 'برگزاری مجدد زنگ' : 'شروع زنگ';
-            const end = currentSlot === fridaySlot ? 'بستن اتاق آزمایشی برای همه' : 'پایان کلاس برای همه';
+            const end = currentSlot === fridaySlot ? 'بستن اتاق آزمایشی برای همه' : 'بستن کلاس برای همه';
             put(el('close-label'), end);
             el('close').title = end;
             el('close').hidden = !state.lesson || phase === 'reserved';
@@ -1202,19 +1219,66 @@
             el(`all-${feature}-give`).addEventListener('click', () => changeAccess(feature,true));
             el(`all-${feature}-cut`).addEventListener('click', () => changeAccess(feature,false));
         }
-        el('close').addEventListener('click', () => {
-            const test = state.slot === fridaySlot;
-            if (!state.lesson || !window.confirm(test ? 'اتاق آزمایشی برای همه بسته شود؟ تا پایان جمعه می‌توان دوباره آن را باز کرد.' : 'کلاس برای همه پایان یابد و گزارش حضور ثبت شود؟')) return;
+        if (recordButton) {
+            recordButton.addEventListener('click', () => {
+                if (!hasAccess() || busy || !state.recording?.start) return;
+                setAccessMenu(false);
+                recordStart.showModal();
+            });
+            el('record-start-cancel').addEventListener('click', () => recordStart.close());
+            recordStart.addEventListener('close', () => el('toggle-access').focus());
+            el('record-start-yes').addEventListener('click', () => {
+                recordStart.close();
+                run(async () => {
+                    if (!hasAccess() || !state.recording?.start) return;
+                    const local = scope();
+                    const result = await api('start-recording',local);
+                    if (state.lesson === local.lesson) state = {...state,recording:result.recording};
+                    refresh();
+                });
+            });
+            el('record-close-cancel').addEventListener('click', () => recordClose.close());
+            recordClose.addEventListener('close', () => { closeIntent = null; el('toggle-access').focus(); });
+            for (const [id,sendRecording] of [['record-close-yes',true],['record-close-no',false]]) {
+                el(id).addEventListener('click', () => {
+                    const intent = closeIntent;
+                    recordClose.close();
+                    if (intent && state.lesson === intent.lesson) finishClass(intent.lesson,false,{recording:intent.recording,sendRecording});
+                });
+            }
+        }
+        function finishClass(lesson, test, choice = {}) {
             run(async () => {
                 setAccessMenu(false, true);
+                const wasWanted = wanted;
                 wanted = false; optedIntoTest = false; flow++;
-                const response = api('close',{lesson:state.lesson});
+                let reply;
+                try { reply = await api('close',{lesson,...choice}); }
+                catch (error) { wanted = wasWanted; refresh(); throw error; }
                 release(active,true);
-                await response;
                 state = {phase:'idle', ready:null};
                 syncSlots();
-                note(test ? 'اتاق آزمایشی بسته شد؛ گزارشی ثبت نشد.' : 'زنگ پایان یافت؛ گزارش حضور در پنل ثبت شد.'); refresh();
+                note(test ? 'اتاق آزمایشی بسته شد؛ گزارشی ثبت نشد.' : reply.recording === 'queued'
+                    ? 'زنگ پایان یافت؛ فیلم برای ارسال به گروه کلاس در صف قرار گرفت.' : reply.recording === 'discarded'
+                    ? 'زنگ پایان یافت؛ فیلم ارسال نمی‌شود و نسخهٔ موقت حذف خواهد شد.' : 'زنگ پایان یافت؛ گزارش حضور در پنل ثبت شد.');
+                refresh();
             });
+        }
+        el('close').addEventListener('click', () => {
+            const {lesson,recording} = state;
+            const test = state.slot === fridaySlot;
+            if (!lesson || busy) return;
+            if (recording?.confirm && recordClose) {
+                closeIntent = {lesson,recording:recording.id};
+                put(el('record-close-help'), recording.canSend
+                    ? `مقصد: ${recording.messenger} — ${recording.group}. «خیر» کلاس را بدون ارسال فیلم می‌بندد.`
+                    : 'فقط دبیر همین زنگ می‌تواند فیلم را ارسال کند. با «خیر» کلاس بدون ارسال بسته می‌شود.');
+                el('record-close-yes').disabled = recording.canSend !== true;
+                setAccessMenu(false);
+                recordClose.showModal();
+            } else if (window.confirm(test ? 'اتاق آزمایشی برای همه بسته شود؟ تا پایان جمعه می‌توان دوباره آن را باز کرد.' : 'کلاس برای همه پایان یابد و گزارش حضور ثبت شود؟')) {
+                finishClass(lesson,test);
+            }
         });
     } else el('join').addEventListener('click', () => { wanted = true; retryAt = 0; note(); render(); refresh(); });
     window.addEventListener('pagehide', () => { stopped = true; clearTimeout(pollTimer); release(active,true); });

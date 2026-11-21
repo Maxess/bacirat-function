@@ -3,6 +3,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/school.php';
 require_once __DIR__ . '/store.php';
 require_once __DIR__ . '/quality.php';
+require_once __DIR__ . '/recording.php';
 
 const CL_SAMPLE_TTL = 11;
 const CL_SAMPLE_INTERVAL = 3;
@@ -364,7 +365,7 @@ function cl_observe(array $lesson, array $observed, array $staff, int $at, int $
 function cl_room_presence(array $lesson, int $now, callable $rpc, array &$peers): array
 {
     $room = $lesson['room'];
-    $peers = cl_live_media_peers($rpc('ListParticipants', $room, ['room'=>$room]));
+    $peers = cl_live_media_peers($rpc('ListParticipants', $room, ['room'=>$room]), $lesson['recorder'] ?? null);
     $people = [];
     foreach ($peers as $id=>$p) {
         $sid = $p['sid'];
@@ -494,7 +495,7 @@ function cl_set_access(ClassroomStore $s, array $cfg, array $lesson, array $acto
     if ($feature !== 'board') {
         try {
             $room = $lesson['room'];
-            if ($identity === null) $peers = cl_live_media_peers($rpc('ListParticipants', $room, ['room'=>$room]));
+            if ($identity === null) $peers = cl_live_media_peers($rpc('ListParticipants', $room, ['room'=>$room]), $lesson['recorder'] ?? null);
             else {
                 // Confirm that the live SFU identity has not already reconnected with a different SID.
                 $peer = $rpc('UpdateParticipant', $room, ['room'=>$room,'identity'=>$identity]);
@@ -606,7 +607,7 @@ function cl_set_screen(ClassroomStore $s, array $cfg, array $lesson, array $acto
         // Persist denial before calling the SFU; its next presence sample can retry a failed release.
         $s->put('lesson', $lesson['id'], $lesson);
     }
-    $peers = cl_live_media_peers($rpc('ListParticipants', $room, ['room'=>$room]));
+    $peers = cl_live_media_peers($rpc('ListParticipants', $room, ['room'=>$room]), $lesson['recorder'] ?? null);
     if ($enable) {
         if (($peers[$id]['sid'] ?? null) !== $sid) throw new ClassroomError(409, 'اتصال ارائه‌دهنده عوض شده است.');
         if (!$owner && !cl_sync_media($cfg, $lesson, $peers, $rpc, true)) throw cl_media_bad_reply();
@@ -625,12 +626,13 @@ function cl_finish_lesson(ClassroomStore $s, array $cfg, array $lesson, int $now
 {
     $s->tx(static function () use ($s, $cfg, $lesson, $now) {
         $id = $lesson['id'];
+        cl_rec_finish($s, $cfg, $lesson);
         $s->delete('active', (string)$lesson['class_id']);
         if (cl_is_friday_test($lesson) || $lesson['started'] === null) {
             $s->delete('lesson', $id);
         } else {
             $lesson['ended'] = min($now, $lesson['deadline']);
-            foreach (['sample','transport_at','room','pulses','seen','staff','deadline','last_attempt','event_received','profiles','profiles_at','access','camera_codec','media_pending','screen','screen_used','wake_mode'] as $key) unset($lesson[$key]);
+            foreach (['sample','transport_at','room','pulses','seen','staff','deadline','last_attempt','event_received','profiles','profiles_at','access','camera_codec','media_pending','screen','screen_used','wake_mode','recorder','recording_consent'] as $key) unset($lesson[$key]);
             $lesson['phase'] = 'finished';
             $s->put('lesson', $id, $lesson);
             $key = sprintf('%012d:%s', $lesson['created'], $id);

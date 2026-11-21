@@ -88,18 +88,27 @@ function cl_webcam_codec(array $cfg, array $lesson): ?string
     return ($cfg['camera_share'] ?? false) === true ? ($lesson['camera_codec'] ?? null) : null;
 }
 
-function cl_live_media_peers(array $reply): array
+function cl_live_media_peers(array $reply, ?string $recorder = null): array
 {
     $people = array_key_exists('participants', $reply) ? $reply['participants'] : [];
-    if (!is_array($people) || !array_is_list($people) || count($people) > 60) throw cl_media_bad_reply();
+    if (!is_array($people) || !array_is_list($people) || count($people) > ($recorder === null ? 60 : 61)) throw cl_media_bad_reply();
     $peers = [];
     foreach ($people as $person) {
         if (!is_array($person)) throw cl_media_bad_reply();
         if (!in_array($person['state'] ?? null, ['ACTIVE', 2], true)) continue;
         $id = $person['identity'] ?? null;
+        // A scoped, hidden SFU recorder is never admitted as school staff, a pupil,
+        // or a publishing peer. Unexpected identities still fail closed.
+        if ($recorder !== null && $id === $recorder && preg_match('/^recorder-[a-f0-9]{32}$/D', $id)) {
+            $grant = cl_media_permission($person, $id);
+            if (!$grant['hidden'] || !$grant['recorder'] || !$grant['canSubscribe'] || $grant['canPublish']
+                || $grant['canPublishData'] || ($person['tracks'] ?? []) !== []) throw cl_media_bad_reply();
+            continue;
+        }
         if (!cl_media_identity($id) || !cl_sid($person['sid'] ?? null) || isset($peers[$id])) throw cl_media_bad_reply();
         $peers[$id] = $person;
     }
+    if (count($peers) > 60) throw cl_media_bad_reply();
     return $peers;
 }
 

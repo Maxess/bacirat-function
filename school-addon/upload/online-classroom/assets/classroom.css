@@ -400,3 +400,8 @@ body:has(.board-card.expanded) { overflow: hidden; }
 /* Webcam tiles and the presenter can coexist with the board; files remain opt-in. */
 .board-file-receive { display: flex; flex-wrap: wrap; align-items: center; gap: .3rem .6rem; padding: .4rem .7rem; color: var(--muted); font-size: .82rem; }
 .board-file-receive { border-bottom: 1px solid var(--edge); }
+
+/* Keep the recording notice legible in the waiting room and at narrow widths. */
+.recording-notice { flex: 1 0 100%; margin: 0; padding: .25rem .6rem; border-radius: .55rem;
+    background: #491f2a; color: #ffe2e6; font-size: .8rem; font-weight: 700; }
+.recording-notice::before { content: '●'; color: #ff8e9b; margin-inline-end: .35rem; }

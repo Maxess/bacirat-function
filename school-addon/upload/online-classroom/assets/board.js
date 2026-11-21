@@ -662,7 +662,7 @@
             showRemoteLaser(next.rev < targetRev ? null : next.laser, requestedAt);
             if (reloadDoc) {
                 clearDocument();
-                fileWanted = !!next.doc && next.doc.mime !== 'application/pdf' && next.doc.bytes <= autoImageLimit;
+                fileWanted = !!next.doc && (options.autoReceive === true || (next.doc.mime !== 'application/pdf' && next.doc.bytes <= autoImageLimit));
             }
             if (changedPaper) {
                 // Do not briefly show a page from the previous document during parsing.

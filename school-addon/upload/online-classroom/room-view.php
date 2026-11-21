@@ -20,6 +20,7 @@ function cl_room_icon(string $name): string
         'people' => '<circle cx="9" cy="7.5" r="3"/><path d="M2.5 20v-2a4 4 0 0 1 4-4h5a4 4 0 0 1 4 4v2M16 5a3 3 0 0 1 0 6m2 3a4 4 0 0 1 3.5 4v2"/>',
         'chat' => '<path d="M21 11.5A8.5 8.5 0 0 1 12.5 20H5l1.3-3A8.5 8.5 0 1 1 21 11.5ZM8 10h8m-8 4h5"/>',
         'exit' => '<path d="M10 4H5a1 1 0 0 0-1 1v14a1 1 0 0 0 1 1h5m-1-8h12m-4-4 4 4-4 4"/>',
+        'record' => '<circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="3" fill="currentColor"/>',
         'finish' => '<rect x="5" y="5" width="14" height="14" rx="2"/>',
         'pen' => '<path d="m3 21 1-5L16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 2Zm11-15 3 3"/>',
         'erase' => '<path d="m8 20-5-5a2.1 2.1 0 0 1 0-3L12 3a2.1 2.1 0 0 1 3 0l5 5a2.1 2.1 0 0 1 0 3l-9 9m-4-12 8 8m-7 4h13"/>',
@@ -86,11 +87,12 @@ function cl_room_icon(string $name): string
                         <p class="access-hint" id="pupil-screen-hint" hidden>برای اجازهٔ اشتراک صفحه، دکمهٔ کنار نام دانش‌آموز را بزن. در هر لحظه فقط یک نفر می‌تواند ارائه کند.</p>
                     </div>
                     <div class="access-actions">
+                        <button type="button" id="record-start" class="icon-button" aria-haspopup="dialog" aria-controls="record-start-dialog" hidden><?= cl_room_icon('record') ?><span>ضبط کلاس</span></button>
                         <?php if (cl_quality_enabled($cfg)): ?>
                         <button type="button" id="quality-open" class="icon-button" aria-haspopup="dialog" aria-controls="quality-dialog" hidden><?= cl_room_icon('settings') ?><span>تنظیمات</span></button>
                         <?php endif; ?>
                         <a id="leave" class="icon-button leave-button" href="<?= cl_html(cl_site_href($panel)) ?>" title="بازگشت به پنل بدون بستن کلاس برای دیگران"><?= cl_room_icon('exit') ?><span>خروج از اتاق</span></a>
-                        <button type="button" id="close" class="icon-button finish-button" hidden><?= cl_room_icon('finish') ?><span id="close-label">پایان کلاس برای همه</span></button>
+                        <button type="button" id="close" class="icon-button finish-button" hidden><?= cl_room_icon('finish') ?><span id="close-label">بستن کلاس برای همه</span></button>
                     </div>
                 </div>
             </div>
@@ -99,8 +101,22 @@ function cl_room_icon(string $name): string
             <a id="leave" class="icon-button leave-button" href="<?= cl_html(cl_site_href($panel)) ?>" aria-label="خروج از اتاق" title="خروج از اتاق و بازگشت به پنل"><?= cl_room_icon('exit') ?><span>خروج</span></a>
             <?php endif; ?>
         </div>
+        <p id="recording-notice" class="recording-notice" role="status" hidden></p>
         <?php if (!$staff): ?><p id="screen-hint" class="screen-hint" role="status" hidden></p><?php endif; ?>
     </header>
+    <?php if ($staff): ?>
+    <dialog class="quality-dialog" id="record-start-dialog" aria-labelledby="record-start-title" aria-describedby="record-start-help">
+        <h2 id="record-start-title">ضبط کلاس</h2>
+        <p id="record-start-help">صدای میکروفون‌ها، تصویر دوربین‌ها و صفحهٔ مشترکِ فعال، به همراه تخته و PDF ضبط می‌شود؛ نه چت یا فهرست حاضران. همه نشان ضبط را می‌بینند. فقط با تأیید دبیر هنگام بستن کلاس، فیلم به گروه تعیین‌شدهٔ مدرسه ارسال می‌شود.</p>
+        <div class="actions"><button type="button" id="record-start-yes">شروع ضبط</button><button type="button" class="secondary" id="record-start-cancel" autofocus>انصراف</button></div>
+    </dialog>
+    <dialog class="quality-dialog" id="record-close-dialog" aria-labelledby="record-close-title" aria-describedby="record-close-help">
+        <h2 id="record-close-title">آیا فیلم ضبط شده از کلاس در پیامرسان ارسال شود ؟</h2>
+        <p id="record-close-help"></p>
+        <div class="actions"><button type="button" id="record-close-yes">بله</button><button type="button" class="secondary" id="record-close-no">خیر</button>
+            <button type="button" class="secondary" id="record-close-cancel" autofocus>انصراف از بستن کلاس</button></div>
+    </dialog>
+    <?php endif; ?>
     <?php if ($staff && cl_quality_enabled($cfg)): ?>
     <dialog class="quality-dialog" id="quality-dialog" aria-labelledby="quality-title" aria-describedby="quality-help">
         <form id="quality-form">

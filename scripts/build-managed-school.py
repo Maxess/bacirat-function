@@ -16,8 +16,8 @@ HOST = ROOT / 'plugin-manager'
 SRC = ROOT / 'school-addon/upload/online-classroom'
 LEGACY = ARTIFACTS / 'school-classroom-pilot-v0.1.0.zip'
 LEGACY_SHA = 'bebc35a02f57346880373a034ee493b757a8017a12812a133ab957358d9de161'
-VERSION = '0.4.15'
-MANAGER_VERSION = '0.1.21'
+VERSION = '0.4.16'
+MANAGER_VERSION = '0.1.22'
 BACI = HOST / 'baci'
 BACI_PATCH = 'baci-4.221.0-e0f3f686.patch'
 BACI_FILES = ('other-settings.php', 'includes/header.php', 'includes/footer.php', 'includes/management_hub.php',
@@ -92,7 +92,7 @@ def plugin_entries(pdf_archive):
     files = {name: (SRC / name).read_bytes() for name in (
         'index.php', 'core.php', 'calendar.php', 'api.php', 'deactivate.php', 'media.php', 'school.php', 'store.php', 'lesson.php',
         'activity.php', 'content.php', 'events.php', 'reports.php', 'notifications.php', 'job.php', 'room-view.php',
-        'quality.php', 'video-presets.json',
+        'quality.php', 'video-presets.json', 'recording.php', 'recording-api.php', 'recordings-view.php',
         'assets/classroom.js', 'assets/classroom.css', 'assets/board.js', 'assets/room-attention.js',
     )}
     if hashlib.sha256(LEGACY.read_bytes()).hexdigest() != LEGACY_SHA:
@@ -106,9 +106,9 @@ def plugin_entries(pdf_archive):
         'format': 1, 'id': 'school-classroom', 'version': VERSION, 'title': 'کلاس مجازی',
         'menus': {role: 'کلاس مجازی' for role in ('student', 'teacher', 'admin', 'deputy')},
         'report_menus': {role: 'حضور و غیاب کلاس مجازی' for role in ('teacher', 'admin', 'deputy')},
-        'routes': {'page': 'index.php', 'api': 'api.php', 'content': 'content.php', 'events': 'events.php', 'job': 'job.php'},
+        'routes': {'page': 'index.php', 'api': 'api.php', 'content': 'content.php', 'events': 'events.php', 'job': 'job.php', 'recording': 'recording-api.php'},
         'store': True, 'pdf_resources': 'assets/pdf-resources.zip',
-        'preserve_settings_from': ['0.2.0', '0.2.1', '0.2.2', '0.2.3', '0.3.0', '0.4.0', '0.4.1', '0.4.2', '0.4.3', '0.4.4', '0.4.5', '0.4.6', '0.4.7', '0.4.8', '0.4.9', '0.4.10', '0.4.11', '0.4.12', '0.4.13', '0.4.14'],
+        'preserve_settings_from': ['0.2.0', '0.2.1', '0.2.2', '0.2.3', '0.3.0', '0.4.0', '0.4.1', '0.4.2', '0.4.3', '0.4.4', '0.4.5', '0.4.6', '0.4.7', '0.4.8', '0.4.9', '0.4.10', '0.4.11', '0.4.12', '0.4.13', '0.4.14', '0.4.15'],
         'hooks': {'deactivate': 'deactivate.php'},
         'settings': [
             {'key': 'signal_url', 'type': 'wss', 'label': 'آدرس رسانه (wss://)'},
@@ -121,6 +121,8 @@ def plugin_entries(pdf_archive):
             {'key': 'room_video_quality', 'type': 'switch', 'label': 'اجازهٔ تغییر کیفیت تصویر در اتاق هر کلاس (دبیر یا مسئول مجاز)'},
             *default_video_settings(presets),
             *video_settings(presets),
+            {'key': 'record_lessons', 'type': 'switch', 'label': 'ضبط اختیاری کلاس با سرویس جداگانهٔ VPS'},
+            {'key': 'recording_secret', 'type': 'secret', 'label': 'کلید مستقل سرویس ضبط (فقط برای ضبط؛ متفاوت از کلید رسانه)', 'min': 32, 'max': 128},
             {'key': 'repeat_bells', 'type': 'switch', 'label': 'اجازهٔ برگزاری مجدد زنگ پایان‌یافته در همان روز (دستی، با گزارش جدا)'},
             {'key': 'notify_school_bale', 'type': 'switch', 'label': 'ارسال حضور به گفت‌وگوهای خصوصی ربات بله'},
             {'key': 'notify_school_telegram', 'type': 'switch', 'label': 'ارسال حضور به گفت‌وگوهای خصوصی ربات تلگرام'},
@@ -177,7 +179,15 @@ def main():
             for name in ('README-fa.md', 'WEBHOOK-fa.md', 'install.py', 'admission.py')},
         f'patches/{BACI_PATCH}': (HOST / 'patches' / BACI_PATCH).read_bytes(),
     })
-    bundle = {name: (opts.output_dir / name).read_bytes() for name in (upgrade, classroom)}
+    recorder = f'baci-classroom-recorder-v{VERSION}.zip'
+    recorder_src = ROOT / 'server/recorder'
+    write_zip(opts.output_dir / recorder, {
+        **{name: (recorder_src / name).read_bytes() for name in ('README-fa.md', 'requirements.txt',
+            'recording.py', 'capture.py', 'transport.py', 'view.html', 'view.css', 'view.js', 'school-classroom-recorder.service')},
+        **{name: entries[f'assets/{name}'] for name in (
+            'livekit-client.umd.js', 'livekit-client.LICENSE.txt', 'board.js', 'pdf-resources.zip', 'pdf.LICENSE.txt')},
+    })
+    bundle = {name: (opts.output_dir / name).read_bytes() for name in (upgrade, classroom, recorder)}
     checksums = ''.join(f'{hashlib.sha256(data).hexdigest()}  {name}\n' for name, data in bundle.items())
     write_zip(opts.output_dir / f'baci-classroom-upgrade-v{VERSION}.zip', {
         **bundle, 'START-HERE-fa.txt': (ROOT / 'docs/baci-classroom-upgrade.fa.txt').read_bytes(),

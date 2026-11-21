@@ -430,3 +430,65 @@ function cl_clear_files(string $id): void
         error_log('School classroom: private attachment cleanup not confirmed');
     }
 }
+
+
+/** Open the server-selected attachment while the caller still holds the class lock. */
+function cl_board_file(array $lesson, array $state, string $key): array
+{
+    if (!preg_match('/^[a-f0-9]{32}$/D', $key) || !isset($state['docs'][$key])) throw new ClassroomError(404, '');
+    $dir = cl_lesson_dir($lesson['id'], false);
+    $path = $dir ? $dir . '/' . $key : null;
+    if (!$path || is_link($path) || !is_file($path) || realpath($path) !== $path || !($fp = @fopen($path, 'rb'))) throw new ClassroomError(404, '');
+    return [$state['docs'][$key], $fp];
+}
+
+function cl_reply_board_file(array $doc, $file): void
+{
+    $size = $doc['bytes'];
+    $pdf = $doc['mime'] === 'application/pdf';
+    $range = $_SERVER['HTTP_RANGE'] ?? null;
+    $spans = [[0, $size-1]];
+    if ($pdf) {
+        // Preserve the representation and offsets, including on hosts that gzip PHP output.
+        ini_set('zlib.output_compression', '0');
+        header('Cache-Control: no-store, private, no-transform');
+        header('Accept-Ranges: bytes');
+        if ($range !== null) {
+            $spans = cl_pdf_ranges($range, $size);
+            if (!$spans) {
+                header('Content-Range: bytes */' . $size);
+                throw new ClassroomError(416, '');
+            }
+            http_response_code(206);
+        }
+    }
+    header('Content-Disposition: attachment; filename="' . ($pdf ? 'board.pdf' : 'board-image') . '"');
+    if (count($spans) === 1) {
+        [$start,$end] = $spans[0];
+        $length = $end - $start + 1;
+        header('Content-Type: ' . $doc['mime']);
+        if ($pdf && $range !== null) header("Content-Range: bytes $start-$end/$size");
+        header('Content-Length: ' . $length);
+        cl_file_span($file, $start, $length);
+    } else {
+        $boundary = 'baci-' . bin2hex(random_bytes(12));
+        $tail = "--$boundary--\r\n";
+        $length = strlen($tail);
+        $parts = [];
+        foreach ($spans as [$start,$end]) {
+            $head = "--$boundary\r\nContent-Type: application/pdf\r\nContent-Range: bytes $start-$end/$size\r\n\r\n";
+            $bytes = $end - $start + 1;
+            $parts[] = [$head,$start,$bytes];
+            $length += strlen($head) + $bytes + 2;
+        }
+        header('Content-Type: multipart/byteranges; boundary=' . $boundary);
+        header('Content-Length: ' . $length);
+        foreach ($parts as [$head,$start,$bytes]) {
+            if (connection_aborted()) return;
+            echo $head;
+            cl_file_span($file, $start, $bytes);
+            echo "\r\n";
+        }
+        echo $tail;
+    }
+}

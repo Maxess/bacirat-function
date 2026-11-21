@@ -37,6 +37,10 @@ class AdmissionTests(unittest.TestCase):
         for grant in ({'canPublish': True}, {'canPublish': None}, {'canPublishData': True}, {'roomAdmin': True}, {'roomJoin': False}):
             self.assertFalse(admit(self.headers(self.token(grant)), self.config, self.now))
 
+    def test_recorder_token_cannot_enter_through_public_signaling(self):
+        recorder = self.token({'hidden': True, 'recorder': True}, sub='recorder-'+'a'*32)
+        self.assertFalse(admit(self.headers(recorder), self.config, self.now))
+
     def test_invalid_credentials_and_origins(self):
         token = self.token()
         for candidate in ('', 'x.y.z', self.token(exp=self.now), self.token(nbf=self.now+1), self.token(sub='rogue'), self.token(iss='other')):

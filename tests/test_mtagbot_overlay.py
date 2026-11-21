@@ -19,9 +19,10 @@ REPLACED = ['includes/header.php', 'includes/management_hub.php', 'includes/stud
 RESTORED = ['other-settings.php', 'includes/footer.php']
 ADDED = ['includes/classroom-school-bots.php', 'school-classroom-settings.php']
 CALENDAR = ROOT / 'school-addon/upload/online-classroom/calendar.php'
-BUNDLE = 'baci-classroom-upgrade-v0.4.15.zip'
-UPDATE = 'baci-plugin-manager-update-v0.1.21.zip'
-CLASSROOM = 'school-classroom-plugin-v0.4.15.zip'
+BUNDLE = 'baci-classroom-upgrade-v0.4.16.zip'
+UPDATE = 'baci-plugin-manager-update-v0.1.22.zip'
+CLASSROOM = 'school-classroom-plugin-v0.4.16.zip'
+RECORDER = 'baci-classroom-recorder-v0.4.16.zip'
 
 
 def check_patch(test, upstream, overlay, paths, patch, verify_pin=False):
@@ -43,7 +44,7 @@ def check_patch(test, upstream, overlay, paths, patch, verify_pin=False):
 
 class BaciOverlayTest(unittest.TestCase):
     def test_archives_ship_the_pinned_baci_overlay_and_no_watcher_or_bot_credentials(self):
-        with ZipFile(ROOT / 'artifacts/baci-plugin-manager-v0.1.21.zip') as site:
+        with ZipFile(ROOT / 'artifacts/baci-plugin-manager-v0.1.22.zip') as site:
             for path in REPLACED + RESTORED + ADDED + ['UPSTREAM.json']:
                 self.assertEqual(site.read(path), (BACI / path).read_bytes())
             self.assertEqual(site.read('includes/classroom-calendar.php'), CALENDAR.read_bytes())
@@ -75,6 +76,8 @@ class BaciOverlayTest(unittest.TestCase):
             self.assertIn('0.4.12', manifest['preserve_settings_from'])
             self.assertIn('0.4.13', manifest['preserve_settings_from'])
             self.assertIn('0.4.14', manifest['preserve_settings_from'])
+            self.assertIn('0.4.15', manifest['preserve_settings_from'])
+            self.assertEqual(manifest['routes']['recording'], 'recording-api.php')
             presets = json.loads(plugin.read('video-presets.json'))
             fields_by_key = {field['key']: field for field in manifest['settings']}
             self.assertEqual(presets['camera']['sizes'], [f'{n}x{n}' for n in (32,64,128,256,360,480)])
@@ -114,17 +117,22 @@ class BaciOverlayTest(unittest.TestCase):
             self.assertEqual(fields['bell_hours'], 'bell-hours')
             self.assertEqual(fields['friday_test'], 'friday-test')
 
-    def test_download_bundle_contains_the_two_unchanged_install_archives(self):
+    def test_download_bundle_contains_site_archives_and_separate_vps_recorder(self):
         with ZipFile(ROOT / 'artifacts' / BUNDLE) as bundle:
-            self.assertEqual(set(bundle.namelist()), {UPDATE, CLASSROOM, 'START-HERE-fa.txt', 'SHA256SUMS.txt'})
+            self.assertEqual(set(bundle.namelist()), {UPDATE, CLASSROOM, RECORDER, 'START-HERE-fa.txt', 'SHA256SUMS.txt'})
             notes = bundle.read('START-HERE-fa.txt').decode('utf-8')
             self.assertIn('هر ۱۰ فایل', notes)
             self.assertIn('بدون بازکردن', notes)
             hashes = dict(line.split('  ')[::-1] for line in bundle.read('SHA256SUMS.txt').decode('ascii').splitlines())
-            for name in (UPDATE, CLASSROOM):
+            for name in (UPDATE, CLASSROOM, RECORDER):
                 archive_bytes = bundle.read(name)
                 self.assertEqual(archive_bytes, (ROOT / 'artifacts' / name).read_bytes())
                 self.assertEqual(hashlib.sha256(archive_bytes).hexdigest(), hashes[name])
+            with ZipFile(BytesIO(bundle.read(RECORDER))) as recorder, ZipFile(BytesIO(bundle.read(CLASSROOM))) as classroom:
+                for entry in ('board.js', 'livekit-client.umd.js', 'pdf-resources.zip'):
+                    self.assertEqual(recorder.read(entry), classroom.read('assets/' + entry))
+                self.assertIn('school-classroom-recorder.service', recorder.namelist())
+                self.assertNotIn('config.json', recorder.namelist())
 
     @unittest.skipUnless(os.environ.get('MPM_TEST_BACI'), 'set MPM_TEST_BACI to the extracted, unmodified Baci Release_V1.15-Site.zip')
     def test_pinned_baci_patch_matches_replacements_and_can_be_reversed(self):

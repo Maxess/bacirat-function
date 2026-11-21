@@ -14,6 +14,10 @@ try {
     $cfg = cl_config();
     $s = cl_store();
     $view = $_GET['view'] ?? 'classes';
+    if ($view === 'recordings') {
+        require __DIR__ . '/recordings-view.php';
+        return;
+    }
     if ($view === 'reports') {
         try { $year = cl_current_year($s->db); } catch (ClassroomError $ignored) {} // Historical reports remain readable by authorized staff.
         $actor = cl_school_user($s->db, $_SESSION ?? [], $year);

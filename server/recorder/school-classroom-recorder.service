@@ -1,0 +1,31 @@
+[Unit]
+Description=Baci classroom recording and group delivery
+Wants=network-online.target
+After=network-online.target school-classroom-sfu.service
+
+[Service]
+Type=simple
+User=school-recorder
+Group=school-recorder
+WorkingDirectory=/opt/school-classroom-recorder
+LoadCredential=config.json:/etc/school-classroom-recorder.json
+Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/school-classroom-recorder/browsers
+ExecStart=/opt/school-classroom-recorder/venv/bin/python -Esu /opt/school-classroom-recorder/recording.py ${CREDENTIALS_DIRECTORY}/config.json
+StateDirectory=school-classroom-recorder
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/school-classroom-recorder
+KillMode=mixed
+TimeoutStopSec=35
+Restart=on-failure
+RestartSec=5
+CPUWeight=40
+MemoryMax=1600M
+TasksMax=300
+
+[Install]
+WantedBy=multi-user.target

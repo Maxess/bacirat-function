@@ -81,6 +81,7 @@ try {
     $square = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.13.zip';
     $quality = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.14.zip';
     $defaults = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.15.zip';
+    $recordings = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.16.zip';
     $menus = static fn() => [file_get_contents($root . '/other-settings.php'), file_get_contents($root . '/includes/header.php')];
     $managerMenus = [$other, $header];
     expect($menus() === $managerMenus, 'initialization does not rewrite the host');
@@ -477,7 +478,47 @@ try {
     expect(array_intersect_key($updated,$configured)==$configured && $updated['room_video_quality']===false
         && $updated['student_screen_share'] && $updated['bell_hours']===$hours && $updated['api_secret']===$secret,
         'save all school defaults while room editing is off without changing the other options');
+    // The real packaged routes reject students, stale forms and unsigned workers.
+    $beforeRecordingCipher = mpm_owned_row($db,$row)['settings'];
+    submit($db,$site,'disable');
+    expect(mpm_install($db,$dir,$recordings), 'in-place recording release upgrade');
+    $row = mpm_row($db,$slug);
+    expect($row['version'] === '0.4.16' && mpm_check_store($db,$row) === $store
+        && mpm_owned_row($db,$row)['settings'] === $beforeRecordingCipher,
+        'recording is opt-in and migration does not touch historic data or configurations');
+    submit($db,$site,'settings',['settings'=>$input]);
+    expect(mpm_settings($db,$dir,$row)['record_lessons'] === false, 'recording secret is not required for normal classrooms');
+    denied(fn()=>submit($db,$site,'settings',['settings'=>$input + ['record_lessons'=>'yes']]));
+    denied(fn()=>submit($db,$site,'settings',['settings'=>$input + ['record_lessons'=>'yes','recording_secret'=>$secret]]));
+    $recordingKey = str_repeat('r',64);
+    submit($db,$site,'settings',['settings'=>$input + ['record_lessons'=>'yes','recording_secret'=>$recordingKey]]);
+    expect(mpm_settings($db,$dir,$row)['recording_secret'] === $recordingKey
+        && !str_contains(mpm_owned_row($db,$row)['settings'], $recordingKey), 'dedicated recording key encrypted');
     submit($db,$site,'enable');
+    $_GET = ['view'=>'recordings','class'=>22];
+    foreach ([['student_id'=>1],['admin_id'=>2]] as $unauthorized) {
+        $_SESSION = $unauthorized;
+        $_SERVER['REQUEST_METHOD'] = 'GET';
+        ob_start(); mpm_dispatch($db,$site,$slug,'page'); $denial = ob_get_clean();
+        expect(http_response_code() === 403 && !str_contains($denial,'name="group"'), 'group mapping is restricted to active super-admin');
+    }
+    $_SESSION = ['admin_id'=>1];
+    http_response_code(200);
+    ob_start(); mpm_dispatch($db,$site,$slug,'page'); $managerGroups = ob_get_clean();
+    expect(http_response_code() === 200 && str_contains($managerGroups, 'name="group"') && !str_contains($managerGroups,$recordingKey),
+        'only manager sees the current-year group form without credentials');
+    $_SERVER['REQUEST_METHOD'] = 'POST';
+    $_POST = ['csrf'=>'forged','class'=>'22','year'=>'1404/1405','group'=>'bale:-200'];
+    ob_start(); mpm_dispatch($db,$site,$slug,'page'); ob_end_clean();
+    expect(http_response_code() === 403, 'reject a forged mapping post');
+    $_SESSION = [];
+    $_POST = [];
+    $_SERVER['HTTP_AUTHORIZATION'] = 'Bearer ' . $secret;
+    ob_start(); mpm_dispatch($db,$site,$slug,'recording'); $unsigned = ob_get_clean();
+    expect(http_response_code() === 403 && !str_contains($unsigned,$recordingKey), 'media key alone cannot authenticate the recorder route');
+    unset($_SERVER['HTTP_AUTHORIZATION']);
+    $_SERVER['REQUEST_METHOD'] = 'GET';
+    http_response_code(200);
     $_SESSION = ['admin_id'=>1];
     foreach ([['view'=>'reports'], ['view'=>'reports', 'lesson'=>$oldId]] as $reportRequest) {
         $_GET = $reportRequest;

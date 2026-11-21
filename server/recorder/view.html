@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="fa" dir="rtl"><head><meta charset="utf-8"><title>ضبط کلاس</title>
+<link rel="stylesheet" href="/view.css">
+<script defer src="/livekit-client.umd.js"></script><script defer src="/board.js"></script><script defer src="/view.js"></script></head>
+<body>
+<canvas id="film" width="960" height="540"></canvas>
+<div id="capture-board" data-moderator="no" data-content="/document" data-pdf="/pdf/runtime/pdf.min.mjs"
+ data-pdf-worker="/pdf/runtime/pdf.worker.min.mjs" data-pdf-data="/pdf/">
+    <section id="board">
+        <div id="board-scroll"><div id="board-stage">
+            <canvas id="board-paper"></canvas><canvas id="board-ink"></canvas>
+            <span id="eraser-tip" hidden></span><div id="board-writers"></div>
+            <svg viewBox="0 0 10000 10000"><g id="board-laser-remote-trail"></g><g id="board-laser-local-trail"></g></svg>
+            <span id="board-laser-remote" hidden></span><span id="board-laser-local" hidden></span>
+        </div></div>
+        <div hidden>
+            <div id="board-file-receive"><button id="board-load-file"></button><span id="board-file-size"></span></div>
+            <div id="ink-tools"><button id="pen"></button><button id="eraser"></button><button id="pan"></button><input id="ink-color"><input id="ink-size"></div>
+            <button id="board-expand"></button><button id="board-zoom-out"></button><button id="board-zoom-in"></button><bdi id="board-zoom"></bdi>
+            <div id="board-footer"><bdi id="board-page-label"></bdi></div>
+        </div>
+    </section>
+</div>
+</body></html>

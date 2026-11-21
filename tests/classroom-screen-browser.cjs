@@ -156,3 +156,70 @@ test('packaged pupil gets a labelled screen button by mic and camera only after 
     assert.deepEqual(requests.filter(r=>r.body.action==='screen-access').map(r=>r.body.enabled),[true,false]);
     assert.deepEqual(errors,[]);
 });
+
+test('packaged recording control, visible pupil notice and explicit yes/no on close', {skip, timeout:28000}, async t => {
+    const fixture=packaged(t), teacherHtml=fixture.render('teacher',true), pupilHtml=fixture.render('student',true);
+    const lesson='active-lesson', epoch='epoch', rec='a'.repeat(32), decisions=[];
+    let recording=false, closed=false;
+    const {browser,origin}=await serveBrowser(t,async (req,res,url) => {
+        const staff=new URL(req.headers.referer || '/',url).pathname==='/teacher';
+        const identity=staff?'teacher-1':'student-1';
+        if (url.pathname==='/teacher' || url.pathname==='/pupil') return send(res,'text/html; charset=UTF-8',url.pathname==='/teacher'?teacherHtml:pupilHtml);
+        if (url.pathname==='/fixture.js') return send(res,'text/javascript',`(${fakeMedia})(${JSON.stringify(identity)},${JSON.stringify(staff?'student-1':'teacher-1')},false);`);
+        if (url.searchParams.get('route')==='api') {
+            let buf=''; for await (const chunk of req) buf+=chunk;
+            const input=JSON.parse(buf), result={ok:true};
+            const controls=()=>recording ? {notice:'live', ...(staff?{id:rec,confirm:true,canSend:true,group:'گروه آزمایشی',messenger:'روبیکا'}:{})}
+                : staff ? {start:true}:null;
+            if (input.action==='status') {
+                Object.assign(result,closed?{phase:'idle',ready:true}:{phase:'live',lesson,epoch,ready:true,joinable:true,slot:11,
+                    admitted:input.sid===`PA_${identity}`,recording:controls(), quality:{levels:{}}});
+            } else if (input.action==='ticket') Object.assign(result,{lesson,epoch,url:'wss://fixture.invalid',token:'fixture'});
+            else if (input.action==='start-recording') {
+                assert.ok(staff && input.lesson===lesson && input.sid==='PA_teacher-1' && input.epoch===epoch);
+                recording=true; result.recording=controls();
+            } else if (input.action==='close') {
+                decisions.push(input);
+                result.recording=input.sendRecording?'queued':'discarded'; closed=true;
+            }
+            return send(res,'application/json',JSON.stringify(result));
+        }
+        if (!fixture.serve(url,res)) res.writeHead(404).end();
+    });
+    const pupil=await browser.newPage({viewport:{width:320,height:600}});
+    await pupil.goto(origin+'/pupil');
+    assert.equal(await pupil.locator('#record-start').count(),0);
+    for (const yes of [false,true]) {
+        const page=await browser.newPage({viewport:{width:540,height:700}});
+        const errs=[];
+        page.on('pageerror',error=>errs.push(error.message));
+        await page.goto(origin+'/teacher');
+        await page.locator('#toggle-access').click();
+        const start=page.locator('#record-start');
+        await start.waitFor({timeout:10000});
+        assert.equal(await start.evaluate(el=>el.nextElementSibling.id),'quality-open','between board access and settings');
+        assert.equal(await start.textContent().then(s=>s.trim()),'ضبط کلاس');
+        await start.click();
+        await page.locator('#record-start-yes').click();
+        await page.locator('#recording-notice').waitFor();
+        await pupil.locator('#recording-notice').waitFor({timeout:8500});
+        assert.match(await pupil.locator('#recording-notice').textContent(),/کلاس در حال ضبط است/);
+        assert.equal(await pupil.getByText('گروه آزمایشی').count(),0,'group is private to staff');
+        await page.locator('#toggle-access').click();
+        await page.getByRole('button',{name:'بستن کلاس برای همه'}).click();
+        const dialog=page.getByRole('dialog',{name:'آیا فیلم ضبط شده از کلاس در پیامرسان ارسال شود ؟'});
+        await dialog.waitFor();
+        assert.match(await dialog.textContent(),/روبیکا — گروه آزمایشی/);
+        const before=decisions.length;
+        await dialog.getByRole('button',{name:'انصراف از بستن کلاس'}).click();
+        assert.equal(decisions.length,before,'cancel does not close, grant or send');
+        await page.locator('#toggle-access').click();
+        await page.getByRole('button',{name:'بستن کلاس برای همه'}).click();
+        await dialog.getByRole('button',{name:yes?'بله':'خیر',exact:true}).click();
+        await page.locator('#recording-notice').waitFor({state:'hidden'});
+        assert.deepEqual(decisions.at(-1),{action:'close',class:22,lesson,recording:rec,sendRecording:yes});
+        assert.deepEqual(errs,[]);
+        await page.close();
+        recording=false; closed=false;
+    }
+});

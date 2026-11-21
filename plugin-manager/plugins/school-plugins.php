@@ -4,13 +4,13 @@ declare(strict_types=1);
 use BaciClassroom\Calendar;
 
 // School plugin runtime and gateway. Settings are exposed by the reviewed host overlay.
-const MPM_VERSION = '0.1.21';
+const MPM_VERSION = '0.1.22';
 const MPM_CLASSROOM_NATIVE = '0.4.0';
 const MPM_CLASSROOM_PUPIL_TRIAL = '0.4.3';
 const MPM_REGISTRY = 'mtg_plugin_registry';
 const MPM_SITE = 'mtg_plugin_site';
 const MPM_MAX_ZIP = 4 * 1024 * 1024;
-const MPM_MAX_FILES = 28; // Reviewed payload files, excluding plugin.json.
+const MPM_MAX_FILES = 32; // Reviewed payload files, excluding plugin.json.
 const MPM_BELL_LABELS = [1=>'۱', 2=>'۲', 3=>'۳', 4=>'۴'];
 const MPM_CATALOG = [
     'school-classroom' => [
@@ -35,6 +35,7 @@ const MPM_CATALOG = [
         '0.4.13' => '8a4746726dda14bbb243de3cb55310da46dfeb14625eee4a27b961beb6e0bf0b',
         '0.4.14' => 'f0a14a694a35f53b2b739ca71134bf49130e72d76527b3a8ffa5204cd0ace5f3',
         '0.4.15' => '8f346d7b8ecd64f67fe0eb8b1cc6ab7e984a11af87252dfc6e9f573edfbca8f2',
+        '0.4.16' => '4a3b2c1bb9c2dbaf2765bcef58ece33e4811abc268dfc96f994faa5ec1e9a84f',
     ],
 ];
 
@@ -634,11 +635,15 @@ function mpm_save_settings(PDO $db, string $dir, array $row, array $manifest, ar
             if (!in_array($value, $field['options'], true)) throw new MpmNotice('این گزینهٔ کیفیت تصویر مجاز نیست.');
         } elseif (in_array($field['type'], ['token', 'secret'], true)) {
             if ($field['type'] === 'secret' && $value === '') $value = $previous[$key] ?? '';
-            if (!preg_match('/^[A-Za-z0-9_-]+$/D', $value) || strlen($value) < $field['min'] || strlen($value) > $field['max']) throw new MpmNotice('شناسه یا کلید سرویس رسانه کامل نیست.');
+            $optionalRecordingKey = $key === 'recording_secret' && ($input['record_lessons'] ?? '') !== 'yes' && $value === '';
+            if (!$optionalRecordingKey && (!preg_match('/^[A-Za-z0-9_-]+$/D', $value) || strlen($value) < $field['min'] || strlen($value) > $field['max'])) throw new MpmNotice('شناسه یا کلید سرویس کامل نیست.');
         } else {
             throw new MpmNotice('مدیر این نوع تنظیم را پشتیبانی نمی‌کند.');
         }
         $settings[$key] = $value;
+    }
+    if (($settings['record_lessons'] ?? false) && $settings['recording_secret'] === $settings['api_secret']) {
+        throw new MpmNotice('کلید سرویس ضبط باید با کلید خصوصی رسانه متفاوت باشد.');
     }
     mpm_write_settings($db, $dir, $row, $settings);
 }
@@ -827,7 +832,7 @@ function mpm_dispatch(PDO $db, array $site, string $slug, string $route, string 
         }
         $manifest = mpm_manifest_for($dir, $row);
         $role = mpm_find_role($_SESSION ?? []);
-        $machineRoute = ($route === 'events' && $slug === 'school-classroom')
+        $machineRoute = (in_array($route, ['events','recording'], true) && $slug === 'school-classroom')
             || ($route === 'job' && (($jobMode === 'cli' && PHP_SAPI === 'cli') || $jobMode === 'after-response'));
         if ($route === 'job' && !$machineRoute) {
             http_response_code(404);
@@ -982,6 +987,12 @@ function mpm_call(PDO $db, array $site, string $dir, array $row, array $manifest
             if (!is_file($adapter)) return null;
             require_once $adapter;
             return mpm_school_bot_adapter($db, $provider, mpm_site_base($site['origin']));
+        },
+        'recording_bot' => static function (string $provider) use ($db): ?array {
+            $adapter = mpm_host_root() . '/includes/classroom-school-bots.php';
+            if (!is_file($adapter)) return null;
+            require_once $adapter;
+            return function_exists('mpm_school_recording_bot') ? mpm_school_recording_bot($db, $provider) : null;
         },
         // A pre-upgrade page must reload before calling a new version's API.
         'csrf' => hash_hmac('sha256', $row['owner'] . ':' . $row['manifest_sha'] . ':' . session_id(), mpm_key($dir)),
@@ -1309,7 +1320,7 @@ function mpm_render_settings(PDO $db, ?array $site, string $csrf, string $notice
                     }
                     echo '</select>';
                 } elseif ($field['type'] === 'secret') {
-                    echo '<input type="password" class="form-input" dir="ltr" name="' . $name . '" autocomplete="new-password"' . ($value === '' && $field['type'] === 'secret' ? ' required' : '') . '>';
+                    echo '<input type="password" class="form-input" dir="ltr" name="' . $name . '" autocomplete="new-password"' . ($value === '' && $key !== 'recording_secret' ? ' required' : '') . '>';
                     if ($value !== '') echo '<small>ذخیره شده؛ برای حفظ مقدار فعلی خالی بگذار.</small>';
                 } else {
                     echo '<input type="text" class="form-input" dir="ltr" name="' . $name . '" value="' . mpm_html((string)$value) . '" required autocomplete="off">';
@@ -1337,6 +1348,11 @@ function mpm_render_settings(PDO $db, ?array $site, string $csrf, string $notice
                 echo '<form class="mb-3" method="post" action="' . $action . '">';
                 mpm_hidden($csrf, ($enabled || $retryRoom) ? 'disable' : 'enable', $slug);
                 echo '<button class="btn btn-primary" type="submit">' . ($enabled ? 'غیرفعال‌سازی (حفظ داده)' : ($retryRoom ? 'تلاش دوباره برای بستن اتاق VPS' : 'فعال‌سازی')) . '</button></form>';
+            }
+            if ($enabled && isset($manifest['routes']['recording'])) {
+                echo '<p><a target="_top" href="plugins/school-plugins.php?plugin=school-classroom&amp;view=recordings">گروه‌های پیام‌رسان و ضبط کلاس</a></p>'
+                    . '<p>نشانی سرویس ضبط VPS: <code dir="ltr" style="overflow-wrap:anywhere">'
+                    . mpm_html($siteBase . '/plugins/school-plugins.php?plugin=school-classroom&route=recording') . '</code></p>';
             }
             if ($enabled && $compatible) echo '<p><a target="_top" href="plugins/school-plugins.php?plugin=' . rawurlencode($slug) . '">بازکردن افزونه</a></p>';
         } elseif (!$pending) {
@@ -1380,14 +1396,14 @@ function mpm_run(): void
             http_response_code(404);
             throw new MpmNotice('این افزونه در دسترس نیست.');
         }
-        if ($route !== 'events' && $route !== 'job') require_once $root . '/includes/auth.php';
+        if (!in_array($route, ['events','job','recording'], true)) require_once $root . '/includes/auth.php';
         mpm_dispatch($db, $site, $plugin, $route);
     } catch (Throwable $error) {
         header('Cache-Control: no-store, private');
         $message = $error instanceof MpmNotice ? $error->getMessage() : 'مدیر افزونه‌ها موقتاً در دسترس نیست.';
         if (!$error instanceof MpmNotice) error_log('mtagbot plugin manager: request failed (' . get_class($error) . ')');
         if ((int)http_response_code() < 400) http_response_code(503);
-        if (in_array($route, ['api', 'events', 'content', 'asset', 'pdf', 'job'], true)) {
+        if (in_array($route, ['api', 'events', 'recording', 'content', 'asset', 'pdf', 'job'], true)) {
             header('Content-Type: application/json; charset=UTF-8');
             echo json_encode(['ok' => false, 'message' => $message], JSON_UNESCAPED_UNICODE);
         } else {
