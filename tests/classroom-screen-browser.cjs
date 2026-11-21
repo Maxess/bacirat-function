@@ -157,15 +157,16 @@ test('packaged pupil gets a labelled screen button by mic and camera only after 
     assert.deepEqual(errors,[]);
 });
 
-test('packaged recording control, visible pupil notice and explicit yes/no on close', {skip, timeout:28000}, async t => {
-    const fixture=packaged(t), teacherHtml=fixture.render('teacher',true), pupilHtml=fixture.render('student',true);
+test('packaged teacher and admin recording controls, pupil notice and explicit yes/no on close', {skip, timeout:38000}, async t => {
+    const fixture=packaged(t), pages={teacher:fixture.render('teacher',true),admin:fixture.render('admin',true),pupil:fixture.render('student',true)};
     const lesson='active-lesson', epoch='epoch', rec='a'.repeat(32), decisions=[];
-    let recording=false, closed=false;
+    let recording=false, closed=false, operator='teacher';
     const {browser,origin}=await serveBrowser(t,async (req,res,url) => {
-        const staff=new URL(req.headers.referer || '/',url).pathname==='/teacher';
-        const identity=staff?'teacher-1':'student-1';
-        if (url.pathname==='/teacher' || url.pathname==='/pupil') return send(res,'text/html; charset=UTF-8',url.pathname==='/teacher'?teacherHtml:pupilHtml);
-        if (url.pathname==='/fixture.js') return send(res,'text/javascript',`(${fakeMedia})(${JSON.stringify(identity)},${JSON.stringify(staff?'student-1':'teacher-1')},false);`);
+        const role=new URL(req.headers.referer || '/',url).pathname.slice(1);
+        const staff=role==='teacher' || role==='admin';
+        const identity=staff?`${role}-1`:'student-1';
+        if (Object.hasOwn(pages,url.pathname.slice(1))) return send(res,'text/html; charset=UTF-8',pages[url.pathname.slice(1)]);
+        if (url.pathname==='/fixture.js') return send(res,'text/javascript',`(${fakeMedia})(${JSON.stringify(identity)},${JSON.stringify(staff?'student-1':`${operator}-1`)},false);`);
         if (url.searchParams.get('route')==='api') {
             let buf=''; for await (const chunk of req) buf+=chunk;
             const input=JSON.parse(buf), result={ok:true};
@@ -176,9 +177,10 @@ test('packaged recording control, visible pupil notice and explicit yes/no on cl
                     admitted:input.sid===`PA_${identity}`,recording:controls(), quality:{levels:{}}});
             } else if (input.action==='ticket') Object.assign(result,{lesson,epoch,url:'wss://fixture.invalid',token:'fixture'});
             else if (input.action==='start-recording') {
-                assert.ok(staff && input.lesson===lesson && input.sid==='PA_teacher-1' && input.epoch===epoch);
+                assert.ok(staff && role===operator && input.lesson===lesson && input.sid===`PA_${identity}` && input.epoch===epoch);
                 recording=true; result.recording=controls();
             } else if (input.action==='close') {
+                assert.ok(staff && role===operator);
                 decisions.push(input);
                 result.recording=input.sendRecording?'queued':'discarded'; closed=true;
             }
@@ -189,17 +191,20 @@ test('packaged recording control, visible pupil notice and explicit yes/no on cl
     const pupil=await browser.newPage({viewport:{width:320,height:600}});
     await pupil.goto(origin+'/pupil');
     assert.equal(await pupil.locator('#record-start').count(),0);
-    for (const yes of [false,true]) {
+    for (const [role,yes] of [['teacher',false],['admin',true]]) {
+        operator=role;
         const page=await browser.newPage({viewport:{width:540,height:700}});
         const errs=[];
         page.on('pageerror',error=>errs.push(error.message));
-        await page.goto(origin+'/teacher');
+        await page.goto(`${origin}/${role}`);
         await page.locator('#toggle-access').click();
         const start=page.locator('#record-start');
         await start.waitFor({timeout:10000});
         assert.equal(await start.evaluate(el=>el.nextElementSibling.id),'quality-open','between board access and settings');
         assert.equal(await start.textContent().then(s=>s.trim()),'ضبط کلاس');
         await start.click();
+        assert.match(await page.locator('#record-start-help').textContent(),/دبیر همین زنگ یا مدیر مجاز/);
+        assert.equal(recording,false,'opening the dialog does not start capture');
         await page.locator('#record-start-yes').click();
         await page.locator('#recording-notice').waitFor();
         await pupil.locator('#recording-notice').waitFor({timeout:8500});

@@ -16,6 +16,9 @@ $db->exec("CREATE TABLE `$table` (bucket TEXT,item TEXT,payload TEXT,PRIMARY KEY
     INSERT INTO settings VALUES ('current_academic_year','1405/1406');
     CREATE TABLE classes (id INT PRIMARY KEY,name TEXT,academic_year TEXT);
     INSERT INTO classes VALUES (15,'هفتم ۱','1405/1406'),(16,'هفتم ۲','1405/1406'),(17,'هفتم ۳','1404/1405');
+    CREATE TABLE admins (id INT PRIMARY KEY,name TEXT,role TEXT,permissions TEXT,status INT);
+    INSERT INTO admins VALUES (1,'مدیر کل','super_admin','[]',1),(2,'مدیر کلاس','admin','[\"manage_classes\"]',1),
+      (3,'مدیر بدون مجوز','admin','[]',1),(4,'مدیر غیرفعال','super_admin','[]',0);
     CREATE TABLE bot_chats (platform TEXT,chat_id TEXT,title TEXT,chat_type TEXT,status TEXT);
     INSERT INTO bot_chats VALUES ('bale','-201','گروه اول','group','member'),('bale','-202','گروه دوم','group','member'),
       ('bale','-206','گروه خارج‌شده','group','left'),('bale','111','خصوصی','private','member'),('bale','-208','کانال','channel','member'),
@@ -24,7 +27,10 @@ $s = new ClassroomStore($db, $table);
 $cfg = ['record_lessons'=>true,'recording_secret'=>str_repeat('a',48),'api_key'=>str_repeat('k',16),'api_secret'=>str_repeat('s',40),'room_prefix'=>'test-' . str_repeat('0',20)];
 $teacher = ['role'=>'teacher','id'=>7,'identity'=>'teacher-7'];
 $student = ['role'=>'student','id'=>12,'identity'=>'student-12'];
-$admin = ['role'=>'admin','id'=>1,'office'=>'admin','identity'=>'admin-1'];
+$admin = cl_school_user($db, ['admin_id'=>2], '1405/1406');
+$super = cl_school_user($db, ['admin_id'=>1], '1405/1406');
+$deputy = ['role'=>'teacher','id'=>8,'office'=>'deputy','identity'=>'teacher-8'];
+foreach ([3,4] as $unauthorized) deny(403, fn()=>cl_school_user($db, ['admin_id'=>$unauthorized], '1405/1406'));
 $t = (new DateTimeImmutable('2026-11-18 09:30:00', new DateTimeZone('Asia/Tehran')))->getTimestamp();
 $class = cl_classes($db, '1405/1406')[15];
 $prefixes = ['bale'=>'https://bale.test/bot-fixture/','rubika'=>'https://rubika.test/v3/fixture/','telegram'=>'https://tg.test/bot-fixture/'];
@@ -84,12 +90,21 @@ ok(cl_rec_link($s,$class)['chat'] === '-201' && cl_rec_link($s, array_replace($c
 
 $live = $lesson($t);
 $id = $live['id'];
-deny(503, fn()=>cl_rec_start($s,$cfg,$class,$live,$teacher,$t));
+foreach ([$teacher,$super,$admin] as $operator) {
+    ok(cl_rec_status($s,$cfg,$live,$operator) === ['recording'=>['start'=>true]], 'assigned teacher and authorized admins see the start control');
+    ok(cl_rec_status($s,$cfg,$live + ['test'=>'friday'],$operator) === ['recording'=>null], 'Friday test never shows recording controls');
+    deny(403, fn()=>cl_rec_start($s,$cfg,$class,$live + ['test'=>'friday'],$operator,$t));
+}
+$disabled = array_replace($cfg, ['record_lessons'=>false]);
+ok(cl_rec_status($s,$disabled,$live,$admin) === ['recording'=>null], 'an admin does not bypass the opt-in');
+deny(403, fn()=>cl_rec_start($s,$disabled,$class,$live,$admin,$t));
+deny(503, fn()=>cl_rec_start($s,$cfg,$class,$live,$admin,$t));
 ok($worker('poll',null,$t)['command'] === 'idle', 'signed worker heartbeat');
-deny(403, fn()=>cl_rec_start($s,$cfg,$class,$live,$student,$t));
-deny(403, fn()=>cl_rec_start($s,$cfg,$class,$live,$admin,$t));
-deny(403, fn()=>cl_rec_start($s,$cfg,$class,$live + ['test'=>'friday'],$teacher,$t));
-ok(cl_rec_start($s,$cfg,$class,$live,$teacher,$t)['recording']['notice'] === 'preparing', 'per-lesson explicit activation');
+foreach ([$student,$deputy] as $unauthorized) {
+    ok(cl_rec_status($s,$cfg,$live,$unauthorized) === ['recording'=>null], 'students and unassigned deputies cannot see the start control');
+    deny(403, fn()=>cl_rec_start($s,$cfg,$class,$live,$unauthorized,$t));
+}
+ok(cl_rec_start($s,$cfg,$class,$live,$admin,$t)['recording']['notice'] === 'preparing', 'authorized admin starts a recording explicitly');
 $live = cl_active($s,15);
 $identity = $live['recorder'];
 $peer = ['identity'=>$identity,'state'=>'ACTIVE','permission'=>['can_subscribe'=>true,'can_publish'=>false,'can_publish_data'=>false,'recorder'=>true,'hidden'=>true]];
@@ -104,13 +119,17 @@ ok($job['room'] === $live['room'] && $claims['sub'] === $identity && $claims['vi
     && $claims['video']['recorder'] === true && $claims['video']['hidden'] === true, 'only a hidden/receiving JWT for this room');
 $worker('poll',$id,$t+6,['running'=>$live['room']]);
 ok(cl_rec_status($s,$cfg,$live,$student) === ['recording'=>['notice'=>'live']], 'students only see recording indicator, not destination or control');
-ok(cl_rec_status($s,$cfg,$live,$teacher)['recording']['confirm'], 'assigned teacher gets the close decision');
+foreach ([$teacher,$admin] as $operator) {
+    $controls = cl_rec_status($s,$cfg,$live,$operator)['recording'];
+    ok($controls['confirm'] && $controls['canSend'] && !isset($controls['start']), 'both authorized closers can approve sending, but cannot start a second capture');
+}
+ok(!cl_rec_status($s,$cfg,$live,$deputy)['recording']['canSend'], 'unassigned deputy cannot approve sending');
 $board = $worker('board',$id,$t+6,['room'=>$live['room'],'board'=>0,'ink'=>0]);
 ok(isset($board['board']) && !isset($board['chat']) && $board['board']['write'] === false, 'recorder reads only current board');
 deny(409, fn()=> $worker('board',$id,$t+6,['room'=>'other']));
-// The recorder is not a roster entry and doesn't need the initiating teacher's tab.
-$live['pulses']['admin-1'] = ['sid'=>'PA_office','at'=>$t+6];
-$live['seen']['admin-1'] = $live['staff']['admin-1'] = 'PA_office';
+// The recorder is not a roster entry and doesn't need the teacher's tab.
+$live['pulses'][$admin['identity']] = ['sid'=>'PA_office','at'=>$t+6];
+$live['seen'][$admin['identity']] = $live['staff'][$admin['identity']] = 'PA_office';
 $s->put('lesson',$id,$live);
 cl_event_apply($s,$cfg,['event'=>'participant_left','room'=>['name'=>$live['room']],
     'participant'=>['identity'=>$identity,'sid'=>'PA_recorder']],$t+6,$rpc);
@@ -131,8 +150,9 @@ deny(409, fn()=> $worker('board',$id,$t+6,['room'=>$staleRoom]));
 deny(409, fn()=> $worker('claim',$id,$t+7,['part'=>1,'total'=>2]));
 deny(409, fn()=>cl_rec_close_choice($s,$cfg,$live,$teacher,['recording'=>$id,'sendRecording'=>'true'],$t+7));
 deny(409, fn()=>cl_rec_close_choice($s,$cfg,$live,$teacher,['recording'=>str_repeat('2',32),'sendRecording'=>true],$t+7));
-deny(403, fn()=>cl_rec_close_choice($s,$cfg,$live,$admin,['recording'=>$id,'sendRecording'=>true],$t+7));
-deny(502, fn()=>$close($live,$teacher,true,$t+7,fn()=>throw new ClassroomError(502,'simulated close timeout')));
+deny(403, fn()=>cl_rec_close_choice($s,$cfg,$live,$deputy,['recording'=>$id,'sendRecording'=>true],$t+7));
+deny(409, fn()=>cl_rec_close_choice($s,$cfg,$live,$admin,[],$t+7));
+deny(502, fn()=>$close($live,$admin,true,$t+7,fn()=>throw new ClassroomError(502,'simulated close timeout')));
 deny(409, fn()=> $worker('claim',$id,$t+8,['part'=>1,'total'=>2]));
 ok($worker('poll',$id,$t+11)['command'] === 'deliver' && $s->get('lesson',$id)['phase'] === 'finished', 'worker retries close and queues only after commit');
 $permit = $worker('claim',$id,$t+12,['part'=>1,'total'=>2]);

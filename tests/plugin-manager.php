@@ -53,7 +53,7 @@ try {
       INSERT INTO academic_years VALUES(1,'1404/1405',1,1);
       INSERT INTO classes VALUES(22,'۸ الف','1404/1405');
       INSERT INTO students VALUES(1,'آزمایشی','اول','۸ الف','1404/1405','active');
-      INSERT INTO admins VALUES(1,'مدیر کل','super_admin','[]',1),(2,'مدیر','admin','[]',1);
+      INSERT INTO admins VALUES(1,'مدیر کل','super_admin','[]',1),(2,'مدیر','admin','[]',1),(3,'مدیر کلاس','admin','[\"manage_classes\"]',1);
       INSERT INTO settings VALUES('school_name','never change');");
     $normal = static fn() => array_map(static fn($n) => $db->query('SELECT * FROM ' . $n)->fetchAll(PDO::FETCH_ASSOC), ['classes','students','admins','settings']);
     $before = $normal();
@@ -82,6 +82,7 @@ try {
     $quality = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.14.zip';
     $defaults = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.15.zip';
     $recordings = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.16.zip';
+    $adminRecordings = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.17.zip';
     $menus = static fn() => [file_get_contents($root . '/other-settings.php'), file_get_contents($root . '/includes/header.php')];
     $managerMenus = [$other, $header];
     expect($menus() === $managerMenus, 'initialization does not rewrite the host');
@@ -492,11 +493,29 @@ try {
     denied(fn()=>submit($db,$site,'settings',['settings'=>$input + ['record_lessons'=>'yes','recording_secret'=>$secret]]));
     $recordingKey = str_repeat('r',64);
     submit($db,$site,'settings',['settings'=>$input + ['record_lessons'=>'yes','recording_secret'=>$recordingKey]]);
-    expect(mpm_settings($db,$dir,$row)['recording_secret'] === $recordingKey
-        && !str_contains(mpm_owned_row($db,$row)['settings'], $recordingKey), 'dedicated recording key encrypted');
+    $recordingCipher = mpm_owned_row($db,$row)['settings'];
+    $recordingSettings = mpm_settings($db,$dir,$row);
+    expect($recordingSettings['recording_secret'] === $recordingKey
+        && !str_contains($recordingCipher, $recordingKey), 'dedicated recording key encrypted');
+    $linkedGroup = '{"provider":"bale","chat":"-246","title":"گروه محفوظ","class_key":"8الف","rev":"existing"}';
+    $historicId = str_repeat('4',32);
+    $historicRecording = json_encode(['id'=>$historicId,'state'=>'delivered','begin'=>time()-3600,'sent'=>1,'total'=>1], JSON_THROW_ON_ERROR);
+    mpm_query($db,"INSERT INTO `$store` (bucket,item,payload) VALUES (?,?,?),(?,?,?)",
+        ['record-links','1404/1405:22',$linkedGroup,'recording',$historicId,$historicRecording]);
+    submit($db,$site,'enable');
+    denied(fn()=>mpm_install($db,$dir,$adminRecordings));
+    submit($db,$site,'disable');
+    expect(mpm_install($db,$dir,$adminRecordings), 'install the site-only admin recording upgrade without purge');
+    $row = mpm_row($db,$slug);
+    expect($row['version'] === '0.4.17' && $row['owner'] === $oldRow['owner'] && mpm_check_store($db,$row) === $store
+        && mpm_owned_row($db,$row)['settings'] === $recordingCipher && mpm_settings($db,$dir,$row) === $recordingSettings
+        && $recordingSettings['record_lessons']
+        && mpm_query($db,"SELECT payload FROM `$store` WHERE bucket='record-links' AND item=?",['1404/1405:22'])->fetchColumn() === $linkedGroup
+        && mpm_query($db,"SELECT payload FROM `$store` WHERE bucket='recording' AND item=?",[$historicId])->fetchColumn() === $historicRecording,
+        'upgrade preserves active recorder configuration, encrypted key, group link, and recording history');
     submit($db,$site,'enable');
     $_GET = ['view'=>'recordings','class'=>22];
-    foreach ([['student_id'=>1],['admin_id'=>2]] as $unauthorized) {
+    foreach ([['student_id'=>1],['admin_id'=>2],['admin_id'=>3]] as $unauthorized) {
         $_SESSION = $unauthorized;
         $_SERVER['REQUEST_METHOD'] = 'GET';
         ob_start(); mpm_dispatch($db,$site,$slug,'page'); $denial = ob_get_clean();

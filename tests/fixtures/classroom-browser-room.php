@@ -7,9 +7,9 @@ require $plugin . '/lesson.php';
 $manifest = json_decode(file_get_contents($plugin . '/plugin.json'), true);
 $GLOBALS['MTAG_PLUGIN_CONTEXT'] = ['base'=>'/plugins/school-plugins.php?plugin=school-classroom', 'site_base'=>'/', 'csrf'=>'fixture', 'store'=>'fixture',
     'asset_hashes'=>$manifest['files'], 'pdf_hash'=>$manifest['files'][$manifest['pdf_resources']]];
-$staff = getenv('MPM_TEST_ROOM_ROLE') !== 'student';
+$actor = ['role'=>getenv('MPM_TEST_ROOM_ROLE') ?: 'teacher'];
+$staff = cl_is_staff($actor);
 $cfg = ['room_video_quality'=>true,'screen_share'=>true,'student_screen_share'=>true];
-$actor = ['role'=>$staff ? 'teacher' : 'student'];
 $class = ['id'=>22];
 $schoolName = 'مدرسهٔ آزمایشی';
 $classLabel = '۷/۱';

@@ -1272,7 +1272,7 @@
                 closeIntent = {lesson,recording:recording.id};
                 put(el('record-close-help'), recording.canSend
                     ? `مقصد: ${recording.messenger} — ${recording.group}. «خیر» کلاس را بدون ارسال فیلم می‌بندد.`
-                    : 'فقط دبیر همین زنگ می‌تواند فیلم را ارسال کند. با «خیر» کلاس بدون ارسال بسته می‌شود.');
+                    : 'فقط دبیر همین زنگ یا مدیر مجاز می‌تواند ارسال فیلم را تأیید کند. با «خیر» کلاس بدون ارسال بسته می‌شود.');
                 el('record-close-yes').disabled = recording.canSend !== true;
                 setAccessMenu(false);
                 recordClose.showModal();

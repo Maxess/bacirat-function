@@ -143,9 +143,14 @@ function cl_rec_set_link(ClassroomStore $s, array $cfg, array $class, string $ch
     });
 }
 
-function cl_rec_teacher(array $lesson, array $actor): bool
+function cl_rec_operator(array $lesson, array $actor): bool
 {
-    return ($actor['role'] ?? null) === 'teacher' && $actor['id'] === $lesson['teacher'];
+    // cl_school_user only marks active admins with classroom access as office=admin.
+    return match ($actor['role'] ?? null) {
+        'admin' => ($actor['office'] ?? null) === 'admin',
+        'teacher' => $actor['id'] === $lesson['teacher'],
+        default => false,
+    };
 }
 
 function cl_rec_health(ClassroomStore $s, array $cfg, int $now): bool
@@ -170,8 +175,8 @@ function cl_rec_history(array $class): string
 
 function cl_rec_start(ClassroomStore $s, array $cfg, array $class, array $lesson, array $actor, int $now): array
 {
-    if (!cl_rec_enabled($cfg) || cl_is_friday_test($lesson) || !cl_rec_teacher($lesson, $actor)) {
-        throw new ClassroomError(403, 'ضبط فقط برای دبیر همین زنگِ عادی و با فعال‌سازی مدرسه مجاز است.');
+    if (!cl_rec_enabled($cfg) || cl_is_friday_test($lesson) || !cl_rec_operator($lesson, $actor)) {
+        throw new ClassroomError(403, 'شروع ضبط فقط در زنگ عادی و با فعال‌سازی مدرسه برای دبیر همان زنگ یا مدیر مجاز امکان‌پذیر است.');
     }
     if ($lesson['deadline'] - $now > CL_MAX_LESSON_SECONDS) throw new ClassroomError(409, 'ضبط آزمایشی برای زنگِ حداکثر دو ساعته است.');
     if (isset($lesson['recorder'])) return cl_rec_status($s, $cfg, $lesson, $actor);
@@ -201,12 +206,12 @@ function cl_rec_status(ClassroomStore $s, array $cfg, array $lesson, array $acto
     $job = isset($lesson['recorder']) ? $s->get('recording', $lesson['id']) : null;
     $on = ($job['state'] ?? null) === 'recording' && $lesson['phase'] !== 'closing';
     $staff = cl_is_staff($actor);
-    $teacher = cl_rec_teacher($lesson, $actor);
+    $operator = cl_rec_operator($lesson, $actor);
     $out = $on ? ['notice'=>($job['live'] ?? false) && $lesson['phase'] === 'live' ? 'live' : 'preparing'] : [];
-    if ($staff && $job) $out += ['id'=>$job['id'],'confirm'=>$on,'state'=>$job['state'], 'canSend'=>$teacher,
+    if ($staff && $job) $out += ['id'=>$job['id'],'confirm'=>$on,'state'=>$job['state'], 'canSend'=>$operator,
         'group'=>$job['target']['title'],'messenger'=>CL_REC_PROVIDERS[$job['target']['provider']]];
     if ($staff && ($job['state'] ?? null) === 'discarded' && ($job['reason'] ?? '') !== '') $out['notice'] = 'stopped';
-    if (!$job && $teacher && !cl_is_friday_test($lesson) && cl_rec_enabled($cfg)) $out['start'] = true;
+    if (!$job && $operator && !cl_is_friday_test($lesson) && cl_rec_enabled($cfg)) $out['start'] = true;
     return ['recording'=>$out ?: null];
 }
 
@@ -220,7 +225,7 @@ function cl_rec_close_choice(ClassroomStore $s, array $cfg, array $lesson, array
     if (($body['recording'] ?? null) !== $job['id'] || !is_bool($body['sendRecording'] ?? null)) {
         throw new ClassroomError(409, 'برای بستن کلاس، تکلیف ارسال فیلم را با «بله» یا «خیر» مشخص کن.');
     }
-    if ($body['sendRecording'] && !cl_rec_teacher($lesson, $actor)) throw new ClassroomError(403, 'فقط دبیر همین زنگ می‌تواند ارسال فیلم را تأیید کند.');
+    if ($body['sendRecording'] && !cl_rec_operator($lesson, $actor)) throw new ClassroomError(403, 'فقط دبیر همین زنگ یا مدیر مجاز می‌تواند ارسال فیلم را تأیید کند.');
     // Check the bound destination both now and when dispatching each part. No automatic rerouting.
     return $body['sendRecording'] && cl_rec_enabled($cfg) && cl_rec_destination($s, $job) !== null ? 'queued' : 'discarded';
 }
