@@ -24,6 +24,15 @@ finish() {
 trap finish EXIT
 
 (( EUID == 0 )) || fail 'Run this installer as root on the existing LiveKit VPS.'
+chromium='playwright'
+local_browser=''
+if (( $# > 0 )); then
+    [[ $1 == --chromium-npm && $# -le 2 ]] || fail 'Usage: install-v0.4.16.sh [--chromium-npm [chromium-153.0.0.tgz]]'
+    [[ $(uname -m) == x86_64 ]] || fail 'The pinned npm Chromium package is for Linux x86_64 only.'
+    chromium='npm'
+    local_browser=${2:-}
+    [[ -z "$local_browser" || -f "$local_browser" ]] || fail 'The supplied Chromium archive is not a regular file.'
+fi
 for command in apt-get curl ss systemctl sha256sum; do
     command -v "$command" >/dev/null || fail "Required command not found: $command"
 done
@@ -51,7 +60,7 @@ printf '\n== %s ==\n' "$stage"
 apt-get update
 apt-get install -y --no-upgrade ca-certificates unzip python3-venv ffmpeg fonts-noto-core
 
-stage='install recorder files and Chromium'
+stage='install recorder files and Playwright'
 printf '\n== %s ==\n' "$stage"
 unzip -q "$work/$archive" -d "$work/pkg"
 if ! id -u school-recorder >/dev/null 2>&1; then
@@ -62,8 +71,55 @@ install -d -o root -g root -m 0755 "$target"
 install -m 0644 "$work/pkg/"{*.py,*.html,*.css,*.js,*.zip,*.txt,README-fa.md} "$target/"
 python3 -m venv "$target/venv"
 "$target/venv/bin/pip" install -r "$target/requirements.txt"
-PLAYWRIGHT_BROWSERS_PATH="$target/browsers" \
-    "$target/venv/bin/playwright" install --with-deps --only-shell chromium
+
+if [[ $chromium == npm ]]; then
+    stage='install the pinned npm Chromium'
+    printf '\n== %s ==\n' "$stage"
+    # Use Playwright's Ubuntu library dependencies, not its geographically restricted browser download.
+    "$target/venv/bin/playwright" install-deps chromium
+    node=$("$target/venv/bin/python" -I -c '
+import json
+from importlib.metadata import version
+from pathlib import Path
+import playwright
+root = Path(playwright.__file__).parent / "driver"
+browsers = json.loads((root / "package/browsers.json").read_text())["browsers"]
+if version("playwright") != "1.60.0" or not any(b["name"] == "chromium-headless-shell" and b["revision"] == "1223" for b in browsers):
+    raise SystemExit("This Chromium fallback was reviewed for Playwright 1.60.0 (revision 1223) only.")
+print(root / "node")
+')
+    if [[ -n "$local_browser" ]]; then
+        # Copy to private scratch before checking it. Never execute an npm installer or package script.
+        cp -- "$local_browser" "$work/chromium.tgz"
+    else
+        curl -fsSL --proto '=https' --proto-redir '=https' --retry 2 --connect-timeout 15 --max-time 300 \
+            'https://registry.npmjs.org/@sparticuz/chromium/-/chromium-153.0.0.tgz' -o "$work/chromium.tgz"
+    fi
+    printf '%s  %s\n' '8e2196a92bcf31dbb8f8ff538a562a011ef21063c41c8371fa50af13f36a34efc41d8cc5ff1d615222394fa8a8548b7b744cbb9fcf1bcb24f4be4f9d9ec810c0' \
+        "$work/chromium.tgz" | sha512sum -c -
+    tar -xOzf "$work/chromium.tgz" package/bin/chromium.br | "$node" -e '
+const { pipeline } = require("node:stream/promises");
+const { createBrotliDecompress } = require("node:zlib");
+pipeline(process.stdin, createBrotliDecompress(), process.stdout).catch(error => {
+    console.error(error.message);
+    process.exitCode = 1;
+});
+' > "$work/chrome-headless-shell"
+    printf '%s  %s\n' '53a15d6c3a3d27dfb54c4ba60278b1683136f70cf1e67e989da7dfbd3d451ef0' \
+        "$work/chrome-headless-shell" | sha256sum -c -
+    # Only the executable is substituted, at the exact Linux x64 slot of the pinned Playwright.
+    # Do not use Sparticuz's launcher flags. recording.py still requires Chromium's sandbox.
+    shell_dir="$target/browsers/chromium_headless_shell-1223/chrome-headless-shell-linux64"
+    install -d -o root -g root -m 0755 "$shell_dir"
+    install -T -o root -g root -m 0755 "$work/chrome-headless-shell" "$shell_dir/chrome-headless-shell"
+    tar -xOzf "$work/chromium.tgz" package/LICENSE > "$work/npm-LICENSE"
+    install -T -m 0644 "$work/npm-LICENSE" "$shell_dir/SPARTICUZ-LICENSE.txt"
+else
+    stage='download Chromium from Playwright'
+    printf '\n== %s ==\n' "$stage"
+    PLAYWRIGHT_BROWSERS_PATH="$target/browsers" \
+        "$target/venv/bin/playwright" install --with-deps --only-shell chromium
+fi
 
 stage='configure the private site credential'
 printf '\n== %s ==\n' "$stage"
