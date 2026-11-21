@@ -7,7 +7,8 @@ import shutil
 import subprocess
 import tempfile
 import unittest
-from zipfile import ZipFile
+from io import BytesIO
+from zipfile import ZIP_DEFLATED, ZipFile
 
 ROOT = Path(__file__).resolve().parents[1]
 HOST = ROOT / 'plugin-manager'
@@ -18,9 +19,9 @@ REPLACED = ['includes/header.php', 'includes/management_hub.php', 'includes/stud
 RESTORED = ['other-settings.php', 'includes/footer.php']
 ADDED = ['includes/classroom-school-bots.php', 'school-classroom-settings.php']
 CALENDAR = ROOT / 'school-addon/upload/online-classroom/calendar.php'
-BUNDLE = 'baci-classroom-upgrade-v0.4.14.zip'
-UPDATE = 'baci-plugin-manager-update-v0.1.20.zip'
-CLASSROOM = 'school-classroom-plugin-v0.4.14.zip'
+BUNDLE = 'baci-classroom-upgrade-v0.4.15.zip'
+UPDATE = 'baci-plugin-manager-update-v0.1.21.zip'
+CLASSROOM = 'school-classroom-plugin-v0.4.15.zip'
 
 
 def check_patch(test, upstream, overlay, paths, patch, verify_pin=False):
@@ -42,7 +43,7 @@ def check_patch(test, upstream, overlay, paths, patch, verify_pin=False):
 
 class BaciOverlayTest(unittest.TestCase):
     def test_archives_ship_the_pinned_baci_overlay_and_no_watcher_or_bot_credentials(self):
-        with ZipFile(ROOT / 'artifacts/baci-plugin-manager-v0.1.20.zip') as site:
+        with ZipFile(ROOT / 'artifacts/baci-plugin-manager-v0.1.21.zip') as site:
             for path in REPLACED + RESTORED + ADDED + ['UPSTREAM.json']:
                 self.assertEqual(site.read(path), (BACI / path).read_bytes())
             self.assertEqual(site.read('includes/classroom-calendar.php'), CALENDAR.read_bytes())
@@ -73,11 +74,16 @@ class BaciOverlayTest(unittest.TestCase):
             self.assertIn('0.4.11', manifest['preserve_settings_from'])
             self.assertIn('0.4.12', manifest['preserve_settings_from'])
             self.assertIn('0.4.13', manifest['preserve_settings_from'])
+            self.assertIn('0.4.14', manifest['preserve_settings_from'])
             presets = json.loads(plugin.read('video-presets.json'))
             fields_by_key = {field['key']: field for field in manifest['settings']}
             self.assertEqual(presets['camera']['sizes'], [f'{n}x{n}' for n in (32,64,128,256,360,480)])
             for kind in ('camera', 'screen'):
                 self.assertEqual(len(presets[kind]['sizes']), 6)
+                for role in ('teacher', 'student'):
+                    default = fields_by_key[f'default_{role}_{kind}']
+                    self.assertEqual((default['type'], default['default']), ('select', 'low'))
+                    self.assertEqual(default['options'], ['low', 'medium', 'high'])
                 for level in ('low', 'medium', 'high'):
                     size, fps = presets[kind]['defaults'][level]
                     resolution = fields_by_key[f'{kind}_{level}_size']
@@ -89,7 +95,12 @@ class BaciOverlayTest(unittest.TestCase):
             rectangles = [tuple(map(int, r.split('x'))) for r in presets['screen']['sizes']]
             self.assertTrue(all(w > h for w, h in rectangles))
             self.assertTrue(all(w0 < w1 and h0 < h1 for (w0,h0), (w1,h1) in zip(rectangles, rectangles[1:])))
-            self.assertEqual(len(plugin.namelist()), 29)
+            self.assertEqual(set(plugin.namelist()), set(manifest['files']) | {'plugin.json'})
+            with ZipFile(BytesIO(plugin.read(manifest['pdf_resources']))) as resources:
+                for name in ('pdf.min.mjs', 'pdf.worker.min.mjs'):
+                    self.assertNotIn(f'assets/{name}', plugin.namelist())
+                    self.assertEqual(resources.getinfo(f'runtime/{name}').compress_type, ZIP_DEFLATED)
+                self.assertIn(b'ClassroomPDFPersian', resources.read('runtime/pdf.min.mjs'))
             self.assertEqual(plugin.read('calendar.php'), CALENDAR.read_bytes())
             self.assertLess((ROOT / 'artifacts' / CLASSROOM).stat().st_size, 4 * 1024 * 1024)
             for name, digest in manifest['files'].items():

@@ -209,13 +209,23 @@ $active=cl_active($s,10);
 cl_check_live($cfg,$active,$student,$bind($active,'PA_Student'),$t+9);
 $qualityCfg = $cfg + ['room_video_quality'=>true, 'camera_high_size'=>'360x360','camera_high_fps'=>'20',
     'screen_medium_size'=>'854x480','screen_medium_fps'=>'5','screen_high_size'=>'480x480','screen_high_fps'=>'21'];
-$defaultLevels = array_fill_keys(array_keys(CL_QUALITY_FIELDS), 'low');
+$defaultLevels = array_fill_keys(array_keys(CL_QUALITY_FIELDS), 'default');
 $levels = ['teacherCamera'=>'high','studentCamera'=>'low','teacherScreen'=>'medium','studentScreen'=>'high'];
 $qbody = $bind($active,'PA_Teacher') + ['levels'=>$levels];
 $changeQuality = fn($policy,$who,$input) => cl_set_quality($s,$policy,$first,$active,$who,$input,$t+9);
 $defaults = cl_quality_status($s,$qualityCfg,$first,$active,$teacher)['quality'];
 must($defaults['levels'] === $defaultLevels && $defaults['camera'] === ['width'=>128,'height'=>128,'frameRate'=>8,'bitrate'=>25000]
     && $defaults['screen'] === ['width'=>640,'height'=>360,'frameRate'=>5,'bitrate'=>70000], 'every class and role begins at low');
+$schoolDefaults = $qualityCfg + ['default_teacher_camera'=>'medium','default_student_camera'=>'high',
+    'default_teacher_screen'=>'high','default_student_screen'=>'medium'];
+$schoolStaff = cl_quality_status($s,$schoolDefaults,$first,$active,$teacher)['quality'];
+$schoolPupil = cl_quality_status($s,$schoolDefaults,$first,$active,$student)['quality'];
+must($schoolStaff['levels'] === $defaultLevels && $schoolStaff['camera'] === cl_video_profile($qualityCfg,'camera','medium')
+    && $schoolStaff['screen'] === cl_video_profile($qualityCfg,'screen','high')
+    && $schoolPupil['camera'] === cl_video_profile($qualityCfg,'camera','high')
+    && $schoolPupil['screen'] === cl_video_profile($qualityCfg,'screen','medium'), 'all four plugin defaults are independent for a new class');
+must(cl_quality_default(['default_student_screen'=>['high']], 'student', 'screen') === 'low'
+    && cl_quality_default(['default_teacher_camera'=>'default'], 'teacher', 'camera') === 'low', 'bad settings fail back to the stock low level');
 denied(403,fn()=>$changeQuality($cfg,$teacher,$qbody));
 denied(403,fn()=>$changeQuality($qualityCfg,$student,array_replace($qbody,['sid'=>'PA_Student'])));
 denied(403,fn()=>$changeQuality($qualityCfg,$other,$qbody));
@@ -237,7 +247,20 @@ must(cl_quality_status($s,$qualityCfg,$first,$active,$teacher,$teacherQuality) =
 must(cl_quality_levels($s,$qualityCfg,$classes[20]) === $defaultLevels
     && cl_quality_levels($s,$qualityCfg,array_replace($first,['year'=>'1406/1407'])) === $defaultLevels
     && cl_quality_levels($s,$cfg,$first) === $defaultLevels && cl_quality_levels($s,$qualityCfg,$first) === $levels,
-    'isolation by class and year, opt-out uses low but retains class settings');
+    'room choices are isolated by class and year and remain saved while editing is disabled');
+$editingOff = array_replace($schoolDefaults,['room_video_quality'=>false]);
+denied(403,fn()=>$changeQuality($editingOff,$teacher,$qbody));
+$offStaff = cl_quality_status($s,$editingOff,$first,$active,$teacher);
+must($offStaff['quality'] === array_diff_key($schoolStaff,['levels'=>true])
+    && cl_quality_status($s,$editingOff,$first,$active,$student)['quality'] === $schoolPupil
+    && $offStaff['qualityRev'] !== $teacherQuality['qualityRev']
+    && cl_quality_status($s,$schoolDefaults,$first,$active,$teacher)['quality'] === $teacherQuality['quality'],
+    'switching off room editing uses admin presets and changes the revision; switching back restores choices verbatim');
+$inherit = array_replace($levels,['teacherCamera'=>'default','studentScreen'=>'default']);
+$partial = $changeQuality($schoolDefaults,$teacher,array_replace($qbody,['levels'=>$inherit]))['quality'];
+must($partial['levels'] === $inherit && $partial['camera'] === $schoolStaff['camera']
+    && cl_quality_status($s,$schoolDefaults,$first,$active,$student)['quality']['screen'] === $schoolPupil['screen']
+    && cl_active($s,10) === $active, 'authorized staff can return individual sources to inheritance without changing media grants');
 must($active['first_seen'] === ['student-1'=>$t+9] && $active['seconds'] === [],
     'the first verified sample records a clock before any consecutive interval earns time');
 $wake = $bind($active,'PA_Teacher') + ['mode'=>'idle'];
@@ -442,7 +465,7 @@ $a3=$sample(10,$t+41,$first);
 must($a3['phase']==='paused' && !isset($sfus[$r3]) && $a3['seconds']['student-1']===6, 'unsampled gap not counted, expired transport revoked');
 $cl=cl_active($s,10);
 cl_close_lesson($s,$cfg,$cl,$t+42,$rpc);
-must(cl_quality_levels($s,$qualityCfg,$first) === $levels, 'closing a lesson does not reset the class quality');
+must(cl_quality_levels($s,$qualityCfg,$first) === $inherit, 'closing a lesson does not reset the class quality');
 must(!cl_active($s,10) && !isset($sfus[$r3]) && $s->get('activity',$cl['id'])===null, 'close and purge activity');
 must(!isset($s->get('lesson',$cl['id'])['wake_mode']), 'wake policy is not retained in the finished lesson or report');
 $rpt=cl_report_detail($s,$teacher,$cl['id']);

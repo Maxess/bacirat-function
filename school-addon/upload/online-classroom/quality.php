@@ -28,13 +28,18 @@ function cl_quality_key(array $class): string
     return $class['id'] . ':' . $class['year'];
 }
 
+function cl_quality_options(): array
+{
+    return ['default'=>'پیش‌فرض افزونه'] + cl_video_presets()['levels'];
+}
+
 function cl_quality_levels(ClassroomStore $s, array $cfg, array $class): array
 {
-    $levels = array_fill_keys(array_keys(CL_QUALITY_FIELDS), 'low');
-    if (!cl_quality_enabled($cfg)) return $levels; // Retain saved choices while the feature is off.
+    $levels = array_fill_keys(array_keys(CL_QUALITY_FIELDS), 'default');
+    if (!cl_quality_enabled($cfg)) return $levels; // Use admin defaults without deleting room overrides.
     $saved = $s->get('video-quality', cl_quality_key($class)) ?? [];
-    $valid = array_keys(cl_video_presets()['levels']);
-    foreach ($levels as $key=>&$level) if (in_array($saved[$key] ?? null, $valid, true)) $level = $saved[$key];
+    $valid = array_keys(cl_quality_options());
+    foreach (array_keys($levels) as $key) if (in_array($saved[$key] ?? null, $valid, true)) $levels[$key] = $saved[$key];
     return $levels;
 }
 
@@ -56,12 +61,21 @@ function cl_video_profile(array $cfg, string $kind, string $level): array
     return ['width'=>$width, 'height'=>$height, 'frameRate'=>$frameRate, 'bitrate'=>$bitrate];
 }
 
+function cl_quality_default(array $cfg, string $role, string $kind): string
+{
+    $level = $cfg['default_' . $role . '_' . $kind] ?? 'low';
+    return in_array($level, array_keys(cl_video_presets()['levels']), true) ? $level : 'low';
+}
+
 function cl_quality_status(ClassroomStore $s, array $cfg, array $class, array $lesson, array $actor, array $input = []): array
 {
     $levels = cl_quality_levels($s, $cfg, $class);
     $role = cl_is_staff($actor) ? 'teacher' : 'student';
-    $quality = ['camera'=>cl_video_profile($cfg, 'camera', $levels[$role . 'Camera']),
-        'screen'=>cl_video_profile($cfg, 'screen', $levels[$role . 'Screen'])];
+    $quality = [];
+    foreach (['camera','screen'] as $kind) {
+        $choice = $levels[$role . ucfirst($kind)];
+        $quality[$kind] = cl_video_profile($cfg, $kind, $choice === 'default' ? cl_quality_default($cfg, $role, $kind) : $choice);
+    }
     if (cl_quality_control($cfg, $lesson, $actor)) $quality['levels'] = $levels;
     $rev = substr(hash('sha256', json_encode($quality, JSON_THROW_ON_ERROR)), 0, 24);
     return ['qualityRev'=>$rev] + (($input['qualityRev'] ?? null) === $rev ? [] : ['quality'=>$quality]);
@@ -76,7 +90,7 @@ function cl_set_quality(ClassroomStore $s, array $cfg, array $class, array $less
     if (!is_array($levels) || count($levels) !== count(CL_QUALITY_FIELDS) || array_diff_key($levels, CL_QUALITY_FIELDS)) {
         throw new ClassroomError(400, 'هر چهار کیفیت کلاس را جداگانه انتخاب کن.');
     }
-    $valid = array_keys(cl_video_presets()['levels']);
+    $valid = array_keys(cl_quality_options());
     foreach ($levels as $value) if (!in_array($value, $valid, true)) throw new ClassroomError(400, 'سطح کیفیت معتبر نیست.');
     $s->put('video-quality', cl_quality_key($class), $levels);
     return cl_quality_status($s, $cfg, $class, $lesson, $actor);

@@ -16,8 +16,8 @@ HOST = ROOT / 'plugin-manager'
 SRC = ROOT / 'school-addon/upload/online-classroom'
 LEGACY = ARTIFACTS / 'school-classroom-pilot-v0.1.0.zip'
 LEGACY_SHA = 'bebc35a02f57346880373a034ee493b757a8017a12812a133ab957358d9de161'
-VERSION = '0.4.14'
-MANAGER_VERSION = '0.1.20'
+VERSION = '0.4.15'
+MANAGER_VERSION = '0.1.21'
 BACI = HOST / 'baci'
 BACI_PATCH = 'baci-4.221.0-e0f3f686.patch'
 BACI_FILES = ('other-settings.php', 'includes/header.php', 'includes/footer.php', 'includes/management_hub.php',
@@ -48,23 +48,23 @@ def pdf_entries(archive_path):
         def read(name):
             with tar.extractfile(members[name]) as f:
                 return f.read()
-        files = {f'assets/{n}': read(f'legacy/build/{n}') for n in ('pdf.min.mjs','pdf.worker.min.mjs')}
+        runtime = {f'runtime/{n}': read(f'legacy/build/{n}') for n in ('pdf.min.mjs','pdf.worker.min.mjs')}
         # A small, checked change on top of the pinned upstream: only fonts not embedded in the PDF
         # get the site's Arabic-script fallback. Preserve embedded fonts, glyph positions and advances.
-        main = 'assets/pdf.min.mjs'
+        main = 'runtime/pdf.min.mjs'
         original = b'a=n.systemFontInfo?.css||`"${s}", ${n.fallbackName}`;'
         fallback = b'a=(n.missingFile?\'"ClassroomPDFPersian", \' : "")+(n.systemFontInfo?.css||`"${s}", ${n.fallbackName}`);'
-        if files[main].count(original) != 1:
+        if runtime[main].count(original) != 1:
             raise ValueError('Review the PDF.js missing-font fallback for this upstream version')
-        files[main] = (b'/* Baci: add a local Arabic-script fallback for unembedded fonts. */\n'
-                       + files[main].replace(original, fallback, 1))
-        files['assets/pdf.LICENSE.txt'] = read('LICENSE')
+        runtime[main] = (b'/* Baci: add a local Arabic-script fallback for unembedded fonts. */\n'
+                         + runtime[main].replace(original, fallback, 1))
         selected = {n: read(n) for n in members if re.fullmatch(
             r'(?:cmaps|standard_fonts|iccs|wasm)/(?:[A-Za-z0-9_.-]+\.(?:bcmap|ttf|pfb|icc)|(?:jbig2|openjpeg|qcms_bg)\.wasm|(?:jbig2|openjpeg)_nowasm_fallback\.js|LICENSE[A-Z0-9_]*)', n)}
         data = BytesIO()
-        write_zip(data, selected)
-        files['assets/pdf-resources.zip'] = data.getvalue()
-        return files
+        # Keep the reviewed PDF runtime and resources in one verified ZIP. The manager
+        # serves its deflated members directly as gzip, without storing duplicate variants.
+        write_zip(data, selected | runtime)
+        return {'assets/pdf-resources.zip': data.getvalue(), 'assets/pdf.LICENSE.txt': read('LICENSE')}
 
 
 def video_settings(presets):
@@ -77,6 +77,15 @@ def video_settings(presets):
                    'default': size, 'options': group['sizes']}
             yield {'key': f'{kind}_{level}_fps', 'type': 'select', 'label': f'{title} · فریم بر ثانیه',
                    'default': str(fps), 'options': [str(n) for n in range(presets['fps']['min'], presets['fps']['max'] + 1)]}
+
+
+def default_video_settings(presets):
+    for role, audience in (('teacher', 'دبیر'), ('student', 'دانش‌آموز')):
+        for kind in ('camera', 'screen'):
+            yield {'key': f'default_{role}_{kind}', 'type': 'select',
+                   'label': f'{presets[kind]["label"]} {audience}', 'default': 'low',
+                   'group': 'کیفیت پیش‌فرض کلاس‌ها',
+                   'options': list(presets['levels']), 'option_labels': presets['levels']}
 
 
 def plugin_entries(pdf_archive):
@@ -99,7 +108,7 @@ def plugin_entries(pdf_archive):
         'report_menus': {role: 'حضور و غیاب کلاس مجازی' for role in ('teacher', 'admin', 'deputy')},
         'routes': {'page': 'index.php', 'api': 'api.php', 'content': 'content.php', 'events': 'events.php', 'job': 'job.php'},
         'store': True, 'pdf_resources': 'assets/pdf-resources.zip',
-        'preserve_settings_from': ['0.2.0', '0.2.1', '0.2.2', '0.2.3', '0.3.0', '0.4.0', '0.4.1', '0.4.2', '0.4.3', '0.4.4', '0.4.5', '0.4.6', '0.4.7', '0.4.8', '0.4.9', '0.4.10', '0.4.11', '0.4.12', '0.4.13'],
+        'preserve_settings_from': ['0.2.0', '0.2.1', '0.2.2', '0.2.3', '0.3.0', '0.4.0', '0.4.1', '0.4.2', '0.4.3', '0.4.4', '0.4.5', '0.4.6', '0.4.7', '0.4.8', '0.4.9', '0.4.10', '0.4.11', '0.4.12', '0.4.13', '0.4.14'],
         'hooks': {'deactivate': 'deactivate.php'},
         'settings': [
             {'key': 'signal_url', 'type': 'wss', 'label': 'آدرس رسانه (wss://)'},
@@ -110,6 +119,7 @@ def plugin_entries(pdf_archive):
             {'key': 'student_screen_share', 'type': 'switch', 'label': 'اشتراک صفحهٔ دانش‌آموز (با اجازهٔ موردی دبیر؛ نیازمند اشتراک صفحه)'},
             {'key': 'camera_share', 'type': 'switch', 'label': 'وبکم کم‌مصرف (تصویر مربع، با اجازهٔ دبیر)'},
             {'key': 'room_video_quality', 'type': 'switch', 'label': 'اجازهٔ تغییر کیفیت تصویر در اتاق هر کلاس (دبیر یا مسئول مجاز)'},
+            *default_video_settings(presets),
             *video_settings(presets),
             {'key': 'repeat_bells', 'type': 'switch', 'label': 'اجازهٔ برگزاری مجدد زنگ پایان‌یافته در همان روز (دستی، با گزارش جدا)'},
             {'key': 'notify_school_bale', 'type': 'switch', 'label': 'ارسال حضور به گفت‌وگوهای خصوصی ربات بله'},

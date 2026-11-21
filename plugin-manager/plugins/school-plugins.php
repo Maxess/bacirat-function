@@ -4,7 +4,7 @@ declare(strict_types=1);
 use BaciClassroom\Calendar;
 
 // School plugin runtime and gateway. Settings are exposed by the reviewed host overlay.
-const MPM_VERSION = '0.1.20';
+const MPM_VERSION = '0.1.21';
 const MPM_CLASSROOM_NATIVE = '0.4.0';
 const MPM_CLASSROOM_PUPIL_TRIAL = '0.4.3';
 const MPM_REGISTRY = 'mtg_plugin_registry';
@@ -34,6 +34,7 @@ const MPM_CATALOG = [
         '0.4.12' => 'fbfdc731b25c38dff963f5d98069807aaef117902824011272abae3a781d9369',
         '0.4.13' => '8a4746726dda14bbb243de3cb55310da46dfeb14625eee4a27b961beb6e0bf0b',
         '0.4.14' => 'f0a14a694a35f53b2b739ca71134bf49130e72d76527b3a8ffa5204cd0ace5f3',
+        '0.4.15' => '8f346d7b8ecd64f67fe0eb8b1cc6ab7e984a11af87252dfc6e9f573edfbca8f2',
     ],
 ];
 
@@ -630,7 +631,7 @@ function mpm_save_settings(PDO $db, string $dir, array $row, array $manifest, ar
             $value = filter_var($value, FILTER_VALIDATE_INT, ['options' => ['min_range' => $field['min'], 'max_range' => $field['max']]]);
             if ($value === false) throw new MpmNotice('عدد تنظیم از محدودهٔ مجاز خارج است.');
         } elseif ($field['type'] === 'select') {
-            if (!in_array($value, $field['options'], true)) throw new MpmNotice('این وضوح تصویر یا نرخ فریم مجاز نیست.');
+            if (!in_array($value, $field['options'], true)) throw new MpmNotice('این گزینهٔ کیفیت تصویر مجاز نیست.');
         } elseif (in_array($field['type'], ['token', 'secret'], true)) {
             if ($field['type'] === 'secret' && $value === '') $value = $previous[$key] ?? '';
             if (!preg_match('/^[A-Za-z0-9_-]+$/D', $value) || strlen($value) < $field['min'] || strlen($value) > $field['max']) throw new MpmNotice('شناسه یا کلید سرویس رسانه کامل نیست.');
@@ -850,8 +851,10 @@ function mpm_dispatch(PDO $db, array $site, string $slug, string $route, string 
             session_write_close();
             if ($type[1] === 'mjs') header("Content-Security-Policy: default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self'");
             header('Content-Type: ' . ($type[1] === 'css' ? 'text/css' : 'text/javascript') . '; charset=UTF-8');
+            $digest = $manifest['files'][$name];
+            $immutable = mpm_static_versioned($digest);
             $path = mpm_verified_file($dir, $row, $manifest, $name);
-            mpm_static_reply($manifest['files'][$name], static fn() => file_get_contents($path));
+            mpm_static_reply($digest, static fn() => file_get_contents($path), $immutable);
             return;
         }
         if (!array_key_exists($route, $manifest['routes'])) {
@@ -875,15 +878,27 @@ function mpm_accepts_gzip(string $header): bool
     return $fallback;
 }
 
+function mpm_static_versioned(string $digest): bool
+{
+    $version = $_GET['v'] ?? null;
+    if ($version === null) return false; // Older installed plugins still use revalidated URLs.
+    if (!is_string($version) || !hash_equals($digest, $version)) {
+        http_response_code(404);
+        throw new MpmNotice('این نسخهٔ فایل موجود نیست؛ صفحهٔ کلاس را دوباره باز کن.');
+    }
+    return true;
+}
+
 /** Only package-verified, non-personal assets. Keep lesson APIs, photos and files no-store. */
-function mpm_static_reply(string $digest, callable $load): void
+function mpm_static_reply(string $digest, callable $load, bool $immutable = false, ?callable $loadGzip = null): void
 {
     $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
     if (!in_array($method, ['GET','HEAD'], true)) {
         header('Allow: GET, HEAD'); http_response_code(405); return;
     }
     $tag = '"' . $digest . '"';
-    header('Cache-Control: private, no-cache'); // Recheck session, active package and hash on every revalidation.
+    header('Cache-Control: ' . ($immutable ? 'private, max-age=31536000, immutable' : 'private, no-cache'));
+    if ($immutable) { header_remove('Pragma'); header_remove('Expires'); }
     header('ETag: W/' . $tag); // Same bytes after decoding gzip or identity.
     header('Vary: Accept-Encoding', false);
     $tags = array_map('trim', explode(',', (string)($_SERVER['HTTP_IF_NONE_MATCH'] ?? '')));
@@ -892,11 +907,14 @@ function mpm_static_reply(string $digest, callable $load): void
     }
     if ($method === 'HEAD') return;
     // Do not double-compress on a host that already has PHP output compression.
+    $gzipOK = (int)ini_get('zlib.output_compression') === 0 && strtolower((string)ini_get('zlib.output_compression')) !== 'on'
+        && !in_array('ob_gzhandler', ob_list_handlers(), true) && mpm_accepts_gzip((string)($_SERVER['HTTP_ACCEPT_ENCODING'] ?? ''));
+    if ($gzipOK && $loadGzip && is_string($gzip = $loadGzip())) {
+        header('Content-Encoding: gzip'); echo $gzip; return;
+    }
     $bytes = $load();
     if (!is_string($bytes)) throw new MpmNotice('خواندن فایل بسته ممکن نشد.');
-    if (strlen($bytes) > 512 && function_exists('gzencode') && (int)ini_get('zlib.output_compression') === 0
-        && strtolower((string)ini_get('zlib.output_compression')) !== 'on' && !in_array('ob_gzhandler', ob_list_handlers(), true)
-        && mpm_accepts_gzip((string)($_SERVER['HTTP_ACCEPT_ENCODING'] ?? ''))) {
+    if ($gzipOK && !$loadGzip && strlen($bytes) > 512 && function_exists('gzencode')) {
         $gzip = gzencode($bytes, 4);
         if ($gzip !== false && strlen($gzip) < strlen($bytes)) {
             header('Content-Encoding: gzip'); echo $gzip; return;
@@ -905,24 +923,41 @@ function mpm_static_reply(string $digest, callable $load): void
     echo $bytes;
 }
 
+/** The trusted ZIP and gzip both use raw DEFLATE. Serve cold requests without inflate/recompress. */
+function mpm_pdf_gzip(ZipArchive $zip, array $entry): string|false
+{
+    if ($entry['comp_method'] !== ZipArchive::CM_DEFLATE || $entry['comp_size'] + 18 >= $entry['size']) return false;
+    $raw = $zip->getFromIndex($entry['index'], 0, ZipArchive::FL_COMPRESSED);
+    if ($raw === false || strlen($raw) !== $entry['comp_size']) return false;
+    return "\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\xff" . $raw . pack('V2', $entry['crc'], $entry['size']);
+}
+
 function mpm_pdf_resource(string $dir, array $row, array $manifest): void
 {
     $name = $_GET['name'] ?? null;
     $kinds = ['bcmap'=>'application/octet-stream', 'pfb'=>'application/octet-stream', 'ttf'=>'font/ttf',
-        'wasm'=>'application/wasm', 'icc'=>'application/octet-stream', 'js'=>'text/javascript; charset=UTF-8'];
-    if (!is_string($name) || !preg_match('~^(cmaps|standard_fonts|wasm|iccs)/[a-zA-Z0-9_.-]+\.(bcmap|pfb|ttf|wasm|icc|js)$~D', $name, $m)) {
+        'wasm'=>'application/wasm', 'icc'=>'application/octet-stream', 'js'=>'text/javascript; charset=UTF-8',
+        'mjs'=>'text/javascript; charset=UTF-8'];
+    if (!is_string($name) || !preg_match('~^(?:(?:cmaps|standard_fonts|wasm|iccs)/[a-zA-Z0-9_.-]+\.(?:bcmap|pfb|ttf|wasm|icc|js)|runtime/pdf(?:\.worker)?\.min\.mjs)$~D', $name)) {
         http_response_code(404); return;
     }
     session_write_close();
+    $archive = $manifest['pdf_resources'];
+    $digest = $manifest['files'][$archive];
+    $immutable = mpm_static_versioned($digest);
     $zip = new ZipArchive();
-    if ($zip->open(mpm_verified_file($dir, $row, $manifest, $manifest['pdf_resources']), ZipArchive::RDONLY) !== true) {
+    if ($zip->open(mpm_verified_file($dir, $row, $manifest, $archive), ZipArchive::RDONLY) !== true) {
         throw new MpmNotice('منابع نمایش PDF معتبر نیست.');
     }
     try {
-        $data = $zip->getFromName($name);
-        if ($data === false) { http_response_code(404); return; }
-        header('Content-Type: ' . $kinds[$m[2]]);
-        mpm_static_reply(hash('sha256', $data), static fn() => $data);
+        $entry = $zip->statName($name);
+        if ($entry === false) { http_response_code(404); return; }
+        $type = pathinfo($name, PATHINFO_EXTENSION);
+        if ($type === 'mjs') header("Content-Security-Policy: default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self'");
+        header('Content-Type: ' . $kinds[$type]);
+        // The verified archive digest also versions every member. No decompression for HEAD/304.
+        mpm_static_reply(hash('sha256', $digest . ':' . $name), static fn() => $zip->getFromIndex($entry['index']),
+            $immutable, static fn() => mpm_pdf_gzip($zip, $entry));
     } finally {
         $zip->close();
     }
@@ -939,6 +974,7 @@ function mpm_call(PDO $db, array $site, string $dir, array $row, array $manifest
     $GLOBALS['MTAG_PLUGIN_CONTEXT'] = [
         'pdo' => $db, 'base' => 'school-plugins.php?plugin=' . rawurlencode($row['slug']), 'site_base' => '../',
         'site_root' => mpm_host_root(),
+        'asset_hashes' => $manifest['files'], 'pdf_hash' => $manifest['files'][$manifest['pdf_resources'] ?? ''] ?? null,
         'store' => !empty($manifest['store']) ? mpm_check_store($db, $row) : null,
         'plugin_dir' => mpm_path($dir, $row), 'job_mode'=>$jobMode,
         'school_bot' => static function (string $provider) use ($db, $site): ?array {
@@ -1245,8 +1281,16 @@ function mpm_render_settings(PDO $db, ?array $site, string $csrf, string $notice
         if ($manifest && $compatible && $row['state'] === 'disabled' && $runtime === null) {
             echo '<form class="mb-3" method="post" action="' . $action . '">';
             mpm_hidden($csrf, 'settings', $slug);
+            $group = null;
             foreach ($manifest['settings'] as $field) {
                 if (in_array($field['type'], ['bell-hours','friday-test'], true)) continue;
+                $nextGroup = $field['group'] ?? null;
+                if ($group !== $nextGroup) {
+                    if ($group !== null) echo '</fieldset>';
+                    $group = $nextGroup;
+                    if ($group !== null) echo '<fieldset class="mb-3"><legend>' . mpm_html($group) . '</legend>'
+                        . '<p class="text-muted">این کیفیت وقتی کلاس تنظیم جداگانه ندارد یا تنظیم کیفیت در اتاق خاموش است، اعمال می‌شود.</p>';
+                }
                 $key = $field['key'];
                 $name = 'settings[' . mpm_html($key) . ']';
                 $value = $values[$key] ?? '';
@@ -1260,7 +1304,7 @@ function mpm_render_settings(PDO $db, ?array $site, string $csrf, string $notice
                     $chosen = $values[$key] ?? $field['default'];
                     echo '<select class="form-input" dir="ltr" name="' . $name . '" required>';
                     foreach ($field['options'] as $option) {
-                        $label = preg_match('/^\d+x\d+$/D', $option) ? str_replace('x', '×', $option) : $option;
+                        $label = $field['option_labels'][$option] ?? (preg_match('/^\d+x\d+$/D', $option) ? str_replace('x', '×', $option) : $option);
                         echo '<option value="' . mpm_html($option) . '"' . ($option === $chosen ? ' selected' : '') . '>' . mpm_html($label) . '</option>';
                     }
                     echo '</select>';
@@ -1272,6 +1316,7 @@ function mpm_render_settings(PDO $db, ?array $site, string $csrf, string $notice
                 }
                 echo '</label>';
             }
+            if ($group !== null) echo '</fieldset>';
             echo '<button class="btn btn-primary" type="submit">ذخیرهٔ تنظیمات</button></form>';
         }
         if ($manifest && $compatible && mpm_has_setting($manifest, 'bell_hours', 'bell-hours')) mpm_render_bell_hours($csrf, $slug, $values['bell_hours'] ?? [], $action);
@@ -1338,6 +1383,7 @@ function mpm_run(): void
         if ($route !== 'events' && $route !== 'job') require_once $root . '/includes/auth.php';
         mpm_dispatch($db, $site, $plugin, $route);
     } catch (Throwable $error) {
+        header('Cache-Control: no-store, private');
         $message = $error instanceof MpmNotice ? $error->getMessage() : 'مدیر افزونه‌ها موقتاً در دسترس نیست.';
         if (!$error instanceof MpmNotice) error_log('mtagbot plugin manager: request failed (' . get_class($error) . ')');
         if ((int)http_response_code() < 400) http_response_code(503);

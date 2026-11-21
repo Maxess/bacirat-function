@@ -54,7 +54,17 @@ function cl_href(array $params = []): string
 
 function cl_asset(string $name): string
 {
-    return cl_href(['route'=>'asset', 'name'=>'assets/' . $name]);
+    $name = 'assets/' . $name;
+    $params = ['route'=>'asset', 'name'=>$name];
+    if ($version = cl_context()['asset_hashes'][$name] ?? null) $params['v'] = $version;
+    return cl_href($params);
+}
+
+function cl_pdf_href(string $name = ''): string
+{
+    $params = ['route'=>'pdf'];
+    if ($version = cl_context()['pdf_hash'] ?? null) $params['v'] = $version;
+    return $name === '' ? cl_href($params) . '&name=' : cl_href($params + ['name'=>$name]);
 }
 
 function cl_site_href(string $page): string

@@ -41,11 +41,17 @@
     const permissionIcons = el('permission-icons')?.content;
     const cameraSource = lk?.Track.Source.Camera, micSource = lk?.Track.Source.Microphone, screenSource = lk?.Track.Source.ScreenShare;
     const profileKey = p => p && `${p.width}×${p.height}/${p.frameRate}/${p.bitrate}`;
-    const screenToggle = el('screen-toggle');
+    const screenToggle = el('screen-toggle'), screenAction = el('screen-action');
+    const screenHint = el('screen-hint'), boardScreenHint = el('board-screen-hint');
     const qualityButton = el('quality-open'), qualityDialog = el('quality-dialog');
     const qualityFields = ['teacherCamera','studentCamera','teacherScreen','studentScreen'];
     const canCaptureCamera = typeof window.navigator?.mediaDevices?.getUserMedia === 'function';
-    const canCaptureScreen = typeof window.navigator?.mediaDevices?.getDisplayMedia === 'function';
+    const displayPolicy = document.permissionsPolicy ?? document.featurePolicy;
+    const screenBlocked = displayPolicy?.features?.().includes('display-capture') && displayPolicy.allowsFeature?.('display-capture') === false
+        ? 'اجازهٔ مرورگر برای اشتراک صفحه در این برگه بسته است؛ کلاس را دوباره باز کن.'
+        : typeof window.navigator?.mediaDevices?.getDisplayMedia !== 'function'
+            ? 'این مرورگر امکان اشتراک صفحه ندارد؛ کلاس را با مرورگر سازگار روی رایانه باز کن.' : '';
+    const canCaptureScreen = !screenBlocked;
     const attention = window.ClassroomAttention(changeWake);
     let active = null, connecting = false, busy = false, polling = false, needsRefresh = false, permanent = false, stopped = false;
     let wanted = true, autoStart = staff, optedIntoTest = false, state = {phase:'idle', ready:null}, chatCursor = 0, seconds = {}, admitted = false;
@@ -448,15 +454,26 @@
         if (display) put(el('screen-label'), `اشتراک صفحهٔ ${personName(person)}`);
         if (!screenToggle) return false;
         const button = screenToggle;
-        const show = live && state.screenEnabled === true && !!state.quality?.screen && canCaptureScreen && (staff || mine);
+        // The invitation is visible independently of picker support and the SFU update's arrival order.
+        const configured = live && state.screenEnabled === true;
+        const show = configured && (staff ? canCaptureScreen && !!state.quality?.screen : mine);
         const sharing = !!(mine && active.screenTrack);
+        const pending = !!mine && (!state.quality?.screen || !mayScreen(local));
         button.hidden = !show;
-        button.disabled = !show || busy || !!active?.screenBusy || (!!selected && !mine) || (!!mine && !mayScreen(local) && !sharing);
+        button.disabled = !show || !canCaptureScreen || pending || busy || !!active?.screenBusy || (!!selected && !mine);
         const label = sharing ? 'توقف اشتراک صفحه' : !!selected && !mine ? 'ارائه‌دهندهٔ دیگری در حال اشتراک است'
-            : mine ? 'انتخاب صفحه برای اشتراک' : 'آماده‌سازی اشتراک صفحه';
+            : mine ? 'اشتراک صفحه' : 'آماده‌سازی اشتراک صفحه';
         button.setAttribute('aria-label',label); button.title = label;
         button.setAttribute('aria-pressed',String(sharing));
         button.dataset.prepared = String(!!mine && !sharing);
+        if (screenAction) put(screenAction, sharing ? 'توقف اشتراک' : 'اشتراک صفحه');
+        if (screenHint && boardScreenHint) {
+            const reason = screenBlocked || (pending ? 'در حال همگام‌سازی اجازهٔ اشتراک صفحه…' : '');
+            const invited = show && !sharing;
+            put(screenHint, invited ? reason || 'دبیر اجازه داد؛ برای شروع، «اشتراک صفحه» را بزن.' : '');
+            put(boardScreenHint, invited ? reason || 'دبیر اجازهٔ اشتراک صفحه داد. برای شروع به نمای کلاس برگرد.' : '');
+            screenHint.hidden = boardScreenHint.hidden = !invited;
+        }
         return show;
     }
 
@@ -820,10 +837,6 @@
             if (active && local.sid && scope().sid === local.sid && connected() && result.admitted === true) {
                 admitted = true; seconds = result.seconds || {};
                 render();
-                if (!staff && canCaptureScreen && result.screenEnabled && itsScreen(active)
-                    && (prior.screen?.identity !== result.screen.identity || prior.screen?.sid !== result.screen.sid)) {
-                    note('دبیر اجازهٔ اشتراک صفحه داده است؛ برای شروع، خودت صفحه را انتخاب کن.');
-                }
                 attention.snapshot(result.profiles, pushChat(result.chat), result.chatMore, active.room.localParticipant.identity);
                 receiveBoard(result.board, scope(), requestedAt);
                 needsRefresh ||= !!result.chatMore;

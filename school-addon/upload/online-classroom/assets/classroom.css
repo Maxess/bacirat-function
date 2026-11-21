@@ -129,6 +129,9 @@ caption { font-weight: 700; text-align: start; margin: 0 0 .45rem; }
 .room-name bdi { min-width: 0; overflow-wrap: anywhere; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .room-name .class-name[dir=ltr] { flex: none; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .room-controls, .room-indicators { flex: none; }
+.room-shell[data-moderator=no] .room-top:has(.screen-toggle:not([hidden])) { flex-wrap: wrap; }
+.room-shell[data-moderator=no] .screen-toggle[data-prepared=true] { color: var(--accent); border-color: #698646; background: var(--accent-well); }
+.screen-hint { flex: 0 0 100%; margin: 0; color: var(--accent); font-size: .79rem; }
 .room-indicators { margin-inline-start: auto; }
 .room-signal { display: grid; justify-items: center; gap: .03rem; }
 .lesson-start { white-space: nowrap; color: var(--muted); font-size: .67rem; line-height: 1.35; }

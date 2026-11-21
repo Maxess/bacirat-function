@@ -80,6 +80,7 @@ try {
     $webcam = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.12.zip';
     $square = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.13.zip';
     $quality = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.14.zip';
+    $defaults = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.15.zip';
     $menus = static fn() => [file_get_contents($root . '/other-settings.php'), file_get_contents($root . '/includes/header.php')];
     $managerMenus = [$other, $header];
     expect($menus() === $managerMenus, 'initialization does not rewrite the host');
@@ -450,6 +451,32 @@ try {
         && $newSettings['screen_medium_size']==='854x480' && $newSettings['room_video_quality']===true && $newSettings['student_screen_share']===true
         && $newSettings['friday_test']===$pupilGrant && $newSettings['bell_hours']===$hours && $newSettings['api_secret']===$secret,
         'valid range endpoints, independent presets, intact site settings and credentials');
+    $levels = '{"teacherCamera":"high","studentCamera":"low","teacherScreen":"medium","studentScreen":"low"}';
+    mpm_query($db, "INSERT INTO `$store` (bucket,item,payload) VALUES (?,?,?)", ['video-quality','22:1404/1405',$levels]);
+    $qualityEncrypted = mpm_owned_row($db,$row)['settings'];
+    submit($db,$site,'enable');
+    denied(fn()=>mpm_install($db,$dir,$defaults));
+    submit($db,$site,'disable');
+    expect(mpm_install($db,$dir,$defaults), 'upgrade .14 with the no-purge path');
+    $row = mpm_row($db,$slug);
+    expect($row['version']==='0.4.15' && $row['owner']===$oldRow['owner'] && mpm_check_store($db,$row)===$store
+        && mpm_owned_row($db,$row)['settings']===$qualityEncrypted && mpm_settings($db,$dir,$row)===$newSettings
+        && mpm_query($db,"SELECT payload FROM `$store` WHERE bucket='video-quality' AND item=?",['22:1404/1405'])->fetchColumn()===$levels
+        && mpm_query($db,"SELECT payload FROM `$store` WHERE bucket='lesson' AND item=?",[$oldId])->fetchColumn()===$finishedBefore,
+        'the .14→.15 upgrade does not rewrite school settings, per-class choices or history');
+    ob_start(); mpm_render_settings($db,$site,'fixture',''); $adminDefaults=ob_get_clean();
+    expect(str_contains($adminDefaults,'<legend>کیفیت پیش‌فرض کلاس‌ها</legend>')
+        && preg_match_all('/<select[^>]+name="settings\[default_(?:teacher|student)_(?:camera|screen)\]"/', $adminDefaults) === 4
+        && substr_count($adminDefaults,'<option value="low" selected>پایین</option>') === 4, 'four independent defaults start at low');
+    $configured = ['default_teacher_camera'=>'medium','default_student_camera'=>'low','default_teacher_screen'=>'high','default_student_screen'=>'medium'];
+    $input = array_diff_key($qualityInput,['room_video_quality'=>true]) + $configured;
+    foreach (['extra',['high']] as $bad) denied(fn()=>submit($db,$site,'settings',['settings'=>array_replace($input,['default_teacher_camera'=>$bad])]));
+    expect(mpm_owned_row($db,$row)['settings']===$qualityEncrypted, 'invalid school defaults are rejected atomically');
+    submit($db,$site,'settings',['settings'=>$input]);
+    $updated=mpm_settings($db,$dir,$row);
+    expect(array_intersect_key($updated,$configured)==$configured && $updated['room_video_quality']===false
+        && $updated['student_screen_share'] && $updated['bell_hours']===$hours && $updated['api_secret']===$secret,
+        'save all school defaults while room editing is off without changing the other options');
     submit($db,$site,'enable');
     $_SESSION = ['admin_id'=>1];
     foreach ([['view'=>'reports'], ['view'=>'reports', 'lesson'=>$oldId]] as $reportRequest) {
@@ -495,6 +522,77 @@ try {
     ob_start(); mpm_dispatch($db, $site, $slug, 'asset'); $unchanged = ob_get_clean();
     expect(http_response_code() === 304 && $unchanged === '', 'still validates package and never sends unchanged asset bytes');
     http_response_code(200); unset($_SERVER['HTTP_IF_NONE_MATCH']); $_GET = $old;
+    $manifest = mpm_manifest_for($dir,$row);
+    $resourceZip = $manifest['pdf_resources'];
+    $resourceVersion = $manifest['files'][$resourceZip];
+    $module = 'runtime/pdf.worker.min.mjs';
+    expect(str_contains($body,'&amp;v=' . $dig) && str_contains($body,'&amp;v=' . $resourceVersion), 'static URLs contain their verified asset digest');
+    $validResource = ['name'=>$module,'v'=>$resourceVersion];
+    $_GET = ['name'=>$module,'v'=>str_repeat('0',64)];
+    denied(fn()=>mpm_dispatch($db,$site,$slug,'pdf'));
+    expect(http_response_code()===404, 'a mismatched version does not serve the new asset under an old cache key');
+    $_GET = $validResource;
+    $zip = new ZipArchive();
+    expect($zip->open(mpm_release_dir($dir,$row) . '/' . $resourceZip, ZipArchive::RDONLY)===true, 'packed PDF modules can be read');
+    $worker = $zip->getFromName($module); $entry = $zip->statName($module);
+    $compressed = mpm_pdf_gzip($zip,$entry);
+    expect(is_string($compressed) && strlen($compressed)===$entry['comp_size']+18 && gzdecode($compressed)===$worker,
+        'use the stored deflate bytes plus gzip framing, with identical decoded content');
+    $zip->close();
+    http_response_code(200); $_SERVER['HTTP_ACCEPT_ENCODING'] = 'gzip';
+    ob_start(); mpm_dispatch($db,$site,$slug,'pdf'); $wire = ob_get_clean();
+    expect($wire===$compressed, 'authorized reader gets the precompressed PDF module');
+    unset($_SERVER['HTTP_ACCEPT_ENCODING']);
+    ob_start(); mpm_dispatch($db,$site,$slug,'pdf'); $plain = ob_get_clean();
+    expect($plain===$worker, 'identity clients get the same module');
+    $_SERVER['HTTP_IF_NONE_MATCH'] = 'W/"' . hash('sha256',$resourceVersion . ':' . $module) . '"';
+    ob_start(); mpm_dispatch($db,$site,$slug,'pdf'); $empty = ob_get_clean();
+    expect(http_response_code()===304 && $empty==='', 'conditional PDF asset serves no payload');
+    http_response_code(200); unset($_SERVER['HTTP_IF_NONE_MATCH']);
+    $_SESSION=[]; denied(fn()=>mpm_dispatch($db,$site,$slug,'pdf'));
+    expect(http_response_code()===403, 'versioned asset cache does not permit an unauthenticated cold request');
+    http_response_code(200); $_SESSION=['student_id'=>1]; $_GET=$old;
+
+    // The real attachment route must authorize every single or grouped read against this SID.
+    $now=time(); $activeId=str_repeat('a',32); $epoch=str_repeat('b',24); $docKey=str_repeat('c',32); $otherDoc=str_repeat('d',32);
+    $pdfBytes="%PDF-1.5\n" . str_repeat("1234\0\x89AB",100);
+    $classroomStore=new ClassroomStore($db,$store);
+    $classroomStore->put('active','22',['id'=>$activeId]);
+    $classroomStore->put('lesson',$activeId,['id'=>$activeId,'year'=>'1404/1405','room'=>'fixture-c22-' . $epoch,'phase'=>'live',
+        'date'=>cl_day($now)->format('Y-m-d'),'deadline'=>$now+60,'sample'=>$now,'staff'=>['teacher-1'=>'PA_Teacher'],
+        'seen'=>['student-1'=>'PA_Student'],'pulses'=>['student-1'=>['sid'=>'PA_Student','at'=>$now], 'teacher-1'=>['sid'=>'PA_Teacher','at'=>$now]]]);
+    $meta=['mime'=>'application/pdf','bytes'=>strlen($pdfBytes)];
+    $classroomStore->put('activity',$activeId,['doc'=>$docKey,'docs'=>[$docKey=>$meta,$otherDoc=>$meta]]);
+    $attachmentDir=mpm_path($dir,$row) . '/documents/' . $activeId;
+    mkdir($attachmentDir,0700,true);
+    file_put_contents($attachmentDir . '/' . $docKey,$pdfBytes);
+    file_put_contents($attachmentDir . '/' . $otherDoc,$pdfBytes);
+    $attachment = static function (string $doc, string $sid, ?string $range) use ($db,$site,$slug,$activeId,$epoch): array {
+        $_GET=['class'=>22,'doc'=>$doc,'lesson'=>$activeId,'epoch'=>$epoch,'sid'=>$sid];
+        $_SERVER['REQUEST_METHOD']='GET';
+        if ($range === null) unset($_SERVER['HTTP_RANGE']); else $_SERVER['HTTP_RANGE']=$range;
+        http_response_code(200);
+        ob_start(); mpm_dispatch($db,$site,$slug,'content'); $body=ob_get_clean();
+        return [http_response_code(),$body];
+    };
+    expect($attachment($docKey,'PA_Student',null)===[200,$pdfBytes]
+        && $attachment($docKey,'PA_Student','bytes=4-11')===[206,substr($pdfBytes,4,8)], 'full fallback and one range send exact bytes');
+    [$status,$multi]=$attachment($docKey,'PA_Student','bytes=0-9,21-28,170-204');
+    preg_match('/^--(baci-[a-f0-9]{24})\r\n/', $multi,$boundary);
+    $parts=''; $size=strlen($pdfBytes); $delimiter=$boundary[1] ?? '';
+    foreach ([[0,9],[21,28],[170,204]] as [$a,$b]) {
+        $parts.="--$delimiter\r\nContent-Type: application/pdf\r\nContent-Range: bytes $a-$b/$size\r\n\r\n"
+            . substr($pdfBytes,$a,$b-$a+1) . "\r\n";
+    }
+    expect($status===206 && $delimiter!=='' && $multi===$parts . "--$delimiter--\r\n", 'private route serves well-formed, bounded multipart byte ranges');
+    foreach (['bytes=0-9,7-12','bytes=12-10','bytes=9999-','bytes=' . implode(',',array_map(fn($i)=>"$i-$i",range(0,16)))] as $badRange) {
+        expect($attachment($docKey,'PA_Student',$badRange)===[416,''], 'reject malformed, overlapping and oversized span lists');
+    }
+    expect($attachment($docKey,'PA_Stale','bytes=0-1,5-6')===[409,'']
+        && $attachment($otherDoc,'PA_Student','bytes=0-1,5-6')===[404,''], 'no byte from a stale connection or hidden pupil document');
+    $classroomStore->delete('active','22');
+    expect($attachment($docKey,'PA_Student','bytes=0-1,5-6')===[409,''], 'finished or inactive lesson cannot serve another range');
+    unset($_SERVER['HTTP_RANGE']); $_GET=$old; http_response_code(200);
 
     ob_start(); mpm_render_settings($db, $site, 'fixture', ''); $ui = ob_get_clean();
     expect(!str_contains($ui, $secret) && str_contains($ui, 'action="other-settings.php?tab=plugins"') && !str_contains($ui, '<!doctype'), 'native form fragment, no second page or plaintext secret');

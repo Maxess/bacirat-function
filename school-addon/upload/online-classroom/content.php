@@ -48,27 +48,51 @@ try {
     }
     [$doc, $file] = $content;
     $size = $doc['bytes'];
-    $start = 0; $end = $size - 1;
+    $pdf = $doc['mime'] === 'application/pdf';
     $range = $_SERVER['HTTP_RANGE'] ?? null;
-    if ($doc['mime'] === 'application/pdf') header('Accept-Ranges: bytes');
-    if ($range !== null && $doc['mime'] === 'application/pdf') {
-        if (!preg_match('/^bytes=(\d{1,10})-(\d{0,10})$/D', $range, $m) || (int)$m[1] >= $size || ($m[2] !== '' && (int)$m[2] < (int)$m[1])) {
-            header('Content-Range: bytes */' . $size);
-            throw new ClassroomError(416, '');
+    $spans = [[0, $size-1]];
+    if ($pdf) {
+        // Preserve the representation and offsets, including on hosts that gzip PHP output.
+        ini_set('zlib.output_compression', '0');
+        header('Cache-Control: no-store, private, no-transform');
+        header('Accept-Ranges: bytes');
+        if ($range !== null) {
+            $spans = cl_pdf_ranges($range, $size);
+            if (!$spans) {
+                header('Content-Range: bytes */' . $size);
+                throw new ClassroomError(416, '');
+            }
+            http_response_code(206);
         }
-        $start = (int)$m[1];
-        $end = $m[2] === '' ? $end : min($end, (int)$m[2]);
-        fseek($file, $start);
-        http_response_code(206);
-        header("Content-Range: bytes $start-$end/$size");
     }
-    header('Content-Type: ' . $doc['mime']);
-    header('Content-Disposition: attachment; filename="' . ($doc['mime'] === 'application/pdf' ? 'board.pdf' : 'board-image') . '"');
-    header('Content-Length: ' . ($end - $start + 1));
-    for ($left = $end - $start + 1; $left > 0 && !feof($file); $left -= strlen($chunk)) {
-        $chunk = fread($file, min($left, 65536));
-        if ($chunk === false || $chunk === '') break;
-        echo $chunk;
+    header('Content-Disposition: attachment; filename="' . ($pdf ? 'board.pdf' : 'board-image') . '"');
+    if (count($spans) === 1) {
+        [$start,$end] = $spans[0];
+        $length = $end - $start + 1;
+        header('Content-Type: ' . $doc['mime']);
+        if ($pdf && $range !== null) header("Content-Range: bytes $start-$end/$size");
+        header('Content-Length: ' . $length);
+        cl_file_span($file, $start, $length);
+    } else {
+        $boundary = 'baci-' . bin2hex(random_bytes(12));
+        $tail = "--$boundary--\r\n";
+        $length = strlen($tail);
+        $parts = [];
+        foreach ($spans as [$start,$end]) {
+            $head = "--$boundary\r\nContent-Type: application/pdf\r\nContent-Range: bytes $start-$end/$size\r\n\r\n";
+            $bytes = $end - $start + 1;
+            $parts[] = [$head,$start,$bytes];
+            $length += strlen($head) + $bytes + 2;
+        }
+        header('Content-Type: multipart/byteranges; boundary=' . $boundary);
+        header('Content-Length: ' . $length);
+        foreach ($parts as [$head,$start,$bytes]) {
+            if (connection_aborted()) return;
+            echo $head;
+            cl_file_span($file, $start, $bytes);
+            echo "\r\n";
+        }
+        echo $tail;
     }
 } catch (ClassroomError $error) {
     http_response_code($error->status);

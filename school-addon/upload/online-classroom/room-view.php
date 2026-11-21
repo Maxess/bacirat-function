@@ -42,8 +42,8 @@ function cl_room_icon(string $name): string
 <section id="classroom" class="room-shell" data-api="<?= cl_html(cl_href(['route'=>'api'])) ?>" data-csrf="<?= cl_html(cl_context()['csrf']) ?>"
   data-class="<?= $class['id'] ?>" data-bell-date="<?= cl_html($bellDate) ?>" data-moderator="<?= $staff ? 'yes' : 'no' ?>"
   data-content="<?= cl_html(cl_href(['route'=>'content','class'=>$class['id']])) ?>"
-  data-pdf="<?= cl_html(cl_asset('pdf.min.mjs')) ?>" data-pdf-worker="<?= cl_html(cl_asset('pdf.worker.min.mjs')) ?>"
-  data-pdf-data="<?= cl_html(cl_href(['route'=>'pdf']) . '&name=') ?>">
+  data-pdf="<?= cl_html(cl_pdf_href('runtime/pdf.min.mjs')) ?>" data-pdf-worker="<?= cl_html(cl_pdf_href('runtime/pdf.worker.min.mjs')) ?>"
+  data-pdf-data="<?= cl_html(cl_pdf_href()) ?>">
     <header class="room-top">
         <h1 class="room-name" title="<?= cl_html($pageTitle) ?>">
             <?php if ($schoolName !== ''): ?><bdi class="school-name"><?= cl_html($schoolName) ?></bdi><?php endif; ?>
@@ -56,9 +56,9 @@ function cl_room_icon(string $name): string
             <button type="button" id="camera" class="icon-button camera-toggle" aria-pressed="false" aria-label="روشن‌کردن دوربین" title="روشن‌کردن دوربین" hidden>
                 <?= cl_room_icon('camera-off') . cl_room_icon('camera') ?>
             </button>
-            <?php if ($staff || cl_pupil_screen_enabled($cfg)): ?>
-            <button type="button" id="screen-toggle" class="icon-button" aria-pressed="false" aria-label="آماده‌سازی اشتراک صفحه" title="آماده‌سازی اشتراک صفحه" hidden><?= cl_room_icon('present') ?></button>
-            <?php endif; ?>
+            <button type="button" id="screen-toggle" class="icon-button screen-toggle" aria-pressed="false" aria-label="اشتراک صفحه" title="اشتراک صفحه" disabled hidden>
+                <?= cl_room_icon('present') ?><?php if (!$staff): ?><span id="screen-action">اشتراک صفحه</span><?php endif; ?>
+            </button>
             <button type="button" id="enable-audio" class="icon-button audio-toggle" aria-label="فعال‌کردن پخش صدا" title="فعال‌کردن پخش صدا" hidden><?= cl_room_icon('sound') ?></button>
             <button type="button" id="toggle-people" class="icon-button" aria-label="حاضران" aria-controls="people-panel" aria-expanded="<?= $staff ? 'true' : 'false' ?>" title="نمایش یا بستن فهرست حاضران" disabled><?= cl_room_icon('people') ?></button>
             <button type="button" id="toggle-chat" class="icon-button" aria-label="گفت‌وگوی کلاس" aria-controls="chat-panel" aria-expanded="true" title="نمایش یا بستن گفت‌وگو" disabled><?= cl_room_icon('chat') ?></button>
@@ -99,17 +99,18 @@ function cl_room_icon(string $name): string
             <a id="leave" class="icon-button leave-button" href="<?= cl_html(cl_site_href($panel)) ?>" aria-label="خروج از اتاق" title="خروج از اتاق و بازگشت به پنل"><?= cl_room_icon('exit') ?><span>خروج</span></a>
             <?php endif; ?>
         </div>
+        <?php if (!$staff): ?><p id="screen-hint" class="screen-hint" role="status" hidden></p><?php endif; ?>
     </header>
     <?php if ($staff && cl_quality_enabled($cfg)): ?>
     <dialog class="quality-dialog" id="quality-dialog" aria-labelledby="quality-title" aria-describedby="quality-help">
         <form id="quality-form">
             <h2 id="quality-title">تنظیمات کیفیت تصویر</h2>
-            <p id="quality-help">این انتخاب‌ها برای زنگ‌های بعدی همین کلاس هم می‌مانند. تغییر کیفیت مجوز ارسال نمی‌دهد. اگر تصویری در حال ارسال باشد و کیفیتش تغییر کند، فرستنده باید آن را دوباره روشن کند.</p>
+            <p id="quality-help">«پیش‌فرض افزونه» از تنظیمات مدیر استفاده می‌کند. انتخاب‌ها برای زنگ‌های بعدی همین کلاس هم می‌مانند و مجوز ارسال نمی‌دهند. اگر تصویری در حال ارسال باشد و کیفیتش تغییر کند، فرستنده باید آن را دوباره روشن کند.</p>
             <div class="quality-fields">
                 <?php foreach (CL_QUALITY_FIELDS as $key=>$label): ?>
                 <label for="quality-<?= $key ?>"><?= cl_html($label) ?>
                     <select id="quality-<?= $key ?>" name="<?= $key ?>" required>
-                        <?php foreach (cl_video_presets()['levels'] as $level=>$name): ?>
+                        <?php foreach (cl_quality_options() as $level=>$name): ?>
                         <option value="<?= $level ?>"><?= cl_html($name) ?></option>
                         <?php endforeach; ?>
                     </select>
@@ -230,6 +231,7 @@ function cl_room_icon(string $name): string
                 </div>
             </div>
             <div class="board-notices">
+                <?php if (!$staff): ?><p id="board-screen-hint" class="board-toast" role="status" hidden></p><?php endif; ?>
                 <p id="board-join-toast" class="board-toast join-toast" role="status" hidden></p>
                 <p id="board-chat-toast" class="board-toast" role="status" hidden></p>
             </div>

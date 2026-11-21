@@ -24,7 +24,8 @@
         const laserTrail = side => ({dot:el(`board-laser-${side}`), layer:el(`board-laser-${side}-trail`), samples:[], lines:[]});
         const localLaser = laserTrail('local'), remoteLaser = laserTrail('remote');
         let aimPending = null, laserFrame;
-        let library, job, rendering, imageLoad, imageFile;
+        let library, pdfSession, rendering, imageLoad, imageFile;
+        const pdfChunk = 16 * 1024, pdfBatch = 16; // Multi-range cap matches content.php.
         const staff = root.dataset.moderator === 'yes';
         const url = value => new URL(value, document.baseURI).href;
         const widthLimit = 2048;
@@ -37,10 +38,17 @@
             rendering?.cancel();
             rendering = null;
         }
+        function clearPDF() {
+            const session = pdfSession;
+            pdfSession = null;
+            clearTimeout(session?.timer);
+            session?.controller.abort();
+            session?.task?.destroy().catch(() => {});
+        }
         function clearDocument() {
             cancelRender();
             documentVersion++;
-            job?.destroy().catch(() => {}); job = null;
+            clearPDF();
             imageLoad?.abort(); imageLoad = null;
             imageFile?.close?.(); imageFile = null;
         }
@@ -63,6 +71,91 @@
                 // Parse/decode in the PDF worker; paint in the document so its local fallback font is available.
                 disableWorkerRendering:true, isEvalSupported:false, maxImageSize:24_000_000, canvasMaxAreaInBytes:24_000_000,
             };
+        }
+        function pdfFetch(source, signal, range) {
+            return fetch(source, {mode:'same-origin', credentials:'same-origin', cache:'no-store',
+                redirect:'error', priority:'low', signal, headers:range ? {Range:range} : undefined});
+        }
+        const discardBody = response => response.body?.cancel().catch(() => {});
+        async function pdfBytes(source, length, signal, begin, end, allowWhole) {
+            const ranged = !allowWhole || end - begin < length;
+            const response = await pdfFetch(source,signal,ranged ? `bytes=${begin}-${end-1}` : null);
+            const whole = response.status === 200 && allowWhole;
+            const partial = response.status === 206 && ranged && response.headers.get('Content-Range') === `bytes ${begin}-${end-1}/${length}`;
+            if ((!whole && !partial) || response.headers.get('Content-Type')?.split(';')[0] !== 'application/pdf') {
+                discardBody(response);
+                throw new Error('Unexpected PDF content response');
+            }
+            const bytes = new Uint8Array(await response.arrayBuffer());
+            if (bytes.length !== (whole ? length : end-begin)) throw new Error('Unexpected PDF size');
+            return bytes;
+        }
+        async function pdfParts(source, length, session, ranges) {
+            const {signal} = session.controller;
+            if (ranges.length > 1 && !session.singleRanges) {
+                const res = await pdfFetch(source,signal,'bytes=' + ranges.map(([a,b]) => `${a}-${b-1}`).join(','));
+                const boundary = /^multipart\/byteranges;\s*boundary="?([\w-]{1,70})"?$/i.exec(res.headers.get('Content-Type') || '')?.[1];
+                if (res.status === 206 && boundary) {
+                    const bytes = new Uint8Array(await res.arrayBuffer()), encoder = new TextEncoder();
+                    let at = 0;
+                    const expect = text => {
+                        const header = encoder.encode(text);
+                        if (!header.every((byte,i) => bytes[at+i] === byte)) throw new Error('Invalid PDF part');
+                        at += header.length;
+                    };
+                    const parts = ranges.map(([a,b]) => {
+                        expect(`--${boundary}\r\nContent-Type: application/pdf\r\nContent-Range: bytes ${a}-${b-1}/${length}\r\n\r\n`);
+                        const end = at+b-a, part = bytes.slice(at,end);
+                        at = end; expect('\r\n');
+                        return part;
+                    });
+                    expect(`--${boundary}--\r\n`);
+                    if (at !== bytes.length) throw new Error('Unexpected PDF parts size');
+                    return parts;
+                }
+                discardBody(res);
+                if (![200,206,416].includes(res.status)) throw new Error('PDF ranges unavailable');
+                // A proxy may strip multipart Range. Never retain its unbounded response;
+                // retry only the denied offsets as ordinary single ranges in this session.
+                session.singleRanges = true;
+            }
+            return Promise.all(ranges.map(([a,b]) => pdfBytes(source,length,signal,a,b,false)));
+        }
+        async function openPDF(pdf, source, length, session) {
+            const {signal} = session.controller;
+            const end = length > 128*1024 ? pdfChunk : length;
+            // Don't start a full GET just to discover range support. Seed the worker with the
+            // first range; a host that ignores Range can still supply one complete response.
+            const data = await pdfBytes(source,length,signal,0,end,true);
+            if (signal.aborted) throw signal.reason;
+            let input = {data};
+            if (data.length < length) {
+                input = {range:new class extends pdf.PDFDataRangeTransport {
+                    requestDataRange(begin,end) {
+                        if (pdfSession !== session || signal.aborted) return;
+                        if (!fileWanted) { clearPDF(); return; }
+                        session.reads++;
+                        session.queue.push([begin,end]);
+                        session.timer ??= setTimeout(() => this.flush(),8);
+                    }
+                    flush() {
+                        session.timer = undefined;
+                        if (signal.aborted || !fileWanted) return;
+                        // Page dictionaries can be scattered all over a scanned PDF. Group the
+                        // worker's concurrent reads, without fetching the intervening images.
+                        const queued = session.queue.splice(0).sort((a,b) => a[0]-b[0]);
+                        for (let i=0;i<queued.length;i+=pdfBatch) {
+                            const group = queued.slice(i,i+pdfBatch);
+                            pdfParts(source,length,session,group).then(parts => {
+                                if (!signal.aborted) group.forEach(([a],j) => this.onDataRange(a,parts[j]));
+                            }).catch(() => pdfFailed(session)).finally(() => { session.reads -= group.length; });
+                        }
+                    }
+                    abort() { session.controller.abort(); }
+                }(length,data,true)};
+            }
+            session.task = pdf.getDocument({...input, rangeChunkSize:pdfChunk, disableAutoFetch:true, disableStream:true, ...pdfOptions()});
+            return session.task.promise;
         }
         function documentURL(doc, scope) {
             const link = new URL(root.dataset.content, document.baseURI);
@@ -443,6 +536,17 @@
             // Keep the ink aligned with an image even if the pupil never downloads it.
             fit(doc?.width || 1600, doc?.height || 1000);
         }
+        function pdfFailed(session) {
+            if (session !== pdfSession) return;
+            clearPDF();
+            if (!fileWanted) return;
+            cancelRender();
+            fileWanted = false;
+            stage.classList.remove('has-document');
+            fileControl(data.doc);
+            blankPaper(data.doc);
+            message('نمایش PDF کامل نشد. اتصال را بررسی کن و فایل خوانا و بدون رمز را دوباره باز کن.');
+        }
         async function show(view, scope) {
             cancelRender();
             const ticket = renderVersion;
@@ -454,10 +558,16 @@
             try {
                 const source = documentURL(doc,scope);
                 if (doc.mime === 'application/pdf') {
+                    if (pdfSession) pdfSession.painted = false;
                     const pdf = await pdfLib();
                     if (docTicket !== documentVersion || ticket !== renderVersion) return;
-                    job ??= pdf.getDocument({url:source,disableAutoFetch:true,disableStream:true,...pdfOptions()});
-                    const file = await job.promise;
+                    if (!pdfSession) {
+                        pdfSession = {controller:new AbortController(), painted:false, reads:0, queue:[]};
+                        pdfSession.promise = openPDF(pdf,source,doc.bytes,pdfSession);
+                    }
+                    const session = pdfSession;
+                    const file = await session.promise;
+                    if (ticket !== renderVersion) return;
                     if (view.page > file.numPages) throw new Error('Invalid PDF page');
                     const page = await file.getPage(view.page);
                     if (ticket !== renderVersion) return;
@@ -467,7 +577,10 @@
                     rendering = task;
                     await task.promise;
                     if (rendering === task) rendering = null;
-                    page.cleanup();
+                    if (ticket === renderVersion) {
+                        session.painted = true;
+                        page.cleanup();
+                    }
                 } else {
                     if (!imageFile) {
                         const ctrl = new AbortController(); imageLoad = ctrl;
@@ -483,7 +596,10 @@
                 }
                 if (ticket === renderVersion) message();
             } catch (err) {
-                if (ticket === renderVersion && err.name !== 'RenderingCancelledException') message('نمایش این صفحه یا فایل ممکن نشد. فایل باید خوانا و بدون رمز باشد.');
+                if (ticket === renderVersion && err.name !== 'RenderingCancelledException') {
+                    if (doc.mime === 'application/pdf') pdfFailed(pdfSession);
+                    else message('نمایش تصویر تخته ممکن نشد.');
+                }
             }
         }
         async function decodeImage(blob) {
@@ -589,7 +705,12 @@
             if (!data?.doc || !transport || !options.canEdit()) return;
             fileWanted = !fileWanted;
             fileControl(data.doc);
-            if (!fileWanted) { clearDocument(); blankPaper(data.doc); }
+            if (!fileWanted) {
+                // Keep only the current, successfully painted PDF in worker memory. Hiding a
+                // loading page aborts it; any document/lesson/connection change drops it.
+                if (!pdfSession?.painted || pdfSession.reads) clearDocument();
+                blankPaper(data.doc);
+            }
             show(data,transport);
         });
         function setExpanded(expand) {

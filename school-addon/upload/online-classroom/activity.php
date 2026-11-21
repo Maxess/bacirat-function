@@ -3,6 +3,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/lesson.php';
 
 const CL_FILE_LIMIT = 16 * 1024 * 1024;
+const CL_PDF_RANGE_LIMIT = 16;
 const CL_LESSON_FILE_LIMIT = 48 * 1024 * 1024;
 const CL_CHAT_LIMIT = 120;
 const CL_INK_POINTS = 96;
@@ -314,6 +315,36 @@ function cl_board_action(ClassroomStore $s, array $lesson, array $input, string 
         if ($added) $s->put('activity', $id, $state);
         return ['ink'=>$clock];
     });
+}
+
+/** Inclusive byte spans. Reject overlapping, excessive, or out-of-bounds requests. */
+function cl_pdf_ranges(string $header, int $size): array
+{
+    if (!str_starts_with($header, 'bytes=') || strlen($header) > 400) return [];
+    $specs = explode(',', substr($header, 6));
+    if (count($specs) > CL_PDF_RANGE_LIMIT) return [];
+    $spans = [];
+    $last = -1;
+    foreach ($specs as $spec) {
+        if (!preg_match('/^(\d{1,10})-(\d{0,10})$/D', trim($spec), $m)) return [];
+        $start = (int)$m[1];
+        $end = $m[2] === '' ? $size - 1 : min($size - 1, (int)$m[2]);
+        if ($start <= $last || $end < $start) return [];
+        $spans[] = [$start,$end];
+        $last = $end;
+    }
+    return $spans;
+}
+
+function cl_file_span($file, int $start, int $bytes): void
+{
+    if (fseek($file, $start) !== 0) throw new ClassroomError(503, '');
+    while ($bytes > 0 && !feof($file) && !connection_aborted()) {
+        $chunk = fread($file, min($bytes, 65536));
+        if ($chunk === false || $chunk === '') break;
+        echo $chunk;
+        $bytes -= strlen($chunk);
+    }
 }
 
 function cl_lesson_dir(string $id, bool $create): ?string
