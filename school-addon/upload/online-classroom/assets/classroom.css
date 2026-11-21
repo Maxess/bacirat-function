@@ -118,6 +118,7 @@ caption { font-weight: 700; text-align: start; margin: 0 0 .45rem; }
 .room-controls, .room-indicators { flex: none; }
 .room-indicators { margin-inline-start: auto; }
 .room-exit { position: relative; }
+.room-date { margin: .28rem .45rem; color: var(--muted); font-size: .74rem; }
 .room-shell[data-started=yes] .room-top { padding-block-end: 1.65rem; }
 .lesson-start { position: absolute; inset-block-start: calc(100% + .16rem); inset-inline-end: 0; white-space: nowrap;
     background: var(--well); color: var(--muted); border-radius: .36rem; font-size: .65rem; line-height: 1.5; padding: .02rem .32rem; }
@@ -359,3 +360,10 @@ body:has(.board-card.expanded) { overflow: hidden; }
 @media (prefers-reduced-motion: reduce) {
     .ink-writer { transition: none; }
 }
+
+/* Picture and file downloads are separate from the voice/ink baseline. */
+.receive-tools, .board-file-receive { display: flex; flex-wrap: wrap; align-items: center; gap: .3rem .6rem; padding: .4rem .7rem; color: var(--muted); font-size: .82rem; }
+.receive-tools { margin-block-end: .38rem; border: 1px solid var(--edge); border-radius: .6rem; background: var(--surface); }
+.receive-tools select { max-width: min(18rem, 100%); }
+.receive-tools #live-attendance { margin-inline-start: auto; }
+.board-file-receive { border-bottom: 1px solid var(--edge); }

@@ -6,13 +6,15 @@
     }
     async function request(root, action, data = {}, {multipart = false, keepalive = false} = {}) {
         const ctl = new AbortController();
-        const timer = setTimeout(() => ctl.abort(), multipart ? 90000 : 7000);
+        const timer = setTimeout(() => ctl.abort(), multipart ? 90000 : action === 'board-sync' ? 2300 : 7000);
         try {
             const headers = {'X-Classroom-CSRF': root.dataset.csrf};
             let body;
             if (multipart) body = data;
             else { headers['Content-Type'] = 'application/json'; body = JSON.stringify({action, ...data}); }
-            const res = await fetch(root.dataset.api, {method:'POST', credentials:'same-origin', cache:'no-store', headers, body, signal:ctl.signal, keepalive});
+            const priority = ['status','ticket','leave'].includes(action) ? 'high' : 'auto';
+            const res = await fetch(root.dataset.api, {method:'POST', credentials:'same-origin', cache:'no-store',
+                headers, body, signal:ctl.signal, keepalive, priority});
             const reply = await res.json().catch(() => ({}));
             if (!res.ok || reply.ok !== true) throw new PublicError(reply.message || 'درخواست کلاس کامل نشد.', res.status);
             return reply;
@@ -30,19 +32,24 @@
     const api = (action, data = {}, options) => request(root, action, {class: roomClass, ...data}, options);
     const student = (id) => /^student-[1-9]\d{0,17}$/.test(id);
     const persian = new Intl.NumberFormat('fa-IR');
+    const faDigits = text => text.replace(/[0-9]/g, digit => persian.format(Number(digit)));
     const put = (node, text) => { if (node.textContent !== text) node.textContent = text; };
     const panels = ['people', 'chat'];
     const features = {mic:{label:'میکروفون',icons:['mic','mic-off'],source:2},
         camera:{label:'دوربین',icons:['camera','camera-off'],source:1}, board:{label:'نوشتن روی تخته',icons:['pen']}};
     const permissionIcons = el('permission-icons')?.content;
     const cameraSource = lk?.Track.Source.Camera, micSource = lk?.Track.Source.Microphone, screenSource = lk?.Track.Source.ScreenShare;
+    // VP8, one layer, no second codec. These are encoder targets, not wire rates.
+    const cameraVideo = {width:320,height:180,frameRate:8,bitrate:85000};
+    const shareVideo = {width:640,height:360,frameRate:2,bitrate:70000}; // Static pages and large text, not motion video.
     const canCaptureScreen = typeof window.navigator?.mediaDevices?.getDisplayMedia === 'function';
     const attention = window.ClassroomAttention(changeWake);
     let active = null, connecting = false, busy = false, polling = false, needsRefresh = false, permanent = false, stopped = false;
     let wanted = true, autoStart = staff, optedIntoTest = false, state = {phase:'idle', ready:null}, chatCursor = 0, seconds = {}, admitted = false;
     let pollTimer, flow = 0, retryAt = 0, attempts = 0;
     let statusAt = 0, inkAt = Infinity, aimAt = Infinity, inkRead = 0, inkRetryAt = 0;
-    let peopleKey = '', peopleRows = new Map(), speakersKey = '', slotKey = null;
+    let peopleKey = '', peopleRows = new Map(), speakersKey = '', slotKey = null, videoMenuKey = '';
+    let picture = '', wantedVideo = null;
     const cameraTiles = new Map();
     let shownScreen = null;
     let toastTimer, lastNotice = '', lastNoticeAt = -Infinity;
@@ -82,7 +89,7 @@
     }
     function duration(value) {
         const n = Math.max(0, Number(value) || 0);
-        return [Math.floor(n / 3600), Math.floor(n % 3600 / 60)].map(v => String(v).padStart(2,'0')).join(':');
+        return faDigits([Math.floor(n / 3600), Math.floor(n % 3600 / 60)].map(v => String(v).padStart(2,'0')).join(':'));
     }
     function microphoneFailure(local, enabling, error) {
         const capture = enabling ? local?.lastMicrophoneError : null;
@@ -223,10 +230,10 @@
     }
     function renderPeople() {
         const field = el('people');
-        if (!hasAccess()) {
+        if (!hasAccess() || el('people-panel').hidden) {
             if (peopleKey) field.replaceChildren();
             peopleKey = ''; peopleRows.clear();
-            put(el('people-count'), '۰');
+            if (!hasAccess()) put(el('people-count'), '۰');
             return;
         }
         const room = active.room;
@@ -246,7 +253,10 @@
         }
         for (const person of people) {
             const id = person.identity, row = peopleRows.get(id);
-            if (row.timer) put(row.timer, duration(seconds[id] || 0));
+            if (row.timer) {
+                const value = !staff && person === room.localParticipant ? state.attendance : seconds[id];
+                put(row.timer, Number.isInteger(value) ? duration(value) : '—');
+            }
             for (const [feature, btn] of Object.entries(row.controls)) {
                 const on = feature === 'mic' ? maySpeak(person) && person.isMicrophoneEnabled
                     : feature === 'camera' ? mayCamera(person) && person.isCameraEnabled : false;
@@ -271,6 +281,43 @@
         track.stop();
         return link.room.localParticipant.unpublishTrack(track, true).catch(() => {});
     }
+    // Start without any automatic subscriptions. Keep microphone delivery independent of
+    // the picture selector, and unsubscribe the old picture before asking for a new one.
+    function updateSubscriptions() {
+        const selector = el('receive-video');
+        const live = hasAccess();
+        const candidates = new Map(), publications = [];
+        if (active && connected()) for (const person of active.room.remoteParticipants.values()) {
+            for (const pub of person.trackPublications.values()) {
+                publications.push(pub);
+                if (!live || pub.kind !== lk.Track.Kind.Video || pub.isMuted) continue;
+                if (pub.source === screenSource && mayScreen(person) && person.identity === state.screen?.identity
+                    && person.sid === state.screen.sid) candidates.set(pub.trackSid, [pub, `اشتراک صفحه · ${personName(person)}`]);
+                if (pub.source === cameraSource && state.cameraCodec && mayCamera(person)) {
+                    candidates.set(pub.trackSid, [pub, `دوربین · ${personName(person)}`]);
+                }
+            }
+        }
+        if (!candidates.has(picture)) picture = '';
+        const labels = [...candidates].map(([sid, [, label]]) => [sid, label]);
+        const menuKey = JSON.stringify(labels);
+        if (videoMenuKey !== menuKey) {
+            videoMenuKey = menuKey;
+            const option = ([id, label]) => {
+                const node = document.createElement('option');
+                node.value = id; node.textContent = label;
+                return node;
+            };
+            selector.replaceChildren(...[['','فقط صدا و تخته'], ...labels].map(option));
+        }
+        if (selector.value !== picture) selector.value = picture;
+        selector.disabled = !live || !candidates.size;
+        wantedVideo = document.hidden ? null : candidates.get(picture)?.[0] ?? null;
+        const wants = pub => pub === wantedVideo || (live && pub.kind === lk.Track.Kind.Audio && pub.source === micSource);
+        for (const pub of publications) if (pub.isDesired && !wants(pub)) pub.setSubscribed(false);
+        for (const pub of publications) if (!pub.isDesired && wants(pub)) pub.setSubscribed(true);
+    }
+
     function renderCameras() {
         const strip = el('camera-strip');
         const cameraPeople = new Map();
@@ -279,7 +326,7 @@
             for (const person of [room.localParticipant, ...room.remoteParticipants.values()]) {
                 const pub = person.getTrackPublication(cameraSource);
                 if (!mayCamera(person) || !pub?.track || pub.isMuted || pub.track.kind !== lk.Track.Kind.Video
-                    || (person === room.localParticipant && pub.track !== active.cameraTrack)) continue;
+                    || (person === room.localParticipant ? pub.track !== active.cameraTrack : pub !== wantedVideo)) continue;
                 cameraPeople.set(person.identity, {track:pub.track, name:personName(person)});
             }
         }
@@ -336,7 +383,7 @@
             person = mine ? local : active.room.remoteParticipants.get(selected.identity);
             const pub = person?.getTrackPublication(screenSource);
             if (person?.sid === selected.sid && mayScreen(person) && pub?.track?.kind === lk.Track.Kind.Video && !pub.isMuted
-                && (!mine || pub.track === active.screenTrack)) display = pub.track;
+                && (mine ? pub.track === active.screenTrack : pub === wantedVideo)) display = pub.track;
         }
         const video = el('screen-video');
         if (shownScreen !== display) {
@@ -417,7 +464,7 @@
         const value = field.value;
         const option = (id, label) => {
             const node = document.createElement('option');
-            node.value = String(id); node.textContent = label;
+            node.value = String(id); node.textContent = faDigits(label);
             return node;
         };
         field.replaceChildren(option('', 'انتخاب زنگ امروز'), ...choices.map(({id, label}) => option(id, label)));
@@ -430,7 +477,7 @@
         if (schedule.choices.some(choice => choice.manual)) return 'برای تک‌زنگ، درسِ این هفته را انتخاب کن و «شروع زنگ» را بزن.';
         if (schedule.choices.length > 1) return 'زنگ موردنظر را از برنامهٔ امروز انتخاب کن.';
         if (schedule.choices.length === 1) return 'زنگ مشخص است؛ برای ورود می‌توانی «شروع زنگ» را بزنی.';
-        if (schedule.next) return `زنگ بعدی: ${schedule.next} (به وقت تهران).`;
+        if (schedule.next) return `زنگ بعدی: ${faDigits(schedule.next)} (به وقت تهران).`;
         return schedule.timed ? 'برای این حساب اکنون زنگی در ساعت‌های ثبت‌شدهٔ امروز نیست.' : 'زنگ مجاز دیگری برای امروز در برنامهٔ این کلاس نیست.';
     }
 
@@ -448,9 +495,16 @@
         const start = state.startTime || '';
         el('lesson-start').hidden = !start;
         root.dataset.started = start ? 'yes' : 'no';
-        put(el('lesson-start-time'), start);
+        put(el('lesson-start-time'), faDigits(start));
+        if (state.dayLabel && state.day) {
+            const date = el('room-date');
+            put(date, state.dayLabel);
+            if (date.dateTime !== state.day) date.dateTime = state.day;
+        }
         for (const id of panels) el(`toggle-${id}`).disabled = !live;
         if (!staff) {
+            el('live-attendance').hidden = !live || !Number.isInteger(state.attendance);
+            put(el('live-attendance-time'), duration(state.attendance));
             el('waiting-attendance').hidden = live || !Number.isInteger(state.attendance);
             put(el('waiting-attendance-time'), duration(state.attendance));
         }
@@ -497,6 +551,7 @@
         cam.setAttribute('aria-pressed', String(camOn));
         cam.setAttribute('aria-label', camAction); cam.title = camAction;
         el('enable-audio').hidden = !live || active.room.canPlaybackAudio;
+        updateSubscriptions();
         const canShare = renderScreen();
         root.dataset.extraControls = live && (staff || canCamera || canShare || !el('enable-audio').hidden) ? 'yes' : 'no';
         el('chat-text').disabled = !live || busy;
@@ -515,7 +570,8 @@
         }
         if (active) { active.speakers = []; stopCamera(active); stopScreen(active); }
         admitted = false; inkAt = aimAt = Infinity; inkRetryAt = 0;
-        chatCursor = 0; seconds = {};
+        chatCursor = 0; seconds = {}; picture = '';
+        delete state.profiles; delete state.profilesRev;
     }
     function release(link = active, warn = false) {
         if (!link || active !== link) return;
@@ -559,7 +615,7 @@
         return new lk.Room({
             singlePeerConnection:false, // Preserve the tested first-speaker fix; publishing does not renegotiate the receiving PC.
             audioCaptureDefaults:{channelCount:1,echoCancellation:true,noiseSuppression:true,autoGainControl:true},
-            publishDefaults:{audioPreset:{maxBitrate:12000},dtx:true,red:false,forceStereo:false},
+            publishDefaults:{audioPreset:{maxBitrate:12000,priority:'high'},dtx:true,red:false,forceStereo:false},
         });
     }
     async function enter(getTicket, gesture = false) {
@@ -577,7 +633,7 @@
             active = link;
             flow++; // Ignore status requests made before this transport was installed.
             for (const event of [lk.RoomEvent.ParticipantConnected,lk.RoomEvent.ParticipantDisconnected,lk.RoomEvent.LocalTrackPublished,
-                lk.RoomEvent.LocalTrackUnpublished,lk.RoomEvent.TrackUnpublished,lk.RoomEvent.TrackMuted,lk.RoomEvent.TrackUnmuted,
+                lk.RoomEvent.LocalTrackUnpublished,lk.RoomEvent.TrackPublished,lk.RoomEvent.TrackUnpublished,lk.RoomEvent.TrackMuted,lk.RoomEvent.TrackUnmuted,
                 lk.RoomEvent.AudioPlaybackStatusChanged,lk.RoomEvent.ConnectionStateChanged]) {
                 room.on(event, () => { if (active === link) render(); });
             }
@@ -620,7 +676,7 @@
             };
             room.on(lk.RoomEvent.SignalReconnecting, retrying);
             room.on(lk.RoomEvent.Reconnecting, retrying);
-            room.on(lk.RoomEvent.Reconnected, refresh);
+            room.on(lk.RoomEvent.Reconnected, () => { if (active === link) { render(); refresh(); } });
             room.on(lk.RoomEvent.Disconnected, (reason) => {
                 if (active !== link) return;
                 const code = Number.isInteger(reason) ? lk.DisconnectReason?.[reason] : '';
@@ -630,16 +686,16 @@
                 } else if (!['ROOM_DELETED','CLIENT_INITIATED'].includes(code)) {
                     note(`ارتباط رسانه قطع شد. هر زمان کلاس آماده باشد، دوباره وصل می‌شویم. (${code || 'ROOM-DISCONNECTED'})`);
                 }
-                retryAt = Date.now() + 1700;
+                retryAt = Date.now() + 1700 + Math.random()*850;
                 release(link, true); refresh();
             });
-            await room.connect(ticket.url, ticket.token);
+            await room.connect(ticket.url, ticket.token, {autoSubscribe:false});
             attempts = 0; retryAt = 0;
         } catch (error) {
             if (link && active === link) release(link);
             else await room.disconnect().catch(() => {});
             attempts++;
-            retryAt = Date.now() + Math.min(15000, 1600 * (2 ** Math.min(4, attempts - 1)));
+            retryAt = Date.now() + Math.min(15000, 1600 * (2 ** Math.min(4, attempts - 1))) + Math.random()*850;
             if (error instanceof PublicError && error.status === 403) { if (gesture) wanted = false; }
             if (gesture) throw error;
             if (!(error instanceof PublicError && error.status === 409)) note(error instanceof PublicError ? error.message : 'ورود رسانه ممکن نشد؛ اتصال را بررسی کن. (ROOM-CONNECT)');
@@ -653,7 +709,7 @@
         if (!view) return;
         board.sync(view, local, requestedAt);
         inkRead = performance.now();
-        inkAt = inkRead + (view.more ? 45 : (view.moving || view.laser ? 280 : 890) + Math.random()*90);
+        inkAt = inkRead + (view.more ? 85 : (view.moving || view.laser ? 280 : 850)) + Math.random()*(view.more ? 35 : 140);
     }
     async function poll(boardOnly) {
         if (polling || stopped || permanent) return;
@@ -664,15 +720,20 @@
         const local = connected() ? scope() : {};
         const requestedAt = performance.now();
         try {
+            const position = {...board.position(), compact:true};
             if (boardOnly) {
                 aimAt = Infinity;
-                const result = await api('board-sync', {...local, ...board.position(), ...board.takeAim()});
+                const result = await api('board-sync', {...local, ...position, ...board.takeAim()});
                 if (captured === flow && !stopped && hasAccess() && local.sid === scope().sid) receiveBoard(result.board, local, requestedAt);
                 return;
             }
-            const result = await api('status', {...local, chat:chatCursor, ...board.position()});
+            const people = !document.hidden && !el('people-panel').hidden;
+            const result = await api('status', {...local, ...position, chat:chatCursor, people,
+                profilesRev:hasAccess() ? state.profilesRev : undefined});
             if (captured !== flow || stopped) return;
             const prior = state;
+            if (result.admitted && result.epoch === prior.epoch && result.lesson === prior.lesson
+                && result.profilesRev && result.profilesRev === prior.profilesRev) result.profiles ??= prior.profiles;
             state = result;
             syncSlots();
             if (active && (active.epoch !== state.epoch || active.lesson !== state.lesson || !result.ready
@@ -719,7 +780,11 @@
         } finally {
             polling = false;
             if (!boardOnly) {
-                statusAt = performance.now() + (active || connecting ? 1900 : 3400) + Math.random()*270;
+                // Keep the supervisor pulse and first admission quick. Steady pupils can
+                // poll less often, still comfortably inside the unchanged 12 s pulse TTL.
+                const quick = (active || connecting) && (staff || !hasAccess());
+                statusAt = performance.now() + (quick ? 1900 : hasAccess() ? 3500 : 4200)
+                    + Math.random()*(quick ? 270 : 900);
                 render();
             }
             schedulePoll();
@@ -749,8 +814,17 @@
             panel.hidden = !panel.hidden;
             button.setAttribute('aria-expanded', String(!panel.hidden));
             if (!panel.hidden) panel.scrollIntoView?.({block:'nearest'});
+            if (id === 'people') {
+                if (panel.hidden) seconds = {};
+                else refresh();
+                renderPeople();
+            }
         });
     }
+    el('receive-video').addEventListener('change', event => {
+        picture = event.target.value;
+        render();
+    });
     el('microphone').addEventListener('click', () => run(async () => {
         const link = active;
         const local = link?.room.localParticipant;
@@ -773,14 +847,15 @@
         try {
             if (link.cameraTrack) { await stopCamera(link); return; }
             // This click is the only path to getUserMedia for video. A grant never calls it.
-            const track = await lk.createLocalVideoTrack({facingMode:'user',resolution:{width:640,height:360,frameRate:15}});
+            const {width,height,frameRate} = cameraVideo;
+            const track = await lk.createLocalVideoTrack({facingMode:'user',resolution:{width,height,frameRate}});
             if (!valid()) { track.stop(); return; }
             link.cameraTrack = track;
             track.mediaStreamTrack.addEventListener('ended', () => {
                 if (link.cameraTrack === track) { stopCamera(link); if (active === link) render(); }
             }, {once:true});
             await local.publishTrack(track, {source:cameraSource, videoCodec:codec, simulcast:false, backupCodec:false,
-                videoEncoding:{maxBitrate:260000,maxFramerate:15}});
+                videoEncoding:{maxBitrate:cameraVideo.bitrate,maxFramerate:frameRate}});
         } catch (error) {
             if (valid()) {
                 stopCamera(link);
@@ -816,7 +891,8 @@
             const current = () => link === active && hasAccess() && scope().sid === local.sid && link.screenAttempt === attempt
                 && state.screenEnabled && itsScreen(link) && mayScreen(person);
             // Only this second, explicit click may open the browser picker. No saved capture or system sound.
-            const limits = {width:{max:1280},height:{max:720},frameRate:{ideal:5,max:5}};
+            const {width,height,frameRate} = shareVideo;
+            const limits = {width:{max:width},height:{max:height},frameRate:{ideal:frameRate,max:frameRate}};
             const stream = await window.navigator.mediaDevices.getDisplayMedia({video:limits,audio:false,systemAudio:'exclude',
                 selfBrowserSurface:'exclude',surfaceSwitching:'exclude'});
             [raw] = stream.getVideoTracks();
@@ -829,7 +905,7 @@
             },{once:true});
             const oversized = () => {
                 const size = raw.getSettings();
-                return size.width > 1280 || size.height > 720 || size.frameRate > 5.1;
+                return size.width > width || size.height > height || size.frameRate > frameRate + .1;
             };
             if (oversized()) await raw.applyConstraints(limits);
             if (oversized()) throw new PublicError('مرورگر نتوانست اندازه و سرعت اشتراک را محدود کند.');
@@ -839,7 +915,7 @@
             const track = new lk.LocalVideoTrack(raw);
             link.screenTrack = track;
             await person.publishTrack(track,{source:screenSource,videoCodec:'vp8',simulcast:false,backupCodec:false,
-                screenShareEncoding:{maxBitrate:400000,maxFramerate:5},degradationPreference:'maintain-resolution'});
+                screenShareEncoding:{maxBitrate:shareVideo.bitrate,maxFramerate:frameRate},degradationPreference:'maintain-resolution'});
             if (!current()) {
                 if (link.screenTrack === track) stopScreen(link);
                 else { track.stop(); await person.unpublishTrack(track,true).catch(() => {}); }
@@ -915,10 +991,12 @@
     } else el('join').addEventListener('click', () => { wanted = true; retryAt = 0; note(); render(); refresh(); });
     window.addEventListener('pagehide', () => { stopped = true; clearTimeout(pollTimer); release(active,true); });
     window.addEventListener('pageshow', event => { if (event.persisted) { stopped = false; refresh(); } });
-    document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
+    document.addEventListener('visibilitychange', () => { render(); if (!document.hidden) refresh(); });
     if (!lk || !window.isSecureContext) {
         permanent = true;
         note('برای ورود به رسانه به مرورگر سازگار، بستهٔ کامل کلاس و HTTPS معتبر نیاز است.');
     }
-    render(); refresh();
+    render();
+    if (!staff) statusAt = performance.now() + Math.random()*700; // Flatten the first waiting-room burst.
+    schedulePoll();
 })();

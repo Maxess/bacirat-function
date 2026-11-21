@@ -1,5 +1,9 @@
 <?php
 declare(strict_types=1);
+
+use BaciClassroom\Calendar;
+
+if (!class_exists(Calendar::class, false)) require_once __DIR__ . '/calendar.php';
 require_once __DIR__ . '/core.php';
 
 // The school owns these records. The plugin only reads them and never repairs the host's schema.
@@ -71,10 +75,26 @@ function cl_school_name(PDO $db): string
 
 function cl_day(int $now): DateTimeImmutable
 {
-    return (new DateTimeImmutable('@' . $now))->setTimezone(new DateTimeZone('Asia/Tehran'));
+    return Calendar::tehran($now);
 }
 
-const CL_DAYS = ['یک‌شنبه','دوشنبه','سه‌شنبه','چهارشنبه','پنجشنبه','جمعه','شنبه'];
+function cl_display_day(string $iso): string
+{
+    return Calendar::label($iso);
+}
+
+function cl_today_view(int $now): array
+{
+    $iso = cl_day($now)->format('Y-m-d');
+    return ['day'=>$iso, 'dayLabel'=>cl_display_day($iso)];
+}
+
+function cl_persian_digits(string $value): string
+{
+    return Calendar::digits($value);
+}
+
+const CL_DAYS = Calendar::WEEKDAYS;
 const CL_FRIDAY_SLOT = 'friday-test';
 const CL_FRIDAY_TITLE = 'آزمایش کلاس مجازی جمعه';
 const CL_FRIDAY_HOURS = '۰۰:۰۰ تا پایان جمعه · وقت تهران';

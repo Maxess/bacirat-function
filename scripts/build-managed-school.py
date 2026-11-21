@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Assemble the managed classroom, Baci update and fresh-install overlay ZIPs."""
+"""Assemble the managed classroom, Baci update, fresh-install overlay and download bundle."""
 import argparse
 from io import BytesIO
 import hashlib
@@ -16,12 +16,12 @@ HOST = ROOT / 'plugin-manager'
 SRC = ROOT / 'school-addon/upload/online-classroom'
 LEGACY = ARTIFACTS / 'school-classroom-pilot-v0.1.0.zip'
 LEGACY_SHA = 'bebc35a02f57346880373a034ee493b757a8017a12812a133ab957358d9de161'
-VERSION = '0.4.9'
-MANAGER_VERSION = '0.1.15'
+VERSION = '0.4.11'
+MANAGER_VERSION = '0.1.17'
 BACI = HOST / 'baci'
 BACI_PATCH = 'baci-4.221.0-e0f3f686.patch'
 BACI_FILES = ('other-settings.php', 'includes/header.php', 'includes/footer.php', 'includes/management_hub.php',
-              'includes/classroom-school-bots.php', 'school-classroom-settings.php')
+              'includes/classroom-school-bots.php', 'school-classroom-settings.php', 'includes/student_nav.php', 'includes/teacher_nav.php')
 PDF_VERSION = '6.5.438'
 PDF_SHA = 'be0f0fc35c7e0052b2e00303be1b9697970e615f1debdf14a0400da0516173bf61a970e7650aa7397a31c371c6f74ed61ce8352583af2e13fbe7a6e875d171a4'
 PDF_URL = f'https://registry.npmjs.org/pdfjs-dist/-/pdfjs-dist-{PDF_VERSION}.tgz'
@@ -60,7 +60,7 @@ def pdf_entries(archive_path):
 
 def plugin_entries(pdf_archive):
     files = {name: (SRC / name).read_bytes() for name in (
-        'index.php', 'core.php', 'api.php', 'deactivate.php', 'media.php', 'school.php', 'store.php', 'lesson.php',
+        'index.php', 'core.php', 'calendar.php', 'api.php', 'deactivate.php', 'media.php', 'school.php', 'store.php', 'lesson.php',
         'activity.php', 'content.php', 'events.php', 'reports.php', 'notifications.php', 'job.php', 'room-view.php',
         'assets/classroom.js', 'assets/classroom.css', 'assets/board.js', 'assets/room-attention.js',
     )}
@@ -76,7 +76,7 @@ def plugin_entries(pdf_archive):
         'report_menus': {role: 'حضور و غیاب کلاس مجازی' for role in ('teacher', 'admin', 'deputy')},
         'routes': {'page': 'index.php', 'api': 'api.php', 'content': 'content.php', 'events': 'events.php', 'job': 'job.php'},
         'store': True, 'pdf_resources': 'assets/pdf-resources.zip',
-        'preserve_settings_from': ['0.2.0', '0.2.1', '0.2.2', '0.2.3', '0.3.0', '0.4.0', '0.4.1', '0.4.2', '0.4.3', '0.4.4', '0.4.5', '0.4.6', '0.4.7', '0.4.8'],
+        'preserve_settings_from': ['0.2.0', '0.2.1', '0.2.2', '0.2.3', '0.3.0', '0.4.0', '0.4.1', '0.4.2', '0.4.3', '0.4.4', '0.4.5', '0.4.6', '0.4.7', '0.4.8', '0.4.9', '0.4.10'],
         'hooks': {'deactivate': 'deactivate.php'},
         'settings': [
             {'key': 'signal_url', 'type': 'wss', 'label': 'آدرس رسانه (wss://)'},
@@ -121,20 +121,29 @@ def main():
     # Old mtagbot other-settings.php bypassed the Baci hub. Restore the pinned
     # native entrypoint and footer along with the integrated hub and gateway.
     update = {'plugins/school-plugins.php': manager.read_bytes(),
+              'includes/classroom-calendar.php': entries['calendar.php'],
               **{name: (BACI / name).read_bytes() for name in BACI_FILES}}
     upstream = json.loads((BACI / 'UPSTREAM.json').read_text())
     for name in ('other-settings.php', 'includes/footer.php'):
         if hashlib.sha256(update[name]).hexdigest() != upstream['original_files'][name]:
             raise ValueError(f'Expected the original Baci release file: {name}')
     opts.output_dir.mkdir(parents=True, exist_ok=True)
-    write_zip(opts.output_dir / f'school-classroom-plugin-v{VERSION}.zip', entries)
-    write_zip(opts.output_dir / f'baci-plugin-manager-update-v{MANAGER_VERSION}.zip', update)
+    classroom = f'school-classroom-plugin-v{VERSION}.zip'
+    upgrade = f'baci-plugin-manager-update-v{MANAGER_VERSION}.zip'
+    write_zip(opts.output_dir / classroom, entries)
+    write_zip(opts.output_dir / upgrade, update)
     write_zip(opts.output_dir / f'baci-plugin-manager-v{MANAGER_VERSION}.zip', {
         **update, 'README-fa.md': (HOST / 'README-fa.md').read_bytes(),
         'UPSTREAM.json': (BACI / 'UPSTREAM.json').read_bytes(),
         **{f'media/{name}': (ROOT / 'server' / name).read_bytes()
             for name in ('README-fa.md', 'WEBHOOK-fa.md', 'install.py', 'admission.py')},
         f'patches/{BACI_PATCH}': (HOST / 'patches' / BACI_PATCH).read_bytes(),
+    })
+    bundle = {name: (opts.output_dir / name).read_bytes() for name in (upgrade, classroom)}
+    checksums = ''.join(f'{hashlib.sha256(data).hexdigest()}  {name}\n' for name, data in bundle.items())
+    write_zip(opts.output_dir / f'baci-classroom-upgrade-v{VERSION}.zip', {
+        **bundle, 'START-HERE-fa.txt': (ROOT / 'docs/baci-classroom-upgrade.fa.txt').read_bytes(),
+        'SHA256SUMS.txt': checksums.encode('ascii'),
     })
     print(f'Built all archives; classroom manifest SHA-256: {expected}')
 

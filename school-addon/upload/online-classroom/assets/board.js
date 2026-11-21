@@ -15,7 +15,8 @@
         const removed = new Set(), bounds = new WeakMap();
         const packetSize = 96, eraseSize = 32, batchSize = 6, queueLimit = 48, writeDelay = 175;
         const tip = el('eraser-tip');
-        let tool = 'pen', busy = false, renderVersion = 0, documentVersion = 0, docKey = '', docsKey = '';
+        let tool = 'pen', busy = false, renderVersion = 0, documentVersion = 0, docsKey = '', fileWanted = false;
+        const loadFile = el('board-load-file'), autoImageLimit = 64 * 1024;
         let drag = null, pointerType = '', candidate = null, pinch = null, pinchFrame, touchBlocked = false, penUntil = 0, space = false;
         const contacts = new Map();
         const writers = el('board-writers'), labels = new Map();
@@ -42,7 +43,6 @@
             job?.destroy().catch(() => {}); job = null;
             imageLoad?.abort(); imageLoad = null;
             imageFile?.close?.(); imageFile = null;
-            docKey = '';
         }
         function pdfLib() {
             if (!library) library = import(url(root.dataset.pdf)).then(lib => {
@@ -428,15 +428,23 @@
             }
             return false;
         }
-        async function show(view, scope, reload) {
-            if (reload) clearDocument();
-            else cancelRender();
+        function fileControl(doc) {
+            el('board-file-receive').hidden = !doc;
+            loadFile.setAttribute('aria-pressed', String(fileWanted));
+            loadFile.textContent = fileWanted ? 'پنهان‌کردن فایل تخته' : 'دریافت و نمایش فایل تخته';
+            el('board-file-size').textContent = doc ? `${doc.mime === 'application/pdf' ? 'PDF · ' : ''}${pageNumber.format(Math.ceil(doc.bytes/1024))} کیلوبایت` : '';
+        }
+        function blankPaper(doc) {
+            // Keep the ink aligned with an image even if the pupil never downloads it.
+            fit(doc?.width || 1600, doc?.height || 1000);
+        }
+        async function show(view, scope) {
+            cancelRender();
             const ticket = renderVersion;
             const docTicket = documentVersion;
-            stage.classList.toggle('has-document', !!view.doc);
-            if (!view.doc) { message(); return; }
+            stage.classList.toggle('has-document', !!view.doc && fileWanted);
+            if (!view.doc || !fileWanted) return;
             const doc = view.doc;
-            docKey = doc.id;
             message('در حال نمایش فایل تخته…');
             try {
                 const source = documentURL(doc,scope);
@@ -458,7 +466,7 @@
                 } else {
                     if (!imageFile) {
                         const ctrl = new AbortController(); imageLoad = ctrl;
-                        const res = await fetch(source,{credentials:'same-origin',cache:'no-store',signal:ctrl.signal});
+                        const res = await fetch(source,{credentials:'same-origin',cache:'no-store',signal:ctrl.signal,priority:'low'});
                         if (!res.ok) throw new Error('Image unavailable');
                         const blob = await res.blob();
                         const img = await decodeImage(blob);
@@ -504,8 +512,13 @@
         function sync(next, scope, requestedAt = performance.now()) {
             if (!next) return;
             const rival = transport && (transport.lesson !== scope.lesson || transport.epoch !== scope.epoch || transport.sid !== scope.sid);
+            if (!('doc' in next)) {
+                // Compact deltas carry no document metadata; never borrow metadata from a different SID or page.
+                if (rival || !data || data.rev !== next.rev) return;
+                next = {...next,doc:data.doc,page:data.page,docs:data.docs,ops:next.ops || []};
+            }
             const resetPage = next.reset || !data || next.rev !== data.rev || rival;
-            const reloadDoc = rival || (next.doc?.id || '') !== docKey;
+            const reloadDoc = rival || next.doc?.id !== data?.doc?.id;
             const changedPaper = !data || reloadDoc || next.page !== data.page;
             const catchingUp = data?.more || next.more;
             const revoked = !staff && data?.write === true && next.write !== true;
@@ -526,10 +539,15 @@
                 clearTimeout(cue.timer); cue.label.remove(); labels.delete(id);
             }
             showRemoteLaser(next.rev < targetRev ? null : next.laser, requestedAt);
+            if (reloadDoc) {
+                clearDocument();
+                fileWanted = !!next.doc && next.doc.mime !== 'application/pdf' && next.doc.bytes <= autoImageLimit;
+            }
             if (changedPaper) {
                 // Do not briefly show a page from the previous document during parsing.
-                fit(1600,1000);
-                show(next,scope,reloadDoc);
+                fileControl(next.doc);
+                blankPaper(next.doc);
+                show(next,scope);
             } else if (resetPage || revoked || dropped || (next.ops.length && (pending.length || sent.length || next.ops.some(op => op.tool === 'erase-stroke')))) {
                 redraw();
                 if (!resetPage && !catchingUp && !document.hidden) lastWriters(next.ops);
@@ -554,18 +572,25 @@
             toolState();
         }
         function reset() {
-            data = transport = null;
-            wipeInk(); clearDocument();
+            data = transport = null; fileWanted = false;
+            wipeInk(); clearDocument(); fileControl(null);
             stage.classList.remove('has-document');
             fit(1600,1000);
             setZoom(1, null);
             if (card.classList.contains('expanded')) setExpanded(false);
             el('board-page-label').textContent = ''; el('board-footer').hidden = true; toolState();
         }
+        loadFile.addEventListener('click', () => {
+            if (!data?.doc || !transport || !options.canEdit()) return;
+            fileWanted = !fileWanted;
+            fileControl(data.doc);
+            if (!fileWanted) { clearDocument(); blankPaper(data.doc); }
+            show(data,transport);
+        });
         function setExpanded(expand) {
             card.classList.toggle('expanded',expand);
             options.onExpand(expand);
-            for (const node of root.querySelectorAll('.room-top, .staff-actions, .screen-panel, .speaker-strip, .camera-strip, .room-side')) node.inert = expand;
+            for (const node of root.querySelectorAll('.room-top, .staff-actions, .receive-tools, .screen-panel, .speaker-strip, .camera-strip, .room-side')) node.inert = expand;
             const btn = el('board-expand');
             btn.setAttribute('aria-pressed',String(expand));
             btn.setAttribute('aria-label', expand ? 'بازگشت به کلاس' : 'نمای بزرگ تخته');

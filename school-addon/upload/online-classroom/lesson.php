@@ -265,6 +265,18 @@ function cl_ticket(array $cfg, ?array $lesson, array $actor, array $input, int $
     return ['url'=>$cfg['signal_url'], 'token'=>$token, 'lesson'=>$lesson['id'], 'epoch'=>cl_epoch($lesson)];
 }
 
+/** Only for an admitted status response. A validator is a compression hint, never proof of admission. */
+function cl_status_people(array $lesson, array $input): array
+{
+    $profiles = array_intersect_key($lesson['profiles'] ?? [], $lesson['seen']);
+    if (($input['compact'] ?? null) !== true) return ['profiles'=>$profiles,'seconds'=>$lesson['seconds']];
+    $rev = substr(hash('sha256', json_encode($profiles, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE)), 0, 24);
+    $result = ['profilesRev'=>$rev];
+    if (($input['profilesRev'] ?? null) !== $rev) $result['profiles'] = $profiles;
+    if (($input['people'] ?? null) === true) $result['seconds'] = array_intersect_key($lesson['seconds'], $lesson['seen']);
+    return $result;
+}
+
 // Account only intervals bracketed by independent, fresh SFU samples and session pulses.
 // Room rotation, an unobserved gap, a changed connection SID or a staff-free interval earns no time.
 function cl_observe(array $lesson, array $observed, array $staff, int $at, int $now): array
@@ -344,11 +356,12 @@ function cl_reconcile(ClassroomStore $s, array $cfg, ?array $class, array $lesso
         $closingNow = $lesson['phase'] !== 'closing';
         cl_pause($lesson, 'closing');
     }
+    $priorPhase = $lesson['phase'];
     if ($lesson['phase'] === 'live' && !cl_lesson_live($lesson, $now)) cl_pause($lesson);
     if ($lesson['phase'] === 'starting' && !cl_starting($lesson, $now)) cl_pause($lesson);
     // The last presence sample must not delay the first attempt to close a bell at its deadline.
     if (!$closingNow && $now - ($lesson['last_attempt'] ?? 0) < CL_SAMPLE_INTERVAL) {
-        $s->put('lesson', $lesson['id'], $lesson);
+        if ($priorPhase !== $lesson['phase']) $s->put('lesson', $lesson['id'], $lesson); // cl_touch already saved the pulse.
         return $lesson;
     }
     if ($lesson['phase'] === 'closing' || ($lesson['phase'] === 'paused' && $lesson['room'] !== null)) {

@@ -1,14 +1,16 @@
 <?php
 declare(strict_types=1);
 
+use BaciClassroom\Calendar;
+
 // School plugin runtime and gateway. Settings are exposed by the reviewed host overlay.
-const MPM_VERSION = '0.1.15';
+const MPM_VERSION = '0.1.17';
 const MPM_CLASSROOM_NATIVE = '0.4.0';
 const MPM_CLASSROOM_PUPIL_TRIAL = '0.4.3';
 const MPM_REGISTRY = 'mtg_plugin_registry';
 const MPM_SITE = 'mtg_plugin_site';
 const MPM_MAX_ZIP = 4 * 1024 * 1024;
-const MPM_MAX_FILES = 25; // Reviewed payload files, excluding plugin.json.
+const MPM_MAX_FILES = 26; // Reviewed payload files, excluding plugin.json.
 const MPM_BELL_LABELS = [1=>'۱', 2=>'۲', 3=>'۳', 4=>'۴'];
 const MPM_CATALOG = [
     'school-classroom' => [
@@ -27,6 +29,8 @@ const MPM_CATALOG = [
         '0.4.7' => 'd4f639e75dd6d396a17fe46914b4d91da2a3dc8c54da12fcabae3bf4fcb86f94',
         '0.4.8' => '495ea3133cbbc74f5f51c90133c67f5c38ab74f1a328493bd52406ca2c68ff34',
         '0.4.9' => 'f44e2910c0cdbc5bce1a599980d594fe8271e7d5713ffed20d9352f04732bc5d',
+        '0.4.10' => 'dec342dc941221a036554959c688cef2e2fb4921c4527447d737664b7820117e',
+        '0.4.11' => '88d32ab3f56ea0c52e59c9cbfb41e178bfb5bcf9e5ae1ae88433be6997202964',
     ],
 ];
 
@@ -551,20 +555,21 @@ function mpm_has_setting(array $manifest, string $key, string $type): bool
 
 function mpm_today(?int $now = null): DateTimeImmutable
 {
-    return (new DateTimeImmutable('@' . ($now ?? time())))->setTimezone(new DateTimeZone('Asia/Tehran'))->setTime(0, 0);
+    // This helper is the same source distributed inside the classroom ZIP.
+    if (!class_exists(Calendar::class, false)) require_once mpm_host_root() . '/includes/classroom-calendar.php';
+    return Calendar::tehran($now ?? time())->setTime(0, 0);
 }
 
 function mpm_friday_date(mixed $input, ?int $now = null): string
 {
-    if (!is_string($input) || !preg_match('/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/D', $input)) {
-        throw new MpmNotice('تاریخ میلادی جمعه را انتخاب کن.');
-    }
     $today = mpm_today($now);
-    $date = DateTimeImmutable::createFromFormat('!Y-m-d', $input, $today->getTimezone());
-    if (!$date || $date->format('Y-m-d') !== $input || $date->format('w') !== '5' || $date < $today) {
+    $iso = Calendar::fromShamsi($input);
+    if ($iso === null) throw new MpmNotice('تاریخ شمسی معتبر را به صورت سال/ماه/روز وارد کن.');
+    $date = DateTimeImmutable::createFromFormat('!Y-m-d', $iso, $today->getTimezone());
+    if (!$date || $date->format('w') !== '5' || $date < $today) {
         throw new MpmNotice('روز آزمایش باید یک جمعهٔ معتبر باشد که به وقت تهران نگذشته است.');
     }
-    return $input;
+    return $iso; // Keep saved grants and classroom day/room keys compatible with older versions.
 }
 
 function mpm_bell_hours(mixed $input): array
@@ -745,29 +750,50 @@ function mpm_menu_items(PDO $db, string $dir, string $role, string $section = 'm
     return $items;
 }
 
+function mpm_navigation_context(string $role): ?array
+{
+    // Only read installation metadata, never migrate from a panel request.
+    if (!in_array($role, ['admin','deputy','teacher','student'], true)) return null;
+    $session = $_SESSION ?? [];
+    $sessionRole = $role === 'deputy' ? 'teacher' : $role;
+    if (mpm_find_role($session) !== $sessionRole || !($origin = mpm_https_origin())) return null;
+    $db = mpm_database();
+    $site = mpm_site($db);
+    if (!$site || $site['origin'] !== $origin) return null;
+    $dir = mpm_private_dir($site['private_dir']);
+    $id = filter_var($session[$sessionRole . '_id'], FILTER_VALIDATE_INT, ['options'=>['min_range'=>1]]);
+    if ($id === false) return null;
+    if ($role === 'admin') {
+        $admin = mpm_query($db, 'SELECT role,permissions,status FROM admins WHERE id=?', [$id])->fetch();
+        $perms = json_decode((string)($admin['permissions'] ?? ''), true);
+        if (!$admin || (int)$admin['status'] !== 1 || ($admin['role'] !== 'super_admin' && (!is_array($perms) || (!in_array('all', $perms, true) && !in_array('manage_classes', $perms, true))))) return null;
+    } elseif ($role === 'student') {
+        if (mpm_query($db, 'SELECT status FROM students WHERE id=?', [$id])->fetchColumn() !== 'active') return null;
+    } else {
+        $teacher = mpm_query($db, 'SELECT * FROM teachers WHERE id=?', [$id])->fetch();
+        if (!$teacher || (int)$teacher['status'] !== 1 || ($role === 'deputy' && (int)($teacher['is_deputy'] ?? 0) !== 1)) return null;
+    }
+    return [$db, $dir];
+}
+
+function mpm_classroom_tile(string $role): ?array
+{
+    if (!in_array($role, ['teacher','student'], true)) return null;
+    try {
+        if (!($context = mpm_navigation_context($role))) return null;
+        [$db, $dir] = $context;
+        $label = mpm_menu_items($db, $dir, $role)['school-classroom'] ?? null;
+        return $label === null ? null : ['href'=>'plugins/school-plugins.php?plugin=school-classroom', 'label'=>$label];
+    } catch (Throwable $ignored) {
+        return null; // The native dashboard must render even without an installation.
+    }
+}
+
 function mpm_navigation(string $role): void
 {
-    // Native host sidebar; only look up active plugin metadata. Never migrate from a panel GET.
     try {
-        $session = $_SESSION ?? [];
-        $sessionRole = $role === 'deputy' ? 'teacher' : $role;
-        if (mpm_find_role($session) !== $sessionRole || !($origin = mpm_https_origin())) return;
-        $db = mpm_database();
-        $site = mpm_site($db);
-        if (!$site || $site['origin'] !== $origin) return;
-        $dir = mpm_private_dir($site['private_dir']);
-        $id = filter_var($session[$sessionRole . '_id'], FILTER_VALIDATE_INT, ['options'=>['min_range'=>1]]);
-        if ($id === false) return;
-        if ($role === 'admin') {
-            $admin = mpm_query($db, 'SELECT role,permissions,status FROM admins WHERE id=?', [$id])->fetch();
-            $perms = json_decode((string)($admin['permissions'] ?? ''), true);
-            if (!$admin || (int)$admin['status'] !== 1 || ($admin['role'] !== 'super_admin' && (!is_array($perms) || (!in_array('all', $perms, true) && !in_array('manage_classes', $perms, true))))) return;
-        } elseif ($role === 'student') {
-            if (mpm_query($db, 'SELECT status FROM students WHERE id=?', [$id])->fetchColumn() !== 'active') return;
-        } else {
-            $teacher = mpm_query($db, 'SELECT * FROM teachers WHERE id=?', [$id])->fetch();
-            if (!$teacher || (int)$teacher['status'] !== 1 || ($role === 'deputy' && (int)($teacher['is_deputy'] ?? 0) !== 1)) return;
-        }
+        if (!($context = mpm_navigation_context($role))) return;
+        [$db, $dir] = $context;
         $items = mpm_menu_items($db, $dir, $role);
         foreach ($items as $slug=>$label) {
             echo '<a class="sidebar-item" href="plugins/school-plugins.php?plugin=' . rawurlencode($slug) . '">' . mpm_html($label) . '</a>';
@@ -819,7 +845,8 @@ function mpm_dispatch(PDO $db, array $site, string $slug, string $route, string 
             session_write_close();
             if ($type[1] === 'mjs') header("Content-Security-Policy: default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self'");
             header('Content-Type: ' . ($type[1] === 'css' ? 'text/css' : 'text/javascript') . '; charset=UTF-8');
-            readfile(mpm_verified_file($dir, $row, $manifest, $name));
+            $path = mpm_verified_file($dir, $row, $manifest, $name);
+            mpm_static_reply($manifest['files'][$name], static fn() => file_get_contents($path));
             return;
         }
         if (!array_key_exists($route, $manifest['routes'])) {
@@ -828,6 +855,49 @@ function mpm_dispatch(PDO $db, array $site, string $slug, string $route, string 
         }
         mpm_call($db, $site, $dir, $row, $manifest, $manifest['routes'][$route], $jobMode);
     });
+}
+
+function mpm_accepts_gzip(string $header): bool
+{
+    $fallback = false;
+    foreach (explode(',', strtolower($header)) as $item) {
+        [$name, $parameter] = array_pad(array_map('trim', explode(';', $item, 2)), 2, '');
+        $accept = $parameter === '' || (preg_match('/^q\s*=\s*([01](?:\.\d{0,3})?)$/D', $parameter, $match)
+            && (float)$match[1] > 0 && (float)$match[1] <= 1);
+        if ($name === 'gzip') return $accept;
+        if ($name === '*') $fallback = $accept;
+    }
+    return $fallback;
+}
+
+/** Only package-verified, non-personal assets. Keep lesson APIs, photos and files no-store. */
+function mpm_static_reply(string $digest, callable $load): void
+{
+    $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
+    if (!in_array($method, ['GET','HEAD'], true)) {
+        header('Allow: GET, HEAD'); http_response_code(405); return;
+    }
+    $tag = '"' . $digest . '"';
+    header('Cache-Control: private, no-cache'); // Recheck session, active package and hash on every revalidation.
+    header('ETag: W/' . $tag); // Same bytes after decoding gzip or identity.
+    header('Vary: Accept-Encoding', false);
+    $tags = array_map('trim', explode(',', (string)($_SERVER['HTTP_IF_NONE_MATCH'] ?? '')));
+    if (in_array('*', $tags, true) || in_array($tag, $tags, true) || in_array('W/' . $tag, $tags, true)) {
+        http_response_code(304); return;
+    }
+    if ($method === 'HEAD') return;
+    // Do not double-compress on a host that already has PHP output compression.
+    $bytes = $load();
+    if (!is_string($bytes)) throw new MpmNotice('خواندن فایل بسته ممکن نشد.');
+    if (strlen($bytes) > 512 && function_exists('gzencode') && (int)ini_get('zlib.output_compression') === 0
+        && strtolower((string)ini_get('zlib.output_compression')) !== 'on' && !in_array('ob_gzhandler', ob_list_handlers(), true)
+        && mpm_accepts_gzip((string)($_SERVER['HTTP_ACCEPT_ENCODING'] ?? ''))) {
+        $gzip = gzencode($bytes, 4);
+        if ($gzip !== false && strlen($gzip) < strlen($bytes)) {
+            header('Content-Encoding: gzip'); echo $gzip; return;
+        }
+    }
+    echo $bytes;
 }
 
 function mpm_pdf_resource(string $dir, array $row, array $manifest): void
@@ -847,7 +917,7 @@ function mpm_pdf_resource(string $dir, array $row, array $manifest): void
         $data = $zip->getFromName($name);
         if ($data === false) { http_response_code(404); return; }
         header('Content-Type: ' . $kinds[$m[2]]);
-        echo $data;
+        mpm_static_reply(hash('sha256', $data), static fn() => $data);
     } finally {
         $zip->close();
     }
@@ -1109,12 +1179,13 @@ function mpm_render_friday_test(string $csrf, string $slug, array $grant, bool $
     $selected = $date !== null && $date >= $day ? $date : $upcoming;
     $status = $date === null ? 'تنظیم نشده' : ($date < $day ? 'پایان یافته' : (!$enabled ? 'در انتظار فعال‌سازی افزونه' : ($date === $day ? 'امروز فعال تا نیمه‌شب' : 'زمان‌بندی‌شده')));
     echo '<section class="card mb-3" id="mpm-friday-test"><h3>آزمایش ۲۴ ساعتهٔ جمعه</h3><p role="status">وضعیت: ' . $status
-        . ($date !== null ? ' · <bdi>' . mpm_html($date) . '</bdi>' : '') . '</p>'
+        . ($date !== null ? ' · ' . mpm_html(Calendar::label($date)) : '') . '</p>'
         . '<p>فقط در تاریخ انتخابی، از ۰۰:۰۰ جمعه تا ۰۰:۰۰ شنبه به وقت تهران. همهٔ دبیران فعال می‌توانند در کلاس‌های سال پیش‌فرض آزمایش را باز کنند یا به آن بپیوندند. برنامهٔ هفتگی، گزارش رسمی و اعلان‌ها تغییری نمی‌کنند.</p>'
         . '<form class="mb-3" method="post" action="' . $action . '">';
     mpm_hidden($csrf, 'friday-test', $slug);
-    echo '<label>تاریخ جمعه (میلادی) <input type="date" class="form-input" dir="ltr" required name="friday_date" min="' . $day
-        . '" value="' . mpm_html($selected) . '"></label>';
+    echo '<label>تاریخ شمسیِ جمعه <input type="text" class="form-input" dir="ltr" lang="fa" required name="friday_date" maxlength="10"'
+        . ' aria-describedby="mpm-friday-date-hint" value="' . mpm_html(Calendar::shamsi($selected) ?? '') . '"></label>'
+        . '<p id="mpm-friday-date-hint" class="text-muted">سال/ماه/روز، مثلاً ۱۴۰۵/۰۸/۲۹. تاریخ پیشنهادی، نزدیک‌ترین جمعه به وقت تهران است.</p>';
     if ($supportsStudents) {
         echo '<p><label><input type="checkbox" name="friday_students" value="yes"' . (($grant['students'] ?? false) === true && $date === $selected ? ' checked' : '')
             . '> اجازهٔ ورود آزمایشی به دانش‌آموزانِ همان کلاس</label></p>'

@@ -73,8 +73,9 @@ function cl_board_view(ClassroomStore $s, string $id, array $actor, array $input
     $cursor = $position;
     $ops = [];
     $now = microtime(true);
+    $compact = ($input['compact'] ?? null) === true;
     if ($position < $clock) {
-        foreach ($s->rows('ink:' . $id . ':' . $layer['key'], 120, cl_seq($position)) as $end => $op) {
+        foreach ($s->rows('ink:' . $id . ':' . $layer['key'], $compact ? 32 : 120, cl_seq($position)) as $end => $op) {
             $cursor = (int)$end;
             if ($op['tool'] === 'pen') {
                 if (!isset($op['id'])) $op['id'] = 'old-' . cl_seq($cursor);
@@ -105,9 +106,18 @@ function cl_board_view(ClassroomStore $s, string $id, array $actor, array $input
             if ($points) $aim = ['by'=>$laser['by'], 'points'=>$points];
         }
     }
+    $moving = ($layer['changed_at'] ?? 0) > $now - 1.6;
+    if ($compact && !$reset) {
+        // A matching revision already implies the same page, document and file list.
+        // Write permission is independent of that revision; send it even on an idle read.
+        return ['rev'=>$state['rev'], 'cursor'=>$cursor, 'write'=>$write]
+            + ($write ? ['owner'=>cl_ink_prefix($id, $actor['identity'])] : [])
+            + ($cursor < $clock ? ['more'=>true] : []) + ($ops ? ['ops'=>$ops] : [])
+            + ($moving ? ['moving'=>true] : []) + ($aim ? ['laser'=>$aim] : []);
+    }
     return ['doc'=>$doc, 'page'=>$state['page'], 'rev'=>$state['rev'], 'cursor'=>$cursor, 'more'=>$cursor < $clock,
         'reset'=>$reset, 'write'=>$write, 'owner'=>$write ? cl_ink_prefix($id, $actor['identity']) : null,
-        'ops'=>$ops, 'moving'=>($layer['changed_at'] ?? 0) > $now - 1.6, 'laser'=>$aim,
+        'ops'=>$ops, 'moving'=>$moving, 'laser'=>$aim,
         'docs'=>cl_is_staff($actor) ? array_values($state['docs']) : []];
 }
 
@@ -352,6 +362,7 @@ function cl_upload(ClassroomStore $s, array $lesson, array $input, array $file):
     @chmod($target, 0600);
     $name = cl_safe_label(basename(str_replace('\\', '/', (string)($file['name'] ?? ''))), 110) ?: 'فایل تخته';
     $state['docs'][$doc] = ['id'=>$doc, 'name'=>$name, 'mime'=>$mime, 'pages'=>$pages, 'bytes'=>$bytes];
+    if (isset($dimensions)) $state['docs'][$doc] += ['width'=>$dimensions[0], 'height'=>$dimensions[1]];
     $state['doc'] = $doc;
     $state['page'] = 1;
     $state['rev']++;

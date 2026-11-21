@@ -9,6 +9,8 @@
     "includes/header.php": "4170b92a76cfe5394f2244f1839ad96f3ad4cdb25247c55c733ea9e4a75a5567",
     "includes/management_hub.php": "7d42d9c65f394efad9f3e22d93d5821349e22884a3adc70b92251e5cd538c44f",
     "other-settings.php": "afde1fc60406fdcada873fd54c37a3b32940fcdb5e2bf0a35a1dfbd913995f8b",
-    "includes/footer.php": "47d8f2ff1476249f7448ef1de7d99d2f976d27d458f7c174d3b70a18b6f92785"
+    "includes/footer.php": "47d8f2ff1476249f7448ef1de7d99d2f976d27d458f7c174d3b70a18b6f92785",
+    "includes/student_nav.php": "db8868abab64982fe09f19f599563f39b855fa241d2f10c90d3c3f69aac9cf06",
+    "includes/teacher_nav.php": "e272e2bbdc180f2e7beca4b096ae00594c9c7b96e53e056e6fcc8861bf4e85e0"
   }
 }

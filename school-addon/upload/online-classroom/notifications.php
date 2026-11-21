@@ -15,8 +15,8 @@ function cl_attendance_text(array $lesson, int $student): string
 {
     $id = 'student-' . $student;
     return 'حضور در کلاس مجازی — ' . $lesson['roster'][$id] . "\n" . $lesson['class_name'] . ' · ' . $lesson['subject'] . ' · ' . $lesson['period']
-        . "\nتاریخ (تهران): " . $lesson['date'] . "\nحضور: " . cl_duration($lesson['seconds'][$id] ?? 0)
-        . ' از ' . cl_duration($lesson['active_seconds']) . "\nزمان انتظار و وقفهٔ کلاس در این مدت منظور نشده است.";
+        . "\nتاریخ (تهران): " . cl_display_day($lesson['date']) . "\nحضور: " . cl_persian_digits(cl_duration($lesson['seconds'][$id] ?? 0))
+        . ' از ' . cl_persian_digits(cl_duration($lesson['active_seconds'])) . "\nزمان انتظار و وقفهٔ کلاس در این مدت منظور نشده است.";
 }
 
 function cl_delivery_add(ClassroomStore $s, string $lesson, string $type, int $delta = 1): void

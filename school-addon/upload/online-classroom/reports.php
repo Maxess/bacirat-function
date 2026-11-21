@@ -16,13 +16,6 @@ function cl_report_detail(ClassroomStore $s, array $actor, string $id): ?array
     return $row;
 }
 
-function cl_display_day(string $date): string
-{
-    if (!function_exists('jdate')) return $date;
-    $time = (new DateTimeImmutable($date . ' 12:00:00', new DateTimeZone('Asia/Tehran')))->getTimestamp();
-    return (string)jdate('Y/m/d', $time, '', 'Asia/Tehran', 'fa');
-}
-
 function cl_reports(ClassroomStore $s, array $actor): array
 {
     $bucket = cl_report_bucket($actor);
@@ -47,8 +40,8 @@ function cl_render_reports(array $data): void
         <section class="card report-summary">
             <a href="<?= cl_html(cl_href(['view'=>'reports'])) ?>">← فهرست زنگ‌های برگزارشده</a>
             <h2><?= cl_html($r['class_name'] . ' · ' . $r['subject']) ?></h2>
-            <p><?= cl_html($r['year'] . ' | ' . cl_display_day($r['date']) . ' | ' . $r['period'] . ' | ' . $r['teacher_name']) ?></p>
-            <p>مدت برگزاری فعال: <strong><bdi><?= cl_duration($r['active_seconds']) ?></bdi></strong> <span class="meta">(بدون زمان انتظار یا وقفه)</span></p>
+            <p><?= cl_html(cl_persian_digits($r['year']) . ' | ' . cl_display_day($r['date']) . ' | ' . cl_persian_digits($r['period']) . ' | ' . $r['teacher_name']) ?></p>
+            <p>مدت برگزاری فعال: <strong><bdi dir="ltr"><?= cl_persian_digits(cl_duration($r['active_seconds'])) ?></bdi></strong> <span class="meta">(بدون زمان انتظار یا وقفه)</span></p>
             <?php if (!empty($data['delivery'])): $d = $data['delivery']; ?>
             <p class="meta">نتیجهٔ اعلان‌ها: <?= (int)($d['sent'] ?? 0) ?> ارسال شده · <?= (int)($d['failed'] ?? 0) ?> خطا · <?= (int)($d['uncertain'] ?? 0) ?> نامشخص · <?= (int)($d['skipped'] ?? 0) ?> رد شده</p>
             <?php endif; ?>
@@ -56,7 +49,7 @@ function cl_render_reports(array $data): void
         <section class="card table-wrap">
             <table><caption>حضور دانش‌آموزان در این زنگ</caption><thead><tr><th scope="col">دانش‌آموز</th><th scope="col">مدت حضور</th><th scope="col">درصد از زمان فعال</th></tr></thead>
             <tbody><?php foreach ($r['roster'] as $who=>$name): $seconds = $r['seconds'][$who] ?? 0; ?>
-            <tr><th scope="row"><?= cl_html($name) ?></th><td><bdi><?= cl_duration($seconds) ?></bdi></td>
+            <tr><th scope="row"><?= cl_html($name) ?></th><td><bdi dir="ltr"><?= cl_persian_digits(cl_duration($seconds)) ?></bdi></td>
                 <td><?= $r['active_seconds'] ? ((int)round(100 * $seconds / $r['active_seconds']) . '٪') : '—' ?></td></tr>
             <?php endforeach; ?></tbody></table>
             <?php if (!$r['roster']): ?><p>برای این زنگ دانش‌آموزی در فهرست کلاس ثبت نشده بود.</p><?php endif; ?>
@@ -70,7 +63,7 @@ function cl_render_reports(array $data): void
         <ul class="report-list">
         <?php foreach ($data['reports'] as $r): ?>
             <li><a href="<?= cl_html(cl_href(['view'=>'reports','lesson'=>$r['id']])) ?>"><strong><?= cl_html($r['class_name'] . ' · ' . $r['subject']) ?></strong>
-                <span><?= cl_html(cl_display_day($r['date']) . ' | ' . $r['period'] . ' | ' . $r['teacher_name'] . ' | ' . $r['year']) ?></span></a></li>
+                <span><?= cl_html(cl_display_day($r['date']) . ' | ' . cl_persian_digits($r['period']) . ' | ' . $r['teacher_name'] . ' | ' . cl_persian_digits($r['year'])) ?></span></a></li>
         <?php endforeach; ?>
         </ul>
         <?php if ($data['next'] !== null): ?><a href="<?= cl_html(cl_href(['view'=>'reports','before'=>$data['next']])) ?>">زنگ‌های قدیمی‌تر</a><?php endif; ?>

@@ -38,3 +38,27 @@
 +    }
      $requested=$_GET['hub_tab']??'';
      $active=is_string($requested)&&isset($tabs[$requested])?$requested:array_key_first($tabs);
+--- a/includes/student_nav.php
++++ b/includes/student_nav.php
+@@ -118,6 +118,9 @@
+         $name  = trim((string)($student['first_name'] ?? '') . ' ' . (string)($student['last_name'] ?? ''));
+         $year  = student_panel_year($student);
+         $tiles = student_nav_tiles($active, $counts);
++        if (function_exists('mpm_classroom_tile') && ($classroom = mpm_classroom_tile('student')) !== null) {
++            $tiles[] = ['classroom', $classroom['href'], '🎓', $classroom['label'], ''];
++        }
+         $meta  = [];
+         if (trim((string)($student['national_id'] ?? '')) !== '') {
+             $meta[] = 'کد ملی: <span class="font-mono">' . clean(student_nav_num($student['national_id'])) . '</span>';
+--- a/includes/teacher_nav.php
++++ b/includes/teacher_nav.php
+@@ -25,6 +25,9 @@
+                کاشی جداگانه حذف شد. کاشی آزمون‌ها در صفحه بانک هم active می‌ماند. */
+             ['online-exams.php', '🧪', 'آزمون‌های آنلاین', in_array($tnSelf, ['online-exams.php', 'online-question-bank.php'], true)],
+         ];
++        if (function_exists('mpm_classroom_tile') && ($classroom = mpm_classroom_tile('teacher')) !== null) {
++            $tiles[] = [$classroom['href'], '🎓', $classroom['label'], false];
++        }
+         if (!empty($tnTeacher['is_deputy'])) $tiles[] = ['deputy-panel.php', '🛡️', 'پنل معاونت', $tnSelf === 'deputy-panel.php'];
+         if (!empty($tnTeacher['is_counselor'])) $tiles[] = ['counselor-panel.php', '🧭', 'پنل مشاور', $tnSelf === 'counselor-panel.php'];
+         if (!empty($tnTeacher['is_executive'])) $tiles[] = ['executive-panel.php', '🏢', 'پنل معاون اجرایی', $tnSelf === 'executive-panel.php'];

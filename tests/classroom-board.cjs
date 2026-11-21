@@ -10,11 +10,12 @@ const script = fs.readFileSync(path.join(__dirname, '../school-addon/upload/onli
 function fixture({staff=true,reducedMotion=false}={}) {
     const elements = new Map(), timers = new Map(), frames = new Map(), calls = [], notices = [];
     let time = 0, seq = 0, access = staff, response, points;
+    const downloads = [];
     const display = { strokes:[], paths:[] };
     const context = {
         save(){}, restore(){}, beginPath(){ points=[]; },
         moveTo(x,y){ points.push([x,y]); }, lineTo(x,y){ points.push([x,y]); }, arc(x,y){ points.push([x,y]); }, fillRect(){},
-        clearRect(){ display.strokes=[]; display.paths=[]; },
+        clearRect(){ display.strokes=[]; display.paths=[]; }, drawImage(){ display.images = (display.images || 0)+1; },
         stroke(){ display.strokes.push([this.globalCompositeOperation,this.strokeStyle]); display.paths.push(points); },
         fill(){ this.stroke(); },
     };
@@ -36,13 +37,15 @@ function fixture({staff=true,reducedMotion=false}={}) {
         }
         return elements.get(id);
     }
-    const window = { addEventListener(){}, confirm:()=>true, matchMedia:()=>({matches:reducedMotion}) };
+    const window = { createImageBitmap:async()=>({width:600,height:800,close(){}}), addEventListener(){}, confirm:()=>true, matchMedia:()=>({matches:reducedMotion}) };
     vm.runInNewContext(script, {
-        document:{getElementById:el,createElement:tag=>el(`${tag}-${++seq}`),createElementNS:(_,tag)=>el(`${tag}-${++seq}`),addEventListener(){}}, window, crypto:webcrypto, performance:{now:()=>time},
+        document:{baseURI:'https://school.fixture.test/',getElementById:el,createElement:tag=>el(`${tag}-${++seq}`),createElementNS:(_,tag)=>el(`${tag}-${++seq}`),addEventListener(){}},
+        AbortController, URL, window, crypto:webcrypto, performance:{now:()=>time},
+        async fetch(url,options) { downloads.push({url,options}); return {ok:true,async blob(){return {};}}; },
         requestAnimationFrame(fn){const id=++seq;frames.set(id,fn);return id;}, cancelAnimationFrame:id=>frames.delete(id),
         setTimeout(fn,ms){const id=++seq;timers.set(id,{at:time+ms,fn});return id;}, clearTimeout:id=>timers.delete(id),
     });
-    const root = el('classroom'); root.dataset.moderator=staff ? 'yes' : 'no';
+    const root = el('classroom'); root.dataset.moderator=staff ? 'yes' : 'no'; root.dataset.content='/content?class=22';
     const board = window.ClassroomBoard(root, {
         canEdit:()=>access, notice:text=>notices.push(text), identity:()=>staff ? 'teacher-1':'student-1',
         authorName:()=> 'نام نویسنده', onExpand(){}, aimSoon(){},
@@ -66,7 +69,7 @@ function fixture({staff=true,reducedMotion=false}={}) {
         const planned=[...frames.values()]; frames.clear();
         for (const callback of planned) callback(time);
     }
-    return {el,board,sync,display,calls,notices,flush,frame,delay:s=>response=s, access:v=>access=v, draw(type,x,y,other){el('board-scroll').fire(type,{target:el('board-ink'),clientX:x,clientY:y,...other});}};
+    return {el,board,sync,display,calls,notices,downloads,flush,frame,delay:s=>response=s, access:v=>access=v, draw(type,x,y,other){el('board-scroll').fire(type,{target:el('board-ink'),clientX:x,clientY:y,...other});}};
 }
 const drawOp = (id, points, color='#0099ff') => ({tool:'pen',size:4,id,points,color});
 
@@ -318,4 +321,36 @@ test('fast movement is bounded and unsent laser samples expire without refreshin
     f.draw('pointermove',600,300); f.access(false);
     assert.deepEqual(structuredClone(f.board.takeAim()),{});
     f.board.reset(); assert.equal(f.el('board-laser-local').hidden,true);
+});
+
+
+test('compact ink and permission deltas keep the same unloaded file; only a click starts a large download', async()=>{
+    const f=fixture({staff:false}); f.access(true);
+    const scope={lesson:'L',epoch:'E',sid:'PA_student'};
+    const doc={id:'large',width:600,height:800,bytes:400000, mime:'image/jpeg', pages:1};
+    f.sync([],{doc,write:true},scope);
+    assert.equal(f.el('board-file-receive').hidden,false);
+    assert.equal(f.el('board-load-file')['aria-pressed'],'false');
+    assert.match(f.el('board-file-size').textContent,/۳۹۱/);
+    assert.equal(f.downloads.length,0);
+    f.board.sync({rev:1,cursor:1,write:false,ops:[drawOp('one',[[100,100],[200,400]])]},scope);
+    assert.equal(f.el('ink-tools').hidden,true);
+    assert.equal(f.el('board-stage').style.aspectRatio,'1500 / 2000');
+    assert.equal(f.display.strokes.length,1);
+    f.el('board-load-file').fire('click'); await f.flush();
+    assert.equal(f.downloads.length,1);
+    assert.equal(f.downloads[0].options.priority,'low');
+    assert.deepEqual(Object.fromEntries(new URL(f.downloads[0].url).searchParams),{class:'22',lesson:'L',epoch:'E',sid:'PA_student',doc:'large'});
+    assert.equal(f.display.images,1);
+    f.board.sync({rev:1,cursor:1,write:false},scope);
+    assert.equal(f.downloads.length,1,'noop does not restart the document');
+    f.el('board-load-file').fire('click');
+    assert.equal(f.downloads[0].options.signal.aborted,true);
+    assert.equal(f.el('board-load-file')['aria-pressed'],'false');
+    f.sync([],{doc:{...doc,id:'small',bytes:20000},rev:2},scope); await f.flush();
+    assert.equal(f.downloads.length,2,'small image still appears automatically');
+    f.sync([],{doc:{...doc,id:'tiny-pdf',mime:'application/pdf',bytes:4000},rev:3},scope);
+    assert.equal(f.el('board-load-file')['aria-pressed'],'false','even a tiny PDF does not load the renderer by surprise');
+    f.board.reset();
+    assert.equal(f.el('board-file-receive').hidden,true);
 });

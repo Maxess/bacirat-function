@@ -9,6 +9,7 @@ $actor = $errorMessage = $class = $reports = $friday = null;
 $classes = $choices = [];
 $connect = $year = $schoolName = $classLabel = '';
 $now = time();
+$today = cl_today_view($now);
 try {
     $cfg = cl_config();
     $s = cl_store();
@@ -85,7 +86,7 @@ $pageTitle = $roomPage ? trim($schoolName . ' ' . $classLabel)
         </nav>
         <p class="eyebrow">مدرسه · یادگیری آنلاین</p>
         <h1><?= cl_html($pageTitle) ?></h1>
-        <?php if ($actor): ?><p class="byline"><?= cl_html($actor['name'] . ' · ' . $actorLabel . ($year !== '' ? ' · سال ' . $year : '')) ?></p><?php endif; ?>
+        <?php if ($actor): ?><p class="byline"><?= cl_html($actor['name'] . ' · ' . $actorLabel . ($year !== '' ? ' · سال ' . cl_persian_digits($year) : '')) ?></p><?php endif; ?>
     </header>
     <?php endif; ?>
     <?php if ($errorMessage !== null): ?>
@@ -95,6 +96,7 @@ $pageTitle = $roomPage ? trim($schoolName . ' ' . $classLabel)
     <?php elseif ($class === null): ?>
         <section class="card">
             <h2>کلاس‌های سال جاری مدرسه</h2>
+            <p class="meta"><time datetime="<?= cl_html($today['day']) ?>"><?= cl_html($today['dayLabel']) ?></time> · وقت تهران</p>
             <?php if ($friday): ?><p role="status">آزمایش جمعه تا نیمه‌شب تهران فعال است. کلاس را انتخاب کن؛ <?= (cl_friday_window($cfg, $now)['students'] ?? false) ? 'دانش‌آموزانِ همان کلاس پس از اتصال دبیر اجازهٔ ورود دارند.' : 'جلسه فقط برای دبیران و مسئولان مجاز است.' ?> آزمایش گزارش رسمی یا اعلان ندارد.</p><?php endif; ?>
             <?php if (!$classes): ?><p>برای این حساب در سال جاری کلاس قابل دسترسی نیست. عضویت یا برنامهٔ هفتگی را بررسی کن.</p><?php endif; ?>
             <div class="class-grid">

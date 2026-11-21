@@ -40,9 +40,10 @@ cl_json_reply(static function (): array {
         }
         if ($action === 'status') {
             $idle = static function (bool $ready) use ($s, $cfg, $class, $actor): array {
-                $result = ['phase'=>'idle', 'ready'=>$ready];
-                if (cl_is_staff($actor)) $result['schedule'] = cl_staff_schedule($s, $cfg, $class, $actor, time());
-                elseif (cl_friday_window($cfg, time())['students'] ?? false) $result['practiceAvailable'] = true;
+                $now = time();
+                $result = ['phase'=>'idle', 'ready'=>$ready] + cl_today_view($now);
+                if (cl_is_staff($actor)) $result['schedule'] = cl_staff_schedule($s, $cfg, $class, $actor, $now);
+                elseif (cl_friday_window($cfg, $now)['students'] ?? false) $result['practiceAvailable'] = true;
                 return $result;
             };
             if (!$lesson) return $idle(true);
@@ -59,7 +60,7 @@ cl_json_reply(static function (): array {
                 if (!$isTest && function_exists('mpm_classroom_delivery_after_response')) mpm_classroom_delivery_after_response();
                 return $idle($ready);
             }
-            if (!$allowedRole) return ['phase'=>'reserved','ready'=>$ready];
+            if (!$allowedRole) return ['phase'=>'reserved','ready'=>$ready] + cl_today_view(time());
             $now = time(); // A slow SFU call must not extend a previously captured sample's validity.
             $expired = cl_lesson_expired($cfg, $lesson, $now);
             $live = $ready && !$expired && cl_lesson_live($lesson, $now);
@@ -70,14 +71,13 @@ cl_json_reply(static function (): array {
                 'period'=>$lesson['period'], 'subject'=>$lesson['subject'], 'slot'=>$lesson['slot'], 'bell'=>$lesson['bell'] ?? null, 'admitted'=>$allowed,
                 'startTime'=>isset($lesson['started']) ? cl_day($lesson['started'])->format('H:i') : null,
                 'joinable'=>$ready && !$expired && cl_joinable($lesson, $actor, $now),
-                'resumable'=>$ready && !$expired && $lesson['phase'] === 'paused' && $lesson['room'] === null];
+                'resumable'=>$ready && !$expired && $lesson['phase'] === 'paused' && $lesson['room'] === null] + cl_today_view($now);
             // A paused or reconnecting pupil can still see their own last verified total, not the room activity.
             if ($actor['role'] === 'student') $result['attendance'] = $lesson['seconds'][$actor['identity']] ?? 0;
             if ($allowed) {
-                $result += ['seconds'=>$lesson['seconds'], 'profiles'=>array_intersect_key($lesson['profiles'] ?? [], $lesson['seen']),
-                    'cameraCodec'=>$lesson['camera_codec'] ?? null, 'screen'=>cl_screen_enabled($cfg, $lesson) ? cl_screen_state($lesson) : null,
+                $result += ['cameraCodec'=>$lesson['camera_codec'] ?? null, 'screen'=>cl_screen_enabled($cfg, $lesson) ? cl_screen_state($lesson) : null,
                     'wakeMode'=>cl_wake_mode($lesson), 'wakeControl'=>cl_wake_control($lesson, $actor)]
-                    + cl_activity_sync($s, $lesson, $actor, $body);
+                    + cl_status_people($lesson, $body) + cl_activity_sync($s, $lesson, $actor, $body);
                 if (cl_is_staff($actor)) $result += ['access'=>$lesson['access'] ?? [], 'members'=>$lesson['seen'],
                     'mediaPending'=>($lesson['media_pending'] ?? false) === true, 'screenEnabled'=>cl_screen_enabled($cfg, $lesson)];
             }

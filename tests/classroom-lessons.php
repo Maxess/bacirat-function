@@ -320,6 +320,29 @@ $window = $view(5);
 must(count($window['ops'])===120 && $window['more'] && $window['cursor']===120*24, 'bounded read of compact rows');
 $remainder = $view(5,$window['cursor']);
 must(count($remainder['ops'])===1 && !$remainder['more'] && $remainder['cursor']===121*24, 'gap-aware cursor drains the remainder');
+$compact = static fn(int $rev,int $cursor) => cl_board_read($s,$active,$student,['board'=>$rev,'ink'=>$cursor,'compact'=>true]);
+$deltaWindow = $compact(4,0);
+must($deltaWindow['reset'] && array_key_exists('doc',$deltaWindow) && count($deltaWindow['ops'])===32 && $deltaWindow['more'], 'compact rejoin has board metadata and a bounded ink window');
+$got = $deltaWindow['ops'];
+while (!empty($deltaWindow['more'])) {
+    $deltaWindow = $compact(5,$deltaWindow['cursor']);
+    must(!array_key_exists('doc',$deltaWindow) && count($deltaWindow['ops'])<=32, 'matching revision avoids repeat metadata');
+    array_push($got,...$deltaWindow['ops']);
+}
+must(array_column($got,'id')===array_column([...$window['ops'],...$remainder['ops']],'id'), 'bounded windows recover the same ink');
+$idle = $compact(5,$deltaWindow['cursor']);
+must(isset($idle['write']) && !isset($idle['ops']) && !isset($idle['more']) && !array_key_exists('doc',$idle), 'idle reply stays small but still carries write permission');
+$presence = ['seen'=>['student-1'=>'PA_1'], 'profiles'=>['student-1'=>['name'=>'الف','photo'=>false],'student-2'=>['name'=>'ب','photo'=>true]],
+    'seconds'=>['student-1'=>80,'student-2'=>61]];
+$initial = cl_status_people($presence,['compact'=>true]);
+must(array_keys($initial['profiles'])===['student-1'] && !isset($initial['seconds']), 'closed roster omits every peer timer and never includes an absent card');
+must(cl_status_people($presence,['compact'=>true,'profilesRev'=>$initial['profilesRev']])===['profilesRev'=>$initial['profilesRev']], 'same admitted roster avoids retransmitting names');
+$full = cl_status_people($presence,['compact'=>true,'profilesRev'=>$initial['profilesRev'],'people'=>true]);
+must(!isset($full['profiles']) && $full['seconds']===['student-1'=>80], 'opening roster gets only present timers');
+$presence['profiles']['student-1']['name'] = 'نام تازه';
+must(cl_status_people($presence,['compact'=>true,'profilesRev'=>$initial['profilesRev']])['profiles']===['student-1'=>$presence['profiles']['student-1']],
+    'a changed name invalidates the cached card without changing the server attendance');
+
 // Force both caps near capacity, then check rollback after an in-row merge and a new row.
 $budget = cl_activity($s,$active['id']); $layer = cl_layer($s,$active['id'],$budget);
 $budgetKey = cl_layer_key($budget); $layerBucket = 'layers:' . $active['id'];
@@ -395,7 +418,10 @@ foreach ($s->rows('host-outbox',20) as $key=>$item) cl_deliver_one($s,$cfg,$host
 must(count($send)===3 && !$s->rows('host-outbox',20), 'dedup, normal school accounts and absence, skip group/unavailable provider');
 $targets=array_column($send,1); sort($targets);
 must($targets===['111','333','444'] && $s->get('delivery',$cl['id'])['sent']===3, 'only private linked contacts');
-foreach ($send as [$provider,$target,$text]) must(str_contains($text,'00:00:09') && str_contains($text,$target==='333'?'00:00:00':'00:00:06'), 'correct attendance message');
+foreach ($send as [$provider,$target,$text]) {
+    must(str_contains($text, 'چهارشنبه ۱۴۰۵/۰۸/۲۷') && !str_contains($text, '2026-11-18'), 'every school bot sends the stored Tehran day as Shamsi');
+    must(str_contains($text,'۰۰:۰۰:۰۹') && str_contains($text,$target==='333'?'۰۰:۰۰:۰۰':'۰۰:۰۰:۰۶'), 'correct attendance message');
+}
 
 // Simulated unlink, inactive provider, changed bot, and ambiguous send after the packet was queued.
 $makeNotice = static function (string $provider, string $chat, int $student) use ($s,$cl,$t) {

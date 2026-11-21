@@ -21,6 +21,8 @@ from zipfile import ZipFile
 ROOT = Path(__file__).resolve().parents[1]
 ARTIFACTS = ROOT / 'artifacts'
 PIN = json.loads((ROOT / 'plugin-manager/baci/UPSTREAM.json').read_text())
+UPDATE = 'baci-plugin-manager-update-v0.1.17.zip'
+CLASSROOM = ARTIFACTS / 'school-classroom-plugin-v0.4.11.zip'
 SITE_TABS = {
     'logs': ('لاگ فعالیت', 'activity-logs.php'),
     'migration': ('مایگریشن', 'migration-updater.php'),
@@ -64,6 +66,25 @@ class Hub(HTMLParser):
             self.label = None
 
 
+class Tiles(HTMLParser):
+    def __init__(self, page, prefix):
+        super().__init__()
+        self.prefix = prefix
+        self.grid_depth, self.links = 0, []
+        self.feed(page)
+
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        if tag == 'div' and (self.grid_depth or self.prefix + '-grid' in a.get('class', '').split()):
+            self.grid_depth += 1
+        if tag == 'a' and self.grid_depth and self.prefix + '-tile' in a.get('class', '').split():
+            self.links.append(a['href'])
+
+    def handle_endtag(self, tag):
+        if self.grid_depth and tag == 'div':
+            self.grid_depth -= 1
+
+
 @unittest.skipUnless(os.environ.get('MPM_TEST_BACI') and os.environ.get('MPM_TEST_DSN'),
                      'requires Baci V1.15 and an empty local mpm_fixture_* MariaDB database')
 class BaciNativeTest(unittest.TestCase):
@@ -80,10 +101,11 @@ class BaciNativeTest(unittest.TestCase):
         self.root = self.work / 'site'
         shutil.copytree(upstream, self.root)
         plugin = self.work / 'private-plugin'
-        with ZipFile(ARTIFACTS / 'school-classroom-plugin-v0.4.9.zip') as package:
+        with ZipFile(CLASSROOM) as package:
             package.extractall(plugin)
         self.php = shlex.split(os.environ.get('MPM_TEST_PHP', 'php'))
-        self.env = dict(os.environ, BACI_FIXTURE_ROOT=str(self.root), BACI_TEST_PLUGIN=str(plugin))
+        self.env = dict(os.environ, BACI_FIXTURE_ROOT=str(self.root), BACI_TEST_PLUGIN=str(plugin),
+                        BACI_TEST_PACKAGE=str(CLASSROOM), BACI_PRIVATE_DIR=str(self.work / 'installation'))
         (self.root / 'config/installed.lock').touch()
         (self.root / 'config/database.php').write_text('''<?php
 return ['driver'=>'mysql','host'=>'127.0.0.1','port'=>%s,'database'=>'%s','charset'=>'utf8mb4',
@@ -106,6 +128,8 @@ return ['driver'=>'mysql','host'=>'127.0.0.1','port'=>%s,'database'=>'%s','chars
                     (12,'2222222222','دبیر ب','fixture','1404/1405',0,1),
                     (13,'3333333333','ناظم تست','fixture','1404/1405',1,1),
                     (14,'4444444444','دبیر غیرفعال','fixture','1404/1405',0,0);
+                INSERT INTO students(id,national_id,first_name,last_name,class_name,grade_level,status,academic_year) VALUES
+                    (41,'7777777777','آزمایش','دانش‌آموز','هفتم1','هفتم','active','1405/1406');
                 INSERT INTO admins(id,username,password,name,role,permissions,status) VALUES
                     (1,'qa-root','fixture','مدیر کل','super_admin','[]',1),
                     (2,'qa-limited','fixture','ناظر','observer','[\\\"view_logs\\\"]',1),
@@ -118,7 +142,7 @@ return ['driver'=>'mysql','host'=>'127.0.0.1','port'=>%s,'database'=>'%s','chars
 
     def run_php(self, code, *, request=None):
         path = self.work / 'fixture.php'
-        path.write_text("<?php\nini_set('display_errors', '0');\nchdir(getenv('BACI_FIXTURE_ROOT'));\n" + code)
+        path.write_text("<?php\nini_set('display_errors', '0');\nchdir(getenv('BACI_FIXTURE_ROOT'));\n$_SERVER['DOCUMENT_ROOT'] = getcwd();\n" + code)
         env = self.env if request is None else dict(self.env, BACI_REQUEST=json.dumps(request))
         result = subprocess.run(self.php + [str(path)], env=env, capture_output=True, text=True, timeout=25)
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout[-1800:])
@@ -155,7 +179,7 @@ return ['driver'=>'mysql','host'=>'127.0.0.1','port'=>%s,'database'=>'%s','chars
         old = self.page('other-settings.php')
         self.assertEqual(len(re.findall(r'data-hub-url=', old)), 4)
         self.assertIn('other-settings.php?tab=plugins', old)
-        self.install_files('baci-plugin-manager-update-v0.1.15.zip')
+        self.install_files(UPDATE)
         all_tabs = SITE_TABS | {'plugins': ('افزونه‌ها', 'school-classroom-settings.php')}
         for key, (_, path) in all_tabs.items():
             hub = Hub(self.page('other-settings.php', {'hub_tab': key}))
@@ -207,3 +231,46 @@ return ['driver'=>'mysql','host'=>'127.0.0.1','port'=>%s,'database'=>'%s','chars
         self.assertEqual(year, '1405/1406')
         self.assertEqual([(s['subject'], s['teacher'], s['shared']) for s in slots], [('ریاضی', 11, True), ('هنر', 12, True)])
         self.assertEqual((teacher_slots, deputy_slots, access, yesterday), ([slots[0]], slots, True, []))
+
+
+    def test_classroom_tile_in_each_native_grid_only_when_enabled(self):
+        self.install_files(UPDATE)
+        panels = [('teacher-panel.php', {'teacher_id': 11}, 'tp', 'online-exams.php'),
+                  ('student-panel.php', {'student_id': 41}, 'sn', 'student-online-exams.php')]
+        url = 'plugins/school-plugins.php?plugin=school-classroom'
+
+        def links():
+            for path, account, prefix, existing in panels:
+                page = self.page(path, session=account)
+                grid = Tiles(page, prefix).links
+                self.assertIn(existing, grid, 'native grid still contains its existing links')
+                yield grid, page
+
+        for grid, _ in links():
+            self.assertNotIn(url, grid)
+        self.run_php(self.db + '''
+            require 'plugins/school-plugins.php';
+            $dir = getenv('BACI_PRIVATE_DIR');
+            mpm_initialize($db, 'https://school.fixture.test', $dir);
+            mpm_install($db, $dir, getenv('BACI_TEST_PACKAGE'));
+        ''')
+        for grid, _ in links():
+            self.assertNotIn(url, grid)
+        self.run_php(self.db + '''
+            require 'plugins/school-plugins.php';
+            $dir = getenv('BACI_PRIVATE_DIR');
+            mpm_write_settings($db, $dir, mpm_row($db, 'school-classroom'),
+                ['signal_url'=>'wss://media.fixture.test', 'api_key'=>'local_fixture_key', 'api_secret'=>str_repeat('Q',48)]);
+            mpm_query($db, 'UPDATE '. MPM_REGISTRY . ' SET state=? WHERE slug=?', ['enabled', 'school-classroom']);
+        ''')
+        for grid, page in links():
+            self.assertEqual(grid.count(url), 1)
+            self.assertIn('>کلاس مجازی<', page)
+        account = {'teacher_id': 14}  # Host nav must not expose a tile for inactive accounts.
+        self.assertNotIn(url, Tiles(self.page('teacher-panel.php', session=account), 'tp').links)
+        self.run_php(self.db + '''
+            require 'plugins/school-plugins.php';
+            mpm_query($db, 'UPDATE '. MPM_REGISTRY . ' SET state=? WHERE slug=?', ['disabled', 'school-classroom']);
+        ''')
+        for grid, _ in links():
+            self.assertNotIn(url, grid)

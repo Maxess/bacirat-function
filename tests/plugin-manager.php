@@ -1,6 +1,8 @@
 <?php
 declare(strict_types=1);
 
+use BaciClassroom\Calendar;
+
 function expect(bool $ok, string $what): void {
     if (!$ok) throw new RuntimeException($what);
 }
@@ -21,6 +23,7 @@ try {
     mkdir($root . '/plugins', 0755, true);
     mkdir($root . '/includes');
     copy(__DIR__ . '/../plugin-manager/plugins/school-plugins.php', $root . '/plugins/school-plugins.php');
+    copy(__DIR__ . '/../school-addon/upload/online-classroom/calendar.php', $root . '/includes/classroom-calendar.php');
     require $root . '/plugins/school-plugins.php';
     $_SERVER['DOCUMENT_ROOT'] = $root;
     $_SERVER['HTTP_HOST'] = 'test-school.example.ir';
@@ -72,6 +75,8 @@ try {
     $focus = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.7.zip';
     $trail = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.8.zip';
     $timetable = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.9.zip';
+    $economy = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.10.zip';
+    $localCalendar = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.11.zip';
     $menus = static fn() => [file_get_contents($root . '/other-settings.php'), file_get_contents($root . '/includes/header.php')];
     $managerMenus = [$other, $header];
     expect($menus() === $managerMenus, 'initialization does not rewrite the host');
@@ -244,7 +249,12 @@ try {
     submit($db, $site, 'bell-hours', ['bell_hours'=>$hours]);
     $today = mpm_today();
     $date = ($today->format('w') === '5' ? $today : $today->modify('next Friday'))->format('Y-m-d');
-    denied(fn()=>submit($db, $site, 'friday-test', ['friday_date'=>$date]));
+    $fridayInput = Calendar::shamsi($date);
+    $localMidnight = strtotime('2026-11-19T20:30:00Z');
+    expect(mpm_friday_date('۱۴۰۵/۰۸/۲۹', $localMidnight - 1)==='2026-11-20'
+        && mpm_friday_date('١٤٠٥-٨-٢٩', $localMidnight)==='2026-11-20', 'same civil Friday on both sides of Tehran midnight');
+    denied(fn()=>mpm_friday_date('۱۴۰۵/۰۸/۲۹', $localMidnight + 86400));
+    denied(fn()=>submit($db, $site, 'friday-test', ['friday_date'=>$fridayInput]));
     denied(fn()=>mpm_install($db, $dir, $friday));
     submit($db, $site, 'disable');
     $saved = mpm_owned_row($db, $row)['settings'];
@@ -253,18 +263,18 @@ try {
     expect($row['version']==='0.4.2' && mpm_check_store($db,$row)===$store && mpm_owned_row($db,$row)['settings']===$saved,
         'Baci update preserves reports, keys and four bell times; Friday is still opt-in');
     submit($db, $site, 'enable');
-    foreach ([[], '2026-11-31', '2020-11-20', $today->modify('next Thursday')->format('Y-m-d')] as $invalid) {
+    foreach ([[], $date, '۱۴۰۵/۰۷/۳۱', '۱۳۹۹/۰۸/۳۰', Calendar::shamsi($today->modify('next Thursday')->format('Y-m-d'))] as $invalid) {
         denied(fn()=>submit($db,$site,'friday-test',['friday_date'=>$invalid]));
         expect(mpm_owned_row($db,$row)['settings']===$saved,'invalid or expired Friday does not change configuration');
     }
-    $_POST = ['csrf'=>'wrong','action'=>'friday-test','slug'=>$slug,'friday_date'=>$date];
+    $_POST = ['csrf'=>'wrong','action'=>'friday-test','slug'=>$slug,'friday_date'=>$fridayInput];
     denied(fn()=>mpm_post($db,$site,$site['origin'],'fixture-form-token'));
     expect(http_response_code()===403, 'only the manager CSRF form can opt in');
     http_response_code(200);
-    submit($db,$site,'friday-test',['friday_date'=>$date]);
+    submit($db,$site,'friday-test',['friday_date'=>$fridayInput]);
     $consent = mpm_settings($db,$dir,$row)['friday_test'];
     expect($consent['date']===$date && preg_match('/^[a-f0-9]{32}$/D',$consent['id']) === 1, 'single validated civil date with a generation ID');
-    submit($db,$site,'friday-test',['friday_date'=>$date]);
+    submit($db,$site,'friday-test',['friday_date'=>$fridayInput]);
     expect(mpm_settings($db,$dir,$row)['friday_test']===$consent, 'same date saves without changing the active grant');
     submit($db,$site,'disable');
     submit($db,$site,'settings',['settings'=>$mediaInput + ['friday_test'=>[]]]);
@@ -272,12 +282,15 @@ try {
     submit($db,$site,'enable');
     ob_start(); mpm_render_settings($db,$site,'fixture','', 'school-classroom-settings.php?embedded=1'); $pilotUi=ob_get_clean();
     expect(str_contains($pilotUi,'action="school-classroom-settings.php?embedded=1"') && str_contains($pilotUi,'id="mpm-friday-test"') && !str_contains($pilotUi,$consent['id']), 'Baci same-origin hub forms and no generation ID in HTML');
+    expect(str_contains($pilotUi, 'تاریخ شمسیِ جمعه') && str_contains($pilotUi, 'value="' . $fridayInput . '"')
+        && str_contains($pilotUi, Calendar::label($date)) && !str_contains($pilotUi, $date) && !str_contains($pilotUi, 'type="date"'),
+        'prefer a Shamsi input and preserve the exact selected Friday without showing a Gregorian date');
     submit($db,$site,'friday-test',['cancel_friday_test'=>'yes']);
     expect(mpm_settings($db,$dir,$row) === $nativeSettings+['bell_hours'=>$hours], 'early cancellation preserves all normal settings');
-    submit($db,$site,'friday-test',['friday_date'=>$date]);
+    submit($db,$site,'friday-test',['friday_date'=>$fridayInput]);
     $staffGrant = mpm_settings($db,$dir,$row)['friday_test'];
     expect($staffGrant['id']!==$consent['id'], 're-enabling cannot restore a canceled room');
-    submit($db,$site,'friday-test',['friday_date'=>$date,'friday_students'=>'yes']);
+    submit($db,$site,'friday-test',['friday_date'=>$fridayInput,'friday_students'=>'yes']);
     expect(mpm_settings($db,$dir,$row)['friday_test']===$staffGrant, 'older classroom cannot record a grant it does not enforce');
     submit($db,$site,'disable');
     $saved = mpm_owned_row($db,$row)['settings'];
@@ -288,7 +301,7 @@ try {
     submit($db,$site,'enable');
     ob_start(); mpm_render_settings($db,$site,'fixture','', 'school-classroom-settings.php?embedded=1'); $studioUi=ob_get_clean();
     expect(str_contains($studioUi,'name="friday_students" value="yes">'), 'pupil checkbox offered but unchecked');
-    submit($db,$site,'friday-test',['friday_date'=>$date,'friday_students'=>'yes']);
+    submit($db,$site,'friday-test',['friday_date'=>$fridayInput,'friday_students'=>'yes']);
     $pupilGrant = mpm_settings($db,$dir,$row)['friday_test'];
     expect($pupilGrant['students'] === true && $pupilGrant['date'] === $date && $pupilGrant['id'] !== $staffGrant['id'], 'pupil opt-in mints a new grant');
     submit($db,$site,'disable');
@@ -351,9 +364,42 @@ try {
         && $db->query("SELECT payload FROM `$store` WHERE bucket='reports'")->fetchColumn()==='{}',
         '0.4.8 to 0.4.9 keeps settings exactly as saved (including screen opt-in) and retains reports');
     submit($db,$site,'enable');
-    submit($db,$site,'friday-test',['friday_date'=>$date,'friday_students'=>'yes']);
+    denied(fn()=>mpm_install($db,$dir,$economy));
+    submit($db,$site,'disable');
+    expect(mpm_install($db,$dir,$economy), 'upgrade to audio-first mode');
+    $row = mpm_row($db,$slug);
+    expect($row['version']==='0.4.10' && $row['owner']===$oldRow['owner'] && mpm_check_store($db,$row)===$store
+        && mpm_owned_row($db,$row)['settings']===$saved && mpm_settings($db,$dir,$row)===$savedSettings
+        && $db->query("SELECT payload FROM `$store` WHERE bucket='reports'")->fetchColumn()==='{}',
+        '0.4.9 to 0.4.10 preserves the encrypted media, screen option, bell hours, Friday grant and reports');
+    $oldId = str_repeat('a', 32);
+    $oldEntry = ['id'=>$oldId, 'class_id'=>22, 'class_name'=>'۸ الف', 'year'=>'1403/1404', 'date'=>'2025-03-20',
+        'period'=>'زنگ 1', 'subject'=>'آزمون گزارش قدیمی', 'teacher_name'=>'دبیر آزمایشی', 'active_seconds'=>120];
+    $oldKey = sprintf('%012d:%s', strtotime('2025-03-20T05:00:00Z'), $oldId);
+    $oldPayload = json_encode($oldEntry, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
+    mpm_query($db, "INSERT INTO `$store` (bucket,item,payload) VALUES (?,?,?)", ['reports',$oldKey,$oldPayload]);
+    mpm_query($db, "INSERT INTO `$store` (bucket,item,payload) VALUES (?,?,?)", ['lesson',$oldId,json_encode($oldEntry +
+        ['phase'=>'finished', 'teacher'=>7, 'roster'=>['student-1'=>'آزمایشی اول'], 'seconds'=>['student-1'=>95]], JSON_THROW_ON_ERROR)]);
+    submit($db,$site,'enable');
+    denied(fn()=>mpm_install($db,$dir,$localCalendar));
+    submit($db,$site,'disable');
+    expect(mpm_install($db,$dir,$localCalendar), 'install audited package with local calendar');
+    $row = mpm_row($db,$slug);
+    expect($row['version']==='0.4.11' && $row['owner']===$oldRow['owner'] && mpm_check_store($db,$row)===$store
+        && mpm_owned_row($db,$row)['settings']===$saved && mpm_settings($db,$dir,$row)===$savedSettings
+        && mpm_query($db, "SELECT payload FROM `$store` WHERE bucket='reports' AND item=?", [$oldKey])->fetchColumn()===$oldPayload,
+        '0.4.10 to 0.4.11 leaves historical report rows, ISO keys, permissions and media settings intact');
+    submit($db,$site,'enable');
+    $_SESSION = ['admin_id'=>1];
+    foreach ([['view'=>'reports'], ['view'=>'reports', 'lesson'=>$oldId]] as $reportRequest) {
+        $_GET = $reportRequest;
+        ob_start(); mpm_dispatch($db,$site,$slug,'page'); $reportHtml = ob_get_clean();
+        expect(str_contains($reportHtml, 'پنجشنبه ۱۴۰۳/۱۲/۳۰') && !str_contains($reportHtml, '2025-03-20'), 'old report list and detail use the stored date, including leap Esfand');
+        if (isset($reportRequest['lesson'])) expect(str_contains($reportHtml, '۰۰:۰۱:۳۵'), 'old pupil credit displayed with Persian digits');
+    }
+    submit($db,$site,'friday-test',['friday_date'=>$fridayInput,'friday_students'=>'yes']);
     expect(mpm_settings($db,$dir,$row)['friday_test']===$pupilGrant, 'saving the same pupil policy does not disrupt a test');
-    submit($db,$site,'friday-test',['friday_date'=>$date]);
+    submit($db,$site,'friday-test',['friday_date'=>$fridayInput]);
     $staffOnly = mpm_settings($db,$dir,$row)['friday_test'];
     expect(!isset($staffOnly['students']) && $staffOnly['id'] !== $pupilGrant['id'], 'turning off pupils invalidates their room grant');
     submit($db,$site,'friday-test',['cancel_friday_test'=>'yes']);
@@ -369,10 +415,20 @@ try {
         && str_contains($body,'id="lesson-start"') && str_contains($body,'id="speaker-strip" aria-label="در حال صحبت" hidden'),
         'room shows the configured school, preserves a custom class label, and starts without voice activity');
     expect(str_contains($body, 'id="pen"') && !str_contains($body, 'id="board-clear"') && !str_contains($body, 'id="toggle-access"'), 'pupils get pen UI but no staff controls');
+    expect(str_contains($body, 'id="room-date"') && str_contains($body, Calendar::label(mpm_today()->format('Y-m-d'))), 'room shows the Tehran Shamsi date even without the native header');
     expect(!isset($_SESSION['school_classroom_csrf']), 'managed session leaves no classroom-specific state');
     $old = $_GET ?? []; $_GET['name'] = 'assets/classroom.css';
     ob_start(); mpm_dispatch($db, $site, $slug, 'asset'); $asset = ob_get_clean(); $_GET = $old;
     expect($asset === file_get_contents(mpm_release_dir($dir, $row) . '/assets/classroom.css') && str_contains($asset, '.participant-controls'), 'new release serves its own assets');
+    expect(mpm_accepts_gzip('br, gzip; q=0.8') && !mpm_accepts_gzip('gzip;q=0, *;q=1')
+        && !mpm_accepts_gzip('br') && !mpm_accepts_gzip('gzip;q=2'), 'gzip respects browser refusal and quality');
+    $dig = hash('sha256', $asset);
+    $_GET['name'] = 'assets/classroom.css';
+    $_SERVER['HTTP_IF_NONE_MATCH'] = 'W/"' . $dig . '"';
+    ob_start(); mpm_dispatch($db, $site, $slug, 'asset'); $unchanged = ob_get_clean();
+    expect(http_response_code() === 304 && $unchanged === '', 'still validates package and never sends unchanged asset bytes');
+    http_response_code(200); unset($_SERVER['HTTP_IF_NONE_MATCH']); $_GET = $old;
+
     ob_start(); mpm_render_settings($db, $site, 'fixture', ''); $ui = ob_get_clean();
     expect(!str_contains($ui, $secret) && str_contains($ui, 'action="other-settings.php?tab=plugins"') && !str_contains($ui, '<!doctype'), 'native form fragment, no second page or plaintext secret');
     expect(str_contains($ui, 'courses-management.php?hub_tab=classes#hubPanel'), 'clock settings link to the native timetable source');
@@ -383,7 +439,8 @@ try {
 
     submit($db, $site, 'disable');
     expect(mpm_menu_items($db, $dir, 'student') === [] && mpm_table_exists($db, $table) && is_dir($path), 'disable keeps reports and hides classroom');
-    expect($db->query("SELECT payload FROM `$store` WHERE bucket='reports'")->fetchColumn() === '{}', 'disable preserves attendance store');
+    expect(mpm_query($db, "SELECT payload FROM `$store` WHERE bucket='reports' AND item=?", [$oldKey])->fetchColumn()===$oldPayload,
+        'disable preserves attendance store');
 
     mpm_query($db, "UPDATE `$store` SET payload='unowned' WHERE bucket='!owner'");
     denied(fn()=>submit($db, $site, 'remove', ['confirm_delete'=>'yes']));
