@@ -19,23 +19,26 @@ PDF_PATH = re.compile(r'^/pdf/((?:runtime|cmaps|standard_fonts|wasm|iccs)/[\w.-]
 CSP = ("default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' blob: data:; "
        "font-src 'self' blob: data:; media-src 'self' blob:; worker-src 'self'; "
        "connect-src 'self' ws://127.0.0.1:7880 http://127.0.0.1:7880; frame-ancestors 'none'; base-uri 'none'")
+WIDTH, HEIGHT, FPS = 1280, 720, 12
 ASSETS = {'/': ('view.html', 'text/html'), '/view.css': ('view.css', 'text/css'),
-          '/view.js': ('view.js', 'text/javascript'), '/board.js': ('board.js', 'text/javascript'),
-          '/livekit-client.umd.js': ('livekit-client.umd.js', 'text/javascript')}
+          '/frame.js': ('frame.js', 'text/javascript'), '/view.js': ('view.js', 'text/javascript'),
+          '/board.js': ('board.js', 'text/javascript'), '/livekit-client.umd.js': ('livekit-client.umd.js', 'text/javascript')}
 
 
 def lease_ms(until):
     return max(0, min(7800, round((until - time.time()) * 1000)))
 
 
-def encoder(ffmpeg, pattern, seconds=720):
+def encoder(ffmpeg, pattern, seconds=450):
+    # 450 s at 640k video + 64k audio is ~39.6 MB before VBV/MP4 overhead,
+    # leaving margin below the 45 MB per-part limit even with continuous motion.
     return [str(ffmpeg), '-nostdin', '-hide_banner', '-loglevel', 'error', '-n', '-f', 'webm',
             '-probesize', '512k', '-analyzeduration', '1200000', '-threads', '2', '-i', 'pipe:0',
-            '-map', '0:v:0', '-map', '0:a:0', '-t', '7250', '-vf', 'fps=10',
+            '-map', '0:v:0', '-map', '0:a:0', '-t', '7250', '-vf', f'fps={FPS}',
             '-c:v', 'libx264', '-threads', '2', '-pix_fmt', 'yuv420p', '-preset', 'veryfast',
-            '-crf', '25', '-maxrate', '360k', '-bufsize', '720k', '-g', '100',
+            '-crf', '22', '-maxrate', '640k', '-bufsize', '1280k', '-g', str(FPS * 10),
             '-force_key_frames', f'expr:gte(t,n_forced*{seconds})',
-            '-c:a', 'aac', '-b:a', '48k', '-ac', '1', '-f', 'segment', '-segment_time', str(seconds),
+            '-c:a', 'aac', '-b:a', '64k', '-ac', '1', '-ar', '48000', '-f', 'segment', '-segment_time', str(seconds),
             '-reset_timestamps', '1', '-segment_format', 'mp4', '-segment_format_options', 'movflags=+faststart', str(pattern)]
 
 
@@ -94,7 +97,7 @@ class view:
         self.browser, self.renderer, self.capture = browser, renderer, capture
 
     async def __aenter__(self):
-        self.context = await self.browser.new_context(viewport={'width': 960, 'height': 540}, service_workers='block',
+        self.context = await self.browser.new_context(viewport={'width': WIDTH, 'height': HEIGHT}, service_workers='block',
                                                       accept_downloads=False, reduced_motion='reduce')
         try:
             # Chromium treats a fulfilled page as a different address space from the loopback SFU.
@@ -217,14 +220,17 @@ class Capture:
             clips(self.directory)
 
 
+def check_clip(path):
+    if not CLIP.fullmatch(path.name) or path.is_symlink() or not path.is_file() or not 0 < path.stat().st_size <= PART_LIMIT:
+        raise CaptureError('video part invalid')
+    with path.open('rb') as sample:
+        if sample.read(8)[4:] != b'ftyp':
+            raise CaptureError('video part not finalized')
+    return path
+
+
 def clips(directory):
     files = sorted(directory.glob('clip-*'))
     if len(files) > 32:
         raise CaptureError('too many video parts')
-    for path in files:
-        if not CLIP.fullmatch(path.name) or path.is_symlink() or not path.is_file() or not 0 < path.stat().st_size <= PART_LIMIT:
-            raise CaptureError('video part invalid')
-        with path.open('rb') as sample:
-            if sample.read(8)[4:] != b'ftyp':
-                raise CaptureError('video part not finalized')
-    return files
+    return [check_clip(path) for path in files]

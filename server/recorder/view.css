@@ -1,5 +1,6 @@
 @font-face { font-family: ClassroomPDFPersian; src: local("Noto Sans Arabic"); font-weight: 400; }
 @font-face { font-family: ClassroomPDFPersian; src: local("Noto Sans Arabic Bold"); font-weight: 700; }
-html, body { margin: 0; background: #162035; }
-#capture-board { position: absolute; left: -5000px; width: 960px; }
-#board-scroll { width: 960px; height: 540px; }
+html, body { margin: 0; background: #0b1527; overflow: hidden; }
+#film { display: block; width: 100%; height: auto; }
+#capture-board, #media-sinks { position: absolute; left: -5000px; top: 0; width: 1280px; }
+#board-scroll { width: 1280px; height: 720px; }

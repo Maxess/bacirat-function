@@ -1,9 +1,11 @@
 <!doctype html>
 <html lang="fa" dir="rtl"><head><meta charset="utf-8"><title>ضبط کلاس</title>
 <link rel="stylesheet" href="/view.css">
-<script defer src="/livekit-client.umd.js"></script><script defer src="/board.js"></script><script defer src="/view.js"></script></head>
+<script defer src="/livekit-client.umd.js"></script><script defer src="/board.js"></script>
+<script defer src="/frame.js"></script><script defer src="/view.js"></script></head>
 <body>
-<canvas id="film" width="960" height="540"></canvas>
+<canvas id="film" width="1280" height="720"></canvas>
+<div id="media-sinks" aria-hidden="true"></div>
 <div id="capture-board" data-moderator="no" data-content="/document" data-pdf="/pdf/runtime/pdf.min.mjs"
  data-pdf-worker="/pdf/runtime/pdf.worker.min.mjs" data-pdf-data="/pdf/">
     <section id="board">

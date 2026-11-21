@@ -15,12 +15,21 @@ import subprocess
 import sys
 import time
 
-from capture import Capture, CaptureError, HEX, Renderer, clips, lease_ms
+from capture import CLIP, Capture, CaptureError, HEX, Renderer, check_clip, clips, lease_ms
 from transport import ProtocolError, School, send_video
 
+VERSION = '0.4.17'
 TTL = 26 * 3600  # Hard local maximum, even if PHP/DB remains unavailable.
 SPACE_LIMIT = 1800 * 1024 * 1024
 ROOT = Path(__file__).resolve().parent
+
+
+def sync_dir(path):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def atomic(path, obj):
@@ -30,11 +39,7 @@ def atomic(path, obj):
         fp.flush()
         os.fsync(fp.fileno())
     tmp.replace(path)
-    fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+    sync_dir(path.parent)
 
 
 def read_obj(path):
@@ -102,6 +107,34 @@ class Runner:
                 else:
                     file.unlink()
         (path / '.cleaned').touch(mode=0o600)
+        sync_dir(path)
+
+    @staticmethod
+    def delivery_parts(path):
+        index = path / 'delivery.json'
+        saved = read_obj(index)
+        if saved is None:
+            parts = [file.name for file in clips(path)]
+            if not parts:
+                raise CaptureError('recording parts unavailable')
+            # Written before requesting a permit. Accepted parts are unlinked without
+            # renumbering later parts or changing the total after a worker restart.
+            atomic(index, {'parts':parts})
+        else:
+            parts = saved.get('parts') if isinstance(saved, dict) else None
+            if not isinstance(parts, list) or not 1 <= len(parts) <= 32 or any(
+                    not isinstance(name, str) or not CLIP.fullmatch(name) for name in parts) or parts != sorted(set(parts)):
+                raise CaptureError('invalid recording part index')
+        return [path / name for name in parts]
+
+    @staticmethod
+    def remove_sent(parts, count):
+        if type(count) is not int or not 0 <= count <= len(parts):
+            raise CaptureError('invalid sent part count')
+        if count:
+            for file in parts[:count]:
+                file.unlink(missing_ok=True)
+            sync_dir(parts[0].parent)
 
     async def reap(self, path):
         if path.is_dir() and not path.is_symlink() and not (path / '.cleaned').exists():
@@ -121,10 +154,14 @@ class Runner:
         reply = read_obj(path)
         if not reply:
             return
-        if reply.pop('complete', False) is True and reply['result'] == 'accepted':
-            # Once all parts have provider receipts, keep only the durable receipt
-            # and cleanup marker, even if PHP cannot acknowledge them right now.
-            self.erase_media(path.parent, keep_receipt=True)
+        complete = reply.pop('complete', False) is True
+        if reply['result'] == 'accepted':
+            # Delete each confirmed part *before* waiting on PHP. On restart, replay
+            # the durable receipt, never the upload. Final acceptance removes all media.
+            if complete:
+                self.erase_media(path.parent, keep_receipt=True)
+            else:
+                self.remove_sent(self.delivery_parts(path.parent), reply['part'])
         try:
             await self.rpc('result', **reply)
         except ProtocolError as error:
@@ -191,10 +228,13 @@ class Runner:
                     if self.connect_failures >= 3:
                         raise CaptureError('media connection failed')
         elif op == 'deliver':
-            parts = clips(path)
-            part = reply['sent'] + 1
-            if not 1 <= part <= len(parts):
+            parts = self.delivery_parts(path)
+            sent = reply['sent']
+            self.remove_sent(parts, sent)  # Also handles any confirmed parts from the previous release.
+            part = sent + 1
+            if part > len(parts):
                 raise CaptureError('recording parts unavailable')
+            file = check_clip(parts[sent])
             permit = await self.rpc('claim', part=part, total=len(parts))
             if permit.get('command') != 'send':
                 return 1
@@ -202,7 +242,7 @@ class Runner:
                 raise ProtocolError()
             # Once a permit has been issued, any crash before recording a receipt leaves
             # the attempt uncertain. Never call a provider a second time for that permit.
-            result, message = await asyncio.to_thread(send_video, permit, parts[part-1])
+            result, message = await asyncio.to_thread(send_video, permit, file)
             atomic(path / 'receipt.json', {'attempt': permit['attempt'], 'part': part, 'result': result, 'message': message,
                                            'complete': result == 'accepted' and part == len(parts)})
             await self.receipt(path / 'receipt.json')
@@ -227,8 +267,10 @@ class Runner:
                     noted = ('site', exc.status)
             except (CaptureError, TimeoutError, OSError, ValueError, KeyError) as exc:
                 delay = 2
-                if self.job:
+                if self.job and not (self.root / self.job / 'receipt.json').exists():
                     self.faulted.add(self.job)
+                # An unlink/settlement error with a receipt is retried at the start
+                # of the next tick; do not turn that known attempt into a capture fault.
                 try:
                     await self.stop(False)
                 except CaptureError:
@@ -275,7 +317,7 @@ async def service(args, config):
                 args=['--autoplay-policy=no-user-gesture-required'])
             await renderer.check(browser)
             runner.browser, runner.renderer = browser, renderer
-            print('recorder: compositor and encoder available', flush=True)
+            print(f'recorder: compositor and encoder available ({VERSION})', flush=True)
             await runner.run(stopped)
 
 

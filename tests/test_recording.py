@@ -134,6 +134,95 @@ class SpoolTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(accepts, [self.clip])
         self.assertFalse(self.folder.exists())
 
+    async def test_each_accepted_part_is_unlinked_with_site_offline_but_unconfirmed_part_stays(self):
+        part2 = self.folder / 'clip-000-001.mp4'
+        part3 = self.folder / 'clip-001-000.mp4'
+        for path in (part2, part3):
+            path.write_bytes(self.clip.read_bytes())
+        sent, unavailable, terminal = 0, True, False
+        claims, uploads = [], []
+
+        def school(action, job, **data):
+            nonlocal sent, terminal
+            self.assertEqual(job, self.job)
+            if action == 'poll':
+                return {'command': 'retain' if terminal else 'deliver', 'id': job, 'sent': sent}
+            if action == 'claim':
+                claims.append(data)
+                self.assertEqual(data, {'part': sent + 1, 'total': 3})
+                return {'command': 'send', 'attempt': str(sent + 1) * 32}
+            if action == 'result':
+                self.assertFalse(self.clip.exists())
+                if unavailable:
+                    raise ProtocolError(503)
+                if data['result'] == 'accepted':
+                    sent = data['part']
+                    self.assertFalse([self.clip, part2, part3][sent-1].exists())
+                else:
+                    terminal = True
+            return {}
+
+        def send(permit, file):
+            uploads.append(file)
+            return ('accepted', '708') if file != part3 else ('uncertain', '')
+
+        with patch('recording.send_video', side_effect=send):
+            with self.assertRaises(ProtocolError):
+                await Runner(school, self.root, None, None, None).tick()
+            self.assertFalse(self.clip.exists(), 'a sent part cannot be left behind while the rest waits')
+            self.assertTrue(part2.exists() and part3.exists())
+            self.assertTrue((self.folder / 'receipt.json').exists())
+            unavailable = False
+            restarted = Runner(school, self.root, None, None, None)
+            await restarted.tick()  # replay receipt, then claim part 2 with the original total
+            await restarted.tick()  # part 3 has no provider receipt
+            await restarted.tick()  # retain only unsent/unconfirmed media
+        self.assertEqual(claims, [{'part':n,'total':3} for n in (1,2,3)])
+        self.assertEqual(uploads, [self.clip, part2, part3])
+        self.assertEqual(list(self.folder.glob('*.mp4')), [part3])
+        self.assertTrue((self.folder / '.retained').exists())
+        self.assertFalse((self.folder / '.cleaned').exists(), 'not a full successful delivery')
+
+    async def test_cleanup_error_keeps_receipt_and_does_not_ack_or_retry_upload(self):
+        accepted, media_removed, result_calls = [], False, 0
+        extra = self.folder / 'temp-media'
+        extra.mkdir()
+        (extra / 'encode.tmp').write_bytes(b'media')
+
+        def school(action, job, **data):
+            nonlocal result_calls
+            if action == 'poll':
+                return {'command': 'purge' if result_calls else 'deliver', 'id': self.job, 'sent': 0}
+            if action == 'claim':
+                return {'command': 'send', 'attempt': 'b'*32}
+            if action == 'result':
+                self.assertFalse(self.clip.exists() or extra.exists())
+                result_calls += 1
+            return {}
+
+        unlink = Path.unlink
+
+        def deny_once(path, *args, **kwargs):
+            if path == self.clip and not media_removed:
+                raise PermissionError('temporary cleanup failure')
+            return unlink(path, *args, **kwargs)
+
+        def send(permit, path):
+            accepted.append(path)
+            return 'accepted', '22'
+
+        with patch('recording.send_video', side_effect=send), patch.object(Path, 'unlink', deny_once):
+            with self.assertRaises(PermissionError):
+                await Runner(school, self.root, None, None, None).tick()
+            self.assertTrue((self.folder / 'receipt.json').exists())
+            self.assertEqual(result_calls, 0)
+            self.assertFalse((self.folder / '.cleaned').exists())
+            media_removed = True
+            await Runner(school, self.root, None, None, None).tick()
+        self.assertEqual(accepted, [self.clip])
+        self.assertEqual(result_calls, 1)
+        self.assertFalse(self.folder.exists())
+
     async def test_decline_purges_and_ambiguous_result_retains_until_deadline(self):
         seen = []
         status = 'retain'

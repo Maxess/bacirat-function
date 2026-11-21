@@ -18,8 +18,11 @@ LEGACY = ARTIFACTS / 'school-classroom-pilot-v0.1.0.zip'
 LEGACY_SHA = 'bebc35a02f57346880373a034ee493b757a8017a12812a133ab957358d9de161'
 VERSION = '0.4.17'
 MANAGER_VERSION = '0.1.23'
+# Keep the already released site bundle reproducible independently of Recorder updates.
 RECORDER = 'baci-classroom-recorder-v0.4.16.zip'
 RECORDER_SHA = 'de02931ed2c0247d0ae387fb4797ea78bb65bdec1db9a50cf05994d81c8e9b28'
+RECORDER_VERSION = '0.4.17'
+RECORDER_SRC = ROOT / 'server/recorder'
 BACI = HOST / 'baci'
 BACI_PATCH = 'baci-4.221.0-e0f3f686.patch'
 BACI_FILES = ('other-settings.php', 'includes/header.php', 'includes/footer.php', 'includes/management_hub.php',
@@ -138,15 +141,34 @@ def plugin_entries(pdf_archive):
     return files
 
 
+def recorder_release(output_dir, previous):
+    with ZipFile(BytesIO(previous)) as archive:
+        assets = {name: archive.read(name) for name in ('livekit-client.umd.js', 'livekit-client.LICENSE.txt',
+                'board.js', 'pdf-resources.zip', 'pdf.LICENSE.txt')}
+    files = {name: (RECORDER_SRC / name).read_bytes() for name in ('README-fa.md', 'requirements.txt',
+             'capture.py', 'recording.py', 'transport.py', 'view.html', 'view.css', 'view.js', 'frame.js',
+             'school-classroom-recorder.service')}
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / f'baci-classroom-recorder-v{RECORDER_VERSION}.zip'
+    write_zip(path, files | assets)
+    print(f'{path}: {hashlib.sha256(path.read_bytes()).hexdigest()}')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output-dir', type=Path, default=ARTIFACTS)
+    parser.add_argument('--recorder-only', action='store_true', help='build the standalone VPS release, without changing the site packages')
     parser.add_argument('--approve-reviewed-manifest', action='store_true', help='replace the trusted manifest pin after reviewing the payload')
     parser.add_argument('--pdf-archive', type=Path, help='use a local copy of the same pinned PDF.js npm archive')
     opts = parser.parse_args()
     recorder = (ARTIFACTS / RECORDER).read_bytes()
     if hashlib.sha256(recorder).hexdigest() != RECORDER_SHA:
         raise ValueError('Expected the unchanged published Recorder ZIP')
+    if opts.recorder_only:
+        if opts.approve_reviewed_manifest or opts.pdf_archive:
+            parser.error('site manifest and PDF build options do not apply to the standalone Recorder')
+        recorder_release(opts.output_dir, recorder)
+        return
     entries = plugin_entries(opts.pdf_archive)
     expected = hashlib.sha256(entries['plugin.json']).hexdigest()
     manager = HOST / 'plugins/school-plugins.php'

@@ -1,76 +1,80 @@
 (() => {
     'use strict';
-    // This read-only view is used by the VPS's managed browser, not by an open teacher tab.
-    // Only these canvases and LiveKit tracks ever reach the encoder.
-    const canvas = document.getElementById('film'), paper = document.getElementById('board-paper'), ink = document.getElementById('board-ink');
-    const ctx = canvas.getContext('2d', {alpha:false}), lk = window.LivekitClient;
-    const board = window.ClassroomBoard(document.getElementById('capture-board'), {
+    // The VPS compositor is a read-only subscriber. It never opens a local microphone or camera.
+    const byId = id => document.getElementById(id);
+    const canvas = byId('film'), paper = byId('board-paper'), ink = byId('board-ink'), sinks = byId('media-sinks');
+    const frame = window.ArchiveFrame(canvas), lk = window.LivekitClient, fps = 12;
+    const board = window.ClassroomBoard(byId('capture-board'), {
         autoReceive: true, canEdit: () => false, identity: () => null, authorName: () => '', notice: () => {},
     });
-    const tracks = new Map();
+    const tracks = new Map(), cameras = new Map();
     let room, audio, mix, stream, recorder, frameTimer, boardTimer, stopping, ended, roomScope, leaseUntil = 0;
-    let running = false, failure = false, pending = 0, writes = Promise.resolve(), hasBoard = false;
-    const width = canvas.width, height = canvas.height;
+    let running = false, failure = false, pending = 0, writes = Promise.resolve(), doc = null;
 
-    function attach(track, pub, participant) {
-        if (!/^(student|teacher|admin)-[1-9]\d{0,17}$/.test(participant.identity) || tracks.has(pub.trackSid)) return;
-        const source = pub.source;
-        if (source === lk.Track.Source.Microphone && track.kind === 'audio') {
-            const input = audio.createMediaStreamSource(new MediaStream([track.mediaStreamTrack]));
-            const gain = audio.createGain();
-            input.connect(gain).connect(mix);
-            tracks.set(pub.trackSid, {input,gain,pub});
-        } else if ([lk.Track.Source.Camera, lk.Track.Source.ScreenShare].includes(source) && track.kind === 'video') {
-            const video = document.createElement('video');
-            video.muted = true; video.playsInline = true; video.autoplay = true;
-            track.attach(video);
-            video.play().catch(() => {});
-            tracks.set(pub.trackSid, {track,video,pub,screen:source === lk.Track.Source.ScreenShare});
+    function gainFor(item) {
+        const muted = !!item.pub.isMuted;
+        if (item.muted !== muted) {
+            item.gain.gain.value = muted ? 0 : 1;
+            item.muted = muted;
         }
+    }
+    function attach(track, pub, participant) {
+        const id = participant.identity, key = pub.trackSid;
+        if (stopping || !/^(student|teacher|admin)-[1-9]\d{0,17}$/.test(id) || tracks.has(key)) return;
+        const {Camera, ScreenShare, Microphone} = lk.Track.Source;
+        const source = pub.source, microphone = source === Microphone && track.kind === 'audio';
+        if (!microphone && !(track.kind === 'video' && [Camera,ScreenShare].includes(source))) return;
+        const node = document.createElement(microphone ? 'audio' : 'video');
+        node.autoplay = node.muted = true; node.playsInline = true; node.volume = 0;
+        sinks.append(node);
+        const item = {id,source,track,pub,node};
+        tracks.set(key,item);
+        try {
+            track.attach(node);
+            // LiveKit's audio attach unsets `muted`; keep the sink silent outside of our recording bus.
+            node.muted = true;
+            if (microphone) {
+                // A bare createMediaStreamSource on a remote WebRTC track can return only zeroes
+                // in Chromium, even while RTP arrives. Play an attached (muted) element to start
+                // the remote audio renderer, then mix its *track*, not HTML element playback.
+                item.input = audio.createMediaStreamSource(node.srcObject);
+                item.gain = audio.createGain();
+                gainFor(item);
+                item.input.connect(item.gain).connect(mix);
+            } else if (source === Camera) cameras.set(id,item);
+            node.play().catch(() => {
+                if (microphone && tracks.get(key) === item && !stopping) fault();
+            });
+        } catch (_) { fault(); }
     }
     function detach(key) {
         const item = tracks.get(key);
         if (!item) return;
-        if (item.video) item.track.detach(item.video);
-        else { item.input.disconnect(); item.gain.disconnect(); }
         tracks.delete(key);
+        // Keep the slot while this person is in the room, including camera off/re-publish.
+        if (cameras.get(item.id) === item) cameras.set(item.id,null);
+        item.input?.disconnect(); item.gain?.disconnect();
+        item.track.detach(item.node);
+        item.node.pause(); item.node.srcObject = null; item.node.remove();
     }
-    function fit(item, sw, sh, x, y, w, h) {
-        if (!sw || !sh) return null;
-        const scale = Math.min(w/sw,h/sh), ww = sw*scale, hh = sh*scale;
-        const rect = [x+(w-ww)/2,y+(h-hh)/2,ww,hh];
-        ctx.drawImage(item,...rect);
-        return rect;
+    function forget(participant) {
+        for (const [key,item] of tracks) if (item.id === participant.identity) detach(key);
+        cameras.delete(participant.identity);
+    }
+    function videoOf(item) {
+        return item && !item.pub.isMuted && item.node.readyState >= 2 && item.node.videoWidth > 0 ? item.node : null;
     }
     function paint() {
-        ctx.fillStyle = '#162035'; ctx.fillRect(0,0,width,height);
-        const cameras = [], screens = [];
+        let screen = null;
         for (const item of tracks.values()) {
-            if (item.gain) item.gain.gain.value = item.pub.isMuted ? 0 : 1;
-            if (item.pub.isMuted || !item.video?.videoWidth || item.video.readyState < 2) continue;
-            (item.screen ? screens : cameras).push(item.video);
+            if (item.gain) gainFor(item);
+            // The school allows one screen presenter per transport; skip non-playing/old publications.
+            if (!screen && item.source === lk.Track.Source.ScreenShare) screen = videoOf(item);
         }
-        const gap = 4, row = cameras.length ? Math.min(150, Math.ceil(Math.sqrt(cameras.length/8))*88) : 0;
-        let main = height-row;
-        if (!hasBoard && !screens.length && cameras.length) main = 0;
-        const half = screens.length ? (hasBoard ? width/2 : 0) : width;
-        if (half && main) {
-            const rect = fit(paper,paper.width,paper.height,gap,gap,half-2*gap,main-2*gap);
-            if (rect) ctx.drawImage(ink,...rect);
-        }
-        if (screens.length && main) {
-            screens.forEach((video,i) => {
-                const w = (width-half)/screens.length;
-                fit(video,video.videoWidth,video.videoHeight,half+i*w+gap,gap,w-2*gap,main-2*gap);
-            });
-        }
-        if (cameras.length) {
-            const columns = main ? Math.min(10,cameras.length) : Math.min(10,Math.ceil(Math.sqrt(cameras.length*width/height)));
-            const rows = Math.ceil(cameras.length/columns), w = width/columns, h = (height-main)/rows;
-            cameras.forEach((video,i) => fit(video,video.videoWidth,video.videoHeight,
-                (i%columns)*w+gap,main+Math.floor(i/columns)*h+gap,w-2*gap,h-2*gap));
-        }
-        ctx.fillStyle = '#ff8e9b'; ctx.beginPath(); ctx.arc(14,14,4,0,Math.PI*2); ctx.fill();
+        const gallery = Array.from(cameras, ([id,item]) => ({role:id.split('-',1)[0],video:videoOf(item)}));
+        const rank = {teacher:0,admin:1,student:2};
+        gallery.sort((a,b) => rank[a.role] - rank[b.role]);
+        frame({paper,ink,doc,hasInk:board.position().ink > 0,cameras:gallery,screen});
     }
     async function updateBoard() {
         let more = false;
@@ -82,7 +86,7 @@
             const {board: view} = await res.json();
             if (!view || !running) return;
             board.sync(view,roomScope);
-            hasBoard = !!view.doc || board.position().ink > 0 || (!('doc' in view) && hasBoard);
+            if ('doc' in view) doc = view.doc;
             more = view.more === true;
         } catch (_) { /* A stale fetch while closing does not keep the recorder alive. */ }
         finally { if (running) boardTimer = setTimeout(updateBoard, more ? 90 : 850); }
@@ -102,8 +106,9 @@
             await ended;
             await writes;
             stream?.getTracks().forEach(track => track.stop());
-            await room?.disconnect();
             for (const key of tracks.keys()) detach(key);
+            cameras.clear();
+            await room?.disconnect();
             await audio?.close();
             return !failure;
         })();
@@ -112,25 +117,33 @@
     function fault() { failure = true; queueMicrotask(() => finish().catch(() => {})); }
 
     window.recorder = {
-        supported: () => MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus') && !!canvas.captureStream && !!lk,
+        supported: () => MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus') && !!canvas.captureStream && !!lk && !!window.AudioContext,
         async start({url,token,lesson,epoch,leaseMs}) {
             leaseUntil = performance.now() + leaseMs;
-            audio = new AudioContext({sampleRate:48000});
-            await audio.resume();
-            const bus = audio.createMediaStreamDestination();
-            mix = audio.createDynamicsCompressor(); mix.connect(bus);
+            // Render Web Audio without relying on a sound device on the VPS.
+            audio = new AudioContext({sampleRate:48000,sinkId:{type:'none'}});
+            await Promise.all([audio.resume(), Promise.allSettled([400,700].map(weight => document.fonts.load(`${weight} 16px ClassroomPDFPersian`, 'کلاس مجازی')))]);
+            if (audio.state !== 'running') throw new Error('recording audio context unavailable');
+            const bus = audio.createMediaStreamDestination(); bus.channelCount = 1;
+            mix = audio.createDynamicsCompressor();
+            mix.threshold.value = -18; mix.knee.value = 20; mix.ratio.value = 4;
+            mix.attack.value = .006; mix.release.value = .24;
+            mix.connect(bus);
             roomScope = {lesson,epoch};
             board.reset();
-            room = new lk.Room({adaptiveStream:false, dynacast:false, disconnectOnPageLeave:false});
+            room = new lk.Room({adaptiveStream:false, dynacast:false, webAudioMix:false, disconnectOnPageLeave:false});
             room.on(lk.RoomEvent.TrackSubscribed,attach).on(lk.RoomEvent.TrackUnsubscribed,(_,pub) => detach(pub.trackSid));
+            room.on(lk.RoomEvent.ParticipantDisconnected,forget);
+            const setMute = pub => { const item = tracks.get(pub.trackSid); if (item?.gain) gainFor(item); };
+            room.on(lk.RoomEvent.TrackMuted,setMute).on(lk.RoomEvent.TrackUnmuted,setMute);
             room.on(lk.RoomEvent.Disconnected, () => { if (running) finish().catch(fault); });
             try { await room.connect(url,token,{autoSubscribe:true,websocketTimeout:4500,peerConnectionTimeout:4500}); }
-            catch (_) { await finish(); return false; } // Including the teacher closing during the handshake.
-            if (room.state !== 'connected' || performance.now() >= leaseUntil) { await finish(); return false; }
+            catch (_) { await finish(); return false; } // Including a close during the handshake.
+            if (stopping || room.state !== 'connected' || performance.now() >= leaseUntil) { await finish(); return false; }
             paint();
-            const video = canvas.captureStream(10);
+            const video = canvas.captureStream(fps);
             stream = new MediaStream([...video.getVideoTracks(),...bus.stream.getAudioTracks()]);
-            recorder = new MediaRecorder(stream,{mimeType:'video/webm;codecs=vp8,opus',videoBitsPerSecond:520000,audioBitsPerSecond:48000});
+            recorder = new MediaRecorder(stream,{mimeType:'video/webm;codecs=vp8,opus',videoBitsPerSecond:1250000,audioBitsPerSecond:64000});
             ended = new Promise(resolve => recorder.addEventListener('stop',resolve,{once:true}));
             recorder.onerror = fault;
             recorder.ondataavailable = ({data}) => {
@@ -145,7 +158,7 @@
             frameTimer = setInterval(() => {
                 if (performance.now() >= leaseUntil) { finish().catch(fault); return; }
                 paint();
-            },100);
+            },1000/fps);
             updateBoard();
             return true;
         },
