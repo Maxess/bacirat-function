@@ -45,7 +45,7 @@
     const screenHint = el('screen-hint'), boardScreenHint = el('board-screen-hint');
     const qualityButton = el('quality-open'), qualityDialog = el('quality-dialog');
     const recordButton = el('record-start'), recordStart = el('record-start-dialog'), recordClose = el('record-close-dialog');
-    const recordNotice = el('recording-notice');
+    const recordStatus = el('recording-status');
     let closeIntent = null;
     const qualityFields = ['teacherCamera','studentCamera','teacherScreen','studentScreen'];
     const canCaptureCamera = typeof window.navigator?.mediaDevices?.getUserMedia === 'function';
@@ -137,7 +137,9 @@
             schedulePoll();
         },
         async send(action, data, file) {
-            if (!hasAccess() || (!staff && action !== 'board-ink')) throw new PublicError('ویرایش تخته در این وضعیت مجاز نیست.');
+            if (!hasAccess() || (!staff && action !== 'board-ink') || ((file || action === 'board-page') && state.board?.navigate !== true)) {
+                throw new PublicError('ویرایش تخته در این وضعیت مجاز نیست.');
+            }
             const link = active, local = scope(link);
             let reply;
             try {
@@ -169,7 +171,7 @@
 
     function changeAccess(feature, enabled, identity = null) {
         return run(async () => {
-            if (!staff || !hasAccess()) return;
+            if (!staff || !hasAccess() || (feature === 'board' && enabled && state.board?.navigate !== true)) return;
             const link = active, local = scope(link);
             try {
                 const result = await api('set-access', {...local, feature, enabled, identity});
@@ -313,7 +315,8 @@
                 btn.setAttribute('aria-pressed', String(enabled));
                 btn.setAttribute('aria-label', label);
                 btn.title = `${enabled ? 'لغو اجازهٔ' : 'دادن اجازهٔ'} ${label}${on ? ' (روشن)' : ''}`;
-                btn.hidden = feature === 'camera' && !state.cameraCodec;
+                btn.hidden = (feature === 'camera' && !state.cameraCodec)
+                    || (feature === 'board' && !enabled && state.board?.navigate !== true);
                 btn.disabled = busy || state.members?.[id] !== person.sid || btn.hidden;
             }
         }
@@ -508,7 +511,8 @@
             const give = el(`all-${feature}-give`), cut = el(`all-${feature}-cut`);
             give.setAttribute('aria-pressed', String(all && !anyException));
             cut.setAttribute('aria-pressed', String(!all && !anyException));
-            give.disabled = !live || busy || (all && !anyException) || (feature === 'camera' && !state.cameraCodec);
+            give.hidden = feature === 'board' && state.board?.navigate !== true;
+            give.disabled = !live || busy || give.hidden || (all && !anyException) || (feature === 'camera' && !state.cameraCodec);
             cut.disabled = !live || busy || (!all && !anyException);
         }
     }
@@ -572,12 +576,13 @@
         const phase = state.phase;
         const connectingNow = connecting || (!!active && !live);
         const recording = state.recording;
-        if (recordNotice) {
-            const text = recording?.notice === 'live' ? 'کلاس در حال ضبط است'
-                : recording?.notice === 'preparing' ? 'ضبط کلاس روشن است؛ آماده‌سازی یا انتظار'
-                : recording?.notice === 'stopped' ? 'ضبط متوقف شد و فیلم ارسال نمی‌شود؛ وضعیت سرویس و گروه را بررسی کن.' : '';
-            put(recordNotice, text);
-            recordNotice.hidden = !text;
+        const capture = recording?.notice;
+        root.dataset.recording = capture === 'live' ? 'yes' : 'no';
+        if (recordStatus) {
+            const text = capture === 'live' ? 'کلاس در حال ضبط است'
+                : capture === 'preparing' ? 'ضبط کلاس در حال آماده‌سازی است'
+                : capture === 'stopped' ? 'ضبط متوقف شد و فیلم ارسال نمی‌شود.' : '';
+            put(recordStatus, text);
         }
         if (recordClose?.open && closeIntent?.lesson !== state.lesson) recordClose.close();
         el('live-panel').hidden = !live;
@@ -814,7 +819,7 @@
         inkRead = performance.now();
         // Keep the pointer visible while it fades, without continuing fast polling for an old snapshot.
         const freshLaser = (view.laser?.points?.at(-1)?.[2] ?? 0) - (inkRead - requestedAt) > 1200;
-        inkAt = inkRead + (view.more ? 85 : (view.moving || freshLaser ? 280 : 850)) + Math.random()*(view.more ? 35 : 140);
+        inkAt = inkRead + (view.more ? 85 : (view.moving || view.viewMoving || freshLaser ? 280 : 850)) + Math.random()*(view.more ? 35 : 140);
     }
     async function poll(boardOnly) {
         if (polling || stopped || permanent) return;
@@ -828,7 +833,7 @@
             const position = {...board.position(), compact:true};
             if (boardOnly) {
                 aimAt = Infinity;
-                const result = await api('board-sync', {...local, ...position, ...board.takeAim()});
+                const result = await api('board-sync', {...local, ...position, ...board.takeAim(), ...board.takeView()});
                 if (captured === flow && !stopped && hasAccess() && local.sid === scope().sid) receiveBoard(result.board, local, requestedAt);
                 return;
             }

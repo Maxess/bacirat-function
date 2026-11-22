@@ -2,6 +2,7 @@
     'use strict';
     const font = 'ClassroomPDFPersian, "Noto Sans Arabic", "DejaVu Sans", sans-serif';
     const roles = {teacher:'دبیر', admin:'مدیر'};
+    const percent = new Intl.NumberFormat('fa-IR',{style:'percent'});
     const margin = 24, gap = 12, top = 68, footer = 22, galleryHeight = 166;
 
     // Draw only onto the archival canvas. Presentation content and cameras never share a region.
@@ -47,7 +48,7 @@
             draw(area);
             ctx.restore();
         }
-        function boardPane(rect,paper,ink,doc,hasInk) {
+        function boardPane(rect,paper,ink,doc,hasInk,view) {
             pane(rect,doc?.mime === 'application/pdf' ? 'سند کلاس · PDF' : 'تختهٔ کلاس',area => {
                 if (!doc && !hasInk) {
                     const x = area.x + area.w/2, y = area.y + area.h/2;
@@ -57,9 +58,18 @@
                     label('تخته آمادهٔ نوشتن است',x,y+22,{size:20,weight:700,align:'center'});
                     return;
                 }
-                const dest = fit(paper.width,paper.height,area);
-                ctx.drawImage(paper,...dest); ctx.drawImage(ink,...dest);
+                // A single source rectangle keeps the PDF and its ink aligned. Matte bars
+                // absorb aspect-ratio differences; nothing outside the teacher's crop leaks in.
+                const [l,t,r,b] = view?.crop ?? [0,0,10000,10000];
+                const w = paper.width/10000, h = paper.height/10000;
+                const src = [l*w,t*h,(r-l)*w,(b-t)*h];
+                const scale = Math.min(1,(view?.zoom ?? 100)/100);
+                const dest = fit(src[2],src[3],{x:area.x+area.w*(1-scale)/2,y:area.y+area.h*(1-scale)/2,w:area.w*scale,h:area.h*scale});
+                ctx.drawImage(paper,...src,...dest); ctx.drawImage(ink,...src,...dest);
             });
+            if (view && view.zoom !== 100 && (doc || hasInk)) {
+                label(percent.format(view.zoom/100),rect.x+13,rect.y+19,{size:14,color:'#a5b7d1',align:'left'});
+            }
         }
         function screenPane(rect,video) {
             pane(rect,'صفحهٔ مشترک',area => ctx.drawImage(video,...fit(video.videoWidth,video.videoHeight,area)));
@@ -104,7 +114,7 @@
                 ctx.restore();
             });
         }
-        return ({paper,ink,doc,hasInk,cameras,screen}) => {
+        return ({paper,ink,doc,hasInk,view,cameras,screen}) => {
             ctx.fillStyle = background; ctx.fillRect(0,0,width,height);
             line(margin,55,width-2*margin,'#304460');
             box(width-margin-34,12,34,34,9,'#1d4a53');
@@ -116,9 +126,9 @@
             if (screen && (doc || hasInk)) {
                 const w = (presentation.w-gap)/2;
                 screenPane({...presentation,w},screen);
-                boardPane({...presentation,x:presentation.x+w+gap,w},paper,ink,doc,hasInk);
+                boardPane({...presentation,x:presentation.x+w+gap,w},paper,ink,doc,hasInk,view);
             } else if (screen) screenPane(presentation,screen);
-            else boardPane(presentation,paper,ink,doc,hasInk);
+            else boardPane(presentation,paper,ink,doc,hasInk,view);
             drawCameras(cameras);
         };
     };

@@ -327,7 +327,40 @@ cl_board_read($s,$cueLesson,$teacher,array_replace($requestAim,['board'=>2]));
 must(cl_board_read($s,$cueLesson,$student,[])['laser'] === null, 'a stale page cannot insert a new laser trail');
 cl_board_read($s,$cueLesson,$teacher,$requestAim,microtime(true)-CL_LASER_TTL_MS/1000-.1);
 must(cl_board_read($s,$cueLesson,$student,[])['laser'] === null, 'a request held up by the server lock is not replayed');
+// A fixed-size live viewport snapshot travels alongside, not inside, the page/ink revision.
+$frame = ['zoom'=>250,'crop'=>[4200,3000,8200,9600]];
+$vp = $bind($cueLesson,'PA_Teacher') + ['board'=>1,'ink'=>2,'compact'=>true,'view'=>$frame];
+denied(403,fn()=>cl_board_read($s,$cueLesson,$student,$vp)); // Already has an ink grant.
+denied(403,fn()=>cl_board_read($s,$cueLesson,$manager,$vp));
+denied(403,fn()=>cl_board_read($s,$cueLesson,$other,$vp));
+denied(409,fn()=>cl_board_read($s,$cueLesson,$teacher,array_replace($vp,['sid'=>'PA_Stale'])));
+denied(409,fn()=>cl_board_read($s,$cueLesson,$teacher,array_replace($vp,['epoch'=>str_repeat('f',24)])));
+foreach ([null, 'frame', ['zoom'=>301,'crop'=>$frame['crop']], ['zoom'=>99,'crop'=>$frame['crop']],
+    ['zoom'=>250,'crop'=>[3,9000,5500,5500]], ['zoom'=>250,'crop'=>[0,0,10000,10001]],
+    ['zoom'=>250,'crop'=>[1,2,3,4]], ['zoom'=>'250','crop'=>$frame['crop']], ['zoom'=>250,'crop'=>[1.2,0,10000,9000]]] as $invalid) {
+    denied(400,fn()=>cl_board_read($s,$cueLesson,$teacher,array_replace($vp,['view'=>$invalid])));
+}
+$updated = cl_board_read($s,$cueLesson,$teacher,$vp);
+must($updated['navigate'] && $updated['view'] === $frame && $updated['cursor'] === 2 && $updated['rev'] === 1 && !isset($updated['ops']),
+    'viewport update does not create an ink operation or page revision');
+$read = array_diff_key($vp,['view'=>true]);
+$pupilFrame = cl_board_read($s,$cueLesson,$student,$read);
+$recordFrame = cl_board_view($s,$cueLesson['id'],null,$read,cl_activity($s,$cueLesson['id']),$cueLesson);
+must($pupilFrame['view'] === $frame && $pupilFrame['write'] && !isset($pupilFrame['navigate'])
+    && $recordFrame['view'] === $frame && !$recordFrame['write'] && !isset($recordFrame['navigate'],$recordFrame['owner']),
+    'pupil and read-only recorder get the same frame without navigation permission');
+must(!isset(cl_board_read($s,$epochChanged,$student,$read)['view']), 'an old transport cannot leak its crop into a resumed session');
+$changed = cl_activity($s,$cueLesson['id']);
+$changed['view']['at'] -= 2;
+$changed['docs'][$sampleDoc = str_repeat('c',32)] = ['id'=>$sampleDoc,'pages'=>1];
+$s->put('activity',$cueLesson['id'],$changed);
+cl_board_action($s,$cueLesson,['board'=>1],'board-clear');
+must(cl_board_read($s,$cueLesson,$student,$read)['view'] === $frame,'clearing ink preserves the selected crop');
+cl_board_action($s,$cueLesson,['board'=>2,'doc'=>$sampleDoc,'page'=>1],'board-page');
+$rebased = cl_board_read($s,$cueLesson,$teacher,$vp);
+must($rebased['rev'] === 3 && !isset($rebased['view']) && $rebased['doc']['id'] === $sampleDoc,'page change resets the crop and ignores stale viewport updates');
 cl_clear_activity($s,$cueLesson['id']);
+denied(403,fn()=>cl_set_access($s,$cfg,$active,$manager,['feature'=>'board','enabled'=>true],$t+9,$rpc));
 denied(403,fn()=>cl_ink_input($active,$student,['strokes'=>[['tool'=>'erase-stroke','targets'=>['old-00000001']]]]));
 cl_set_access($s,$cfg,$active,$manager,['feature'=>'board','enabled'=>false],$t+9,$rpc);
 $active = cl_active($s,10);

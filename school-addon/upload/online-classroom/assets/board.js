@@ -2,21 +2,22 @@
     'use strict';
     window.ClassroomBoard = (root, options) => {
         const el = id => document.getElementById(id);
-        const card = el('board'), stage = el('board-stage'), viewport = el('board-scroll');
+        const card = el('board'), stage = el('board-stage'), viewport = el('board-scroll'), bed = el('board-bed');
         const paper = el('board-paper'), ink = el('board-ink');
         const context = ink.getContext('2d');
         const background = paper.getContext('2d', {alpha:false});
-        const zoom = el('board-zoom'), zoomOut = el('board-zoom-out'), zoomIn = el('board-zoom-in');
+        const zoom = el('board-zoom'), zoomOut = el('board-zoom-out'), zoomIn = el('board-zoom-in'), sharedZoom = el('board-zoom-shared');
         const zoomSteps = [.75, 1, 1.25, 1.5, 2, 2.5, 3];
         const percentage = new Intl.NumberFormat('fa-IR', {style:'percent'}), pageNumber = new Intl.NumberFormat('fa-IR');
-        let zoomLevel = 1;
+        const fullView = {zoom:100,crop:[0,0,10000,10000]}; // Same normalized sheet coordinates as ink.
+        let zoomLevel = 1, framing = fullView, viewFrame;
         let data = null, transport = null, cursor = 0, ops = [], stroke = null, pointer = null;
         let pending = [], sent = [], writing = null, writeTimer, generation = 0, targetRev = 0;
         const removed = new Set(), bounds = new WeakMap();
         const packetSize = 96, eraseSize = 32, batchSize = 6, queueLimit = 48, writeDelay = 175;
         const tip = el('eraser-tip');
-        let tool = 'pen', busy = false, renderVersion = 0, documentVersion = 0, docsKey = '', fileWanted = false;
-        const loadFile = el('board-load-file'), autoImageLimit = 64 * 1024;
+        let tool = 'pen', busy = false, renderVersion = 0, documentVersion = 0, docsKey = '';
+        const loadFile = el('board-load-file'), fileRetry = el('board-file-receive');
         let drag = null, pointerType = '', candidate = null, pinch = null, pinchFrame, touchBlocked = false, penUntil = 0, space = false;
         const contacts = new Map();
         const writers = el('board-writers'), labels = new Map();
@@ -133,14 +134,12 @@
                 input = {range:new class extends pdf.PDFDataRangeTransport {
                     requestDataRange(begin,end) {
                         if (pdfSession !== session || signal.aborted) return;
-                        if (!fileWanted) { clearPDF(); return; }
-                        session.reads++;
                         session.queue.push([begin,end]);
                         session.timer ??= setTimeout(() => this.flush(),8);
                     }
                     flush() {
                         session.timer = undefined;
-                        if (signal.aborted || !fileWanted) return;
+                        if (signal.aborted) return;
                         // Page dictionaries can be scattered all over a scanned PDF. Group the
                         // worker's concurrent reads, without fetching the intervening images.
                         const queued = session.queue.splice(0).sort((a,b) => a[0]-b[0]);
@@ -148,7 +147,7 @@
                             const group = queued.slice(i,i+pdfBatch);
                             pdfParts(source,length,session,group).then(parts => {
                                 if (!signal.aborted) group.forEach(([a],j) => this.onDataRange(a,parts[j]));
-                            }).catch(() => pdfFailed(session)).finally(() => { session.reads -= group.length; });
+                            }).catch(() => { if (session === pdfSession) documentFailed(); });
                         }
                     }
                     abort() { session.controller.abort(); }
@@ -162,16 +161,45 @@
             for (const [key,val] of Object.entries({...scope, doc:doc.id})) link.searchParams.set(key,val);
             return link.href;
         }
+        const clamp = (n, min=0, max=1) => Math.max(min, Math.min(max,n));
+        const controlsView = () => staff && data?.navigate === true;
+        const canNavigate = () => controlsView() && editable();
+        const sameView = (a,b) => a.zoom === b.zoom && a.crop.every((n,i) => n === b.crop[i]);
+        function checkedView(view) {
+            const {zoom,crop} = view ?? {};
+            return Number.isInteger(zoom) && zoom >= 75 && zoom <= 300 && Array.isArray(crop) && crop.length === 4
+                && crop.every(n => Number.isInteger(n) && n >= 0 && n <= 10000)
+                && crop[2]-crop[0] >= 3000 && crop[3]-crop[1] >= 3000
+                && (zoom > 100 || crop.every((n,i) => n === fullView.crop[i])) ? view : fullView;
+        }
         function fitView() {
+            if (options.rasterOnly) return;
+            const follow = controlsView() ? 'no' : 'yes';
+            if (viewport.dataset.follow !== follow) {
+                viewport.dataset.follow = follow;
+                viewport.setAttribute('aria-label', follow === 'yes' ? 'نمای تخته، همگام با دبیر' : 'نمای تخته؛ بزرگ‌نمایی و پیمایش');
+                bed.style.width = bed.style.height = stage.style.left = stage.style.top = '';
+            }
             const w = viewport.clientWidth, h = viewport.clientHeight;
             if (!w || !h) return;
-            const width = `${Math.max(1, Math.round(Math.min(w, h * paper.width / paper.height) * zoomLevel))}px`;
-            if (stage.style.width !== width) stage.style.width = width;
+            const aspect = paper.width / paper.height;
+            if (follow === 'yes') {
+                const [l,t,r,b] = framing.crop.map(n => n/10000);
+                const scale = Math.min(w/((r-l)*aspect),h/(b-t)) * Math.min(framing.zoom/100,1);
+                bed.style.width = `${scale*(r-l)*aspect}px`;
+                bed.style.height = `${scale*(b-t)}px`;
+                stage.style.width = `${scale*aspect}px`;
+                stage.style.left = `${-scale*aspect*l}px`;
+                stage.style.top = `${-scale*t}px`;
+            } else {
+                const width = `${Math.max(1, Math.round(Math.min(w,h*aspect)*zoomLevel))}px`;
+                if (stage.style.width !== width) stage.style.width = width;
+                queueView();
+            }
             dragState();
         }
-        function canDrag() { return viewport.scrollWidth > viewport.clientWidth || viewport.scrollHeight > viewport.clientHeight; }
-        function dragState() { viewport.dataset.drag = drag || pinch ? 'moving' : canDrag() && (!canWrite() || tool === 'pan' || space) ? 'ready' : 'no'; }
-        const clamp = (n, min=0, max=1) => Math.max(min, Math.min(max,n));
+        function canDrag() { return canNavigate() && (viewport.scrollWidth > viewport.clientWidth || viewport.scrollHeight > viewport.clientHeight); }
+        function dragState() { viewport.dataset.drag = drag || pinch ? 'moving' : canDrag() && (tool === 'pan' || space) ? 'ready' : 'no'; }
         const at = event => [event.clientX,event.clientY];
         function center() {
             const box = viewport.getBoundingClientRect();
@@ -181,31 +209,71 @@
             const box = stage.getBoundingClientRect();
             return [clamp((point[0]-box.left)/Math.max(1,box.width)),clamp((point[1]-box.top)/Math.max(1,box.height))];
         }
-        function setZoom(level, point = center(), anchor = point && relative(point)) {
-            zoomLevel = clamp(level, zoomSteps[0], zoomSteps[zoomSteps.length-1]);
-            const value = percentage.format(zoomLevel);
-            if (zoom.textContent !== value) zoom.textContent = value;
-            zoomOut.disabled = zoomLevel <= zoomSteps[0];
-            zoomIn.disabled = zoomLevel >= zoomSteps[zoomSteps.length-1];
-            fitView();
-            if (!point) return;
+        function focusAt(anchor, point = center()) {
             const box = stage.getBoundingClientRect();
             const dx = box.left + anchor[0]*box.width - point[0], dy = box.top + anchor[1]*box.height - point[1];
             if (Math.abs(dx) >= .5) viewport.scrollLeft += dx;
             if (Math.abs(dy) >= .5) viewport.scrollTop += dy;
+        }
+        function zoomLabels() {
+            const teacher = controlsView();
+            if (zoom) {
+                zoom.hidden = zoomOut.hidden = zoomIn.hidden = !teacher;
+                zoom.disabled = !canNavigate();
+                zoomOut.disabled = zoom.disabled || zoomLevel <= zoomSteps[0];
+                zoomIn.disabled = zoom.disabled || zoomLevel >= zoomSteps[zoomSteps.length-1];
+                const value = percentage.format(zoomLevel);
+                if (zoom.textContent !== value) zoom.textContent = value;
+            }
+            if (sharedZoom) {
+                sharedZoom.hidden = teacher;
+                const value = percentage.format(framing.zoom/100);
+                if (sharedZoom.textContent !== value) sharedZoom.textContent = value;
+            }
+        }
+        function setZoom(level, point = center(), anchor = relative(point)) {
+            if (!canNavigate()) return;
+            zoomLevel = Math.round(100*clamp(level, zoomSteps[0], zoomSteps[zoomSteps.length-1]))/100;
+            fitView();
+            focusAt(anchor,point);
+            zoomLabels();
         }
         function stepZoom(direction) {
             const list = direction > 0 ? zoomSteps : [...zoomSteps].reverse();
             const next = list.find(n => direction*(n-zoomLevel) > .01);
             if (next !== undefined) setZoom(next);
         }
+        function takeView() {
+            if (!canNavigate() || document.hidden || !viewport.clientWidth || !viewport.clientHeight) return {};
+            const zoom = Math.round(100*zoomLevel);
+            let crop = fullView.crop;
+            if (zoom > 100) {
+                const a = viewport.getBoundingClientRect(), b = stage.getBoundingClientRect();
+                if (!b.width || !b.height) return {};
+                const normalized = (p, origin, size) => Math.round(10000*clamp((p-origin)/size));
+                crop = [normalized(a.left,b.left,b.width), normalized(a.top,b.top,b.height),
+                    normalized(a.left+viewport.clientWidth,b.left,b.width), normalized(a.top+viewport.clientHeight,b.top,b.height)];
+            }
+            const view = {zoom,crop};
+            return checkedView(view) === view && !sameView(view,framing) ? {view} : {};
+        }
+        function queueView() {
+            if (!controlsView() || viewFrame !== undefined || !options.aimSoon) return;
+            viewFrame = requestAnimationFrame(() => {
+                viewFrame = undefined;
+                if (takeView().view) options.aimSoon();
+            });
+        }
         function fit(width, height) {
             if (!(width > 0 && height > 0 && Number.isFinite(width/height))) throw new Error('Invalid board size');
+            if (pointer !== null || candidate) stopGestures();
+            const anchor = controlsView() ? relative(center()) : null;
             const scale = Math.min(widthLimit / Math.max(width,height), Math.sqrt(3000000 / (width*height)));
             ink.width = paper.width = Math.max(1, Math.ceil(width * scale));
             ink.height = paper.height = Math.max(1, Math.ceil(height * scale));
             stage.style.aspectRatio = `${paper.width} / ${paper.height}`;
             fitView();
+            if (anchor) focusAt(anchor);
             background.fillStyle = '#fff';
             background.fillRect(0,0,paper.width,paper.height);
             redraw();
@@ -526,43 +594,31 @@
             }
             return false;
         }
-        function fileControl(doc) {
-            el('board-file-receive').hidden = !doc;
-            loadFile.setAttribute('aria-pressed', String(fileWanted));
-            loadFile.textContent = fileWanted ? 'پنهان‌کردن فایل تخته' : 'دریافت و نمایش فایل تخته';
-            el('board-file-size').textContent = doc ? `${doc.mime === 'application/pdf' ? 'PDF · ' : ''}${pageNumber.format(Math.ceil(doc.bytes/1024))} کیلوبایت` : '';
-        }
         function blankPaper(doc) {
-            // Keep the ink aligned with an image even if the pupil never downloads it.
+            // Keep image ink aligned while loading and never show pixels of the previous page.
             fit(doc?.width || 1600, doc?.height || 1000);
         }
-        function pdfFailed(session) {
-            if (session !== pdfSession) return;
-            clearPDF();
-            if (!fileWanted) return;
-            cancelRender();
-            fileWanted = false;
-            stage.classList.remove('has-document');
-            fileControl(data.doc);
+        function documentFailed() {
+            clearDocument();
+            fileRetry.hidden = false;
             blankPaper(data.doc);
-            message('نمایش PDF کامل نشد. اتصال را بررسی کن و فایل خوانا و بدون رمز را دوباره باز کن.');
+            message('نمایش فایل تخته کامل نشد. اتصال را بررسی کن و دوباره تلاش کن.');
         }
         async function show(view, scope) {
             cancelRender();
             const ticket = renderVersion;
             const docTicket = documentVersion;
-            stage.classList.toggle('has-document', !!view.doc && fileWanted);
-            if (!view.doc || !fileWanted) return;
+            fileRetry.hidden = true;
+            stage.classList.toggle('has-document', !!view.doc);
+            if (!view.doc) return;
             const doc = view.doc;
-            message('در حال نمایش فایل تخته…');
             try {
                 const source = documentURL(doc,scope);
                 if (doc.mime === 'application/pdf') {
-                    if (pdfSession) pdfSession.painted = false;
                     const pdf = await pdfLib();
                     if (docTicket !== documentVersion || ticket !== renderVersion) return;
                     if (!pdfSession) {
-                        pdfSession = {controller:new AbortController(), painted:false, reads:0, queue:[]};
+                        pdfSession = {controller:new AbortController(), queue:[]};
                         pdfSession.promise = openPDF(pdf,source,doc.bytes,pdfSession);
                     }
                     const session = pdfSession;
@@ -577,10 +633,7 @@
                     rendering = task;
                     await task.promise;
                     if (rendering === task) rendering = null;
-                    if (ticket === renderVersion) {
-                        session.painted = true;
-                        page.cleanup();
-                    }
+                    if (ticket === renderVersion) page.cleanup();
                 } else {
                     if (!imageFile) {
                         const ctrl = new AbortController(); imageLoad = ctrl;
@@ -594,12 +647,8 @@
                     fit(imageFile.width,imageFile.height);
                     background.drawImage(imageFile,0,0,paper.width,paper.height);
                 }
-                if (ticket === renderVersion) message();
             } catch (err) {
-                if (ticket === renderVersion && err.name !== 'RenderingCancelledException') {
-                    if (doc.mime === 'application/pdf') pdfFailed(pdfSession);
-                    else message('نمایش تصویر تخته ممکن نشد.');
-                }
+                if (ticket === renderVersion && err.name !== 'RenderingCancelledException') documentFailed();
             }
         }
         async function decodeImage(blob) {
@@ -618,17 +667,26 @@
             stage.classList.toggle('erasing',ready && tool === 'erase');
             if (!ready) tip.hidden = true;
             el('eraser').hidden = !staff && !canWrite();
-            for (const id of ['pen','pan','eraser','ink-color','ink-size']) el(id).disabled = !ready;
+            for (const id of ['pen','eraser','ink-color','ink-size']) el(id).disabled = !ready;
+            viewport.dataset.ink = ready ? 'yes' : 'no';
+            zoomLabels();
             dragState();
             if (!staff) return;
+            const teacher = controlsView(), navigate = canNavigate();
+            for (const id of ['board-laser','board-clear']) el(id).disabled = !ready;
+            el('pan').hidden = el('board-pages').hidden = el('toggle-files').hidden = !teacher;
+            if (!teacher) {
+                el('board-files').hidden = true;
+                el('toggle-files').setAttribute('aria-expanded','false');
+            }
+            for (const id of ['pan','toggle-files','board-file','board-doc']) el(id).disabled = !navigate;
+            el('board-upload').querySelector('button').disabled = !navigate;
             const pages = data?.doc?.pages || 1;
             const n = data?.page || 1;
-            for (const id of ['board-laser','board-clear','board-file','board-doc','page-number','page-go']) el(id).disabled = !ready;
-            el('board-upload').querySelector('button').disabled = !ready;
             el('page-number').max = String(pages);
-            el('page-number').disabled = el('page-go').disabled = !ready || pages === 1;
-            el('page-prev').disabled = !ready || n <= 1;
-            el('page-next').disabled = !ready || n >= pages;
+            el('page-number').disabled = el('page-go').disabled = !navigate || pages === 1;
+            el('page-prev').disabled = !navigate || n <= 1;
+            el('page-next').disabled = !navigate || n >= pages;
         }
         function sync(next, scope, requestedAt = performance.now()) {
             if (!next) return;
@@ -643,6 +701,8 @@
             const changedPaper = !data || reloadDoc || next.page !== data.page;
             const catchingUp = data?.more || next.more;
             const revoked = !staff && data?.write === true && next.write !== true;
+            const wasNavigating = controlsView();
+            const shared = checkedView(next.view), viewChanged = !sameView(shared,framing);
             if (resetPage) wipeInk();
             else if (revoked) {
                 // Keep confirmed ink; discard unsent strokes and make any old ACK harmless.
@@ -652,6 +712,14 @@
             }
             transport = scope;
             data = next;
+            framing = shared;
+            const restoringView = controlsView() && (changedPaper || !wasNavigating);
+            if (restoringView) zoomLevel = framing.zoom/100;
+            if (!controlsView() && (wasNavigating || viewChanged)) {
+                // The coordinate transform must not change underneath a continuous pen path.
+                stopGestures();
+                if (tool === 'pan') setTool('pen');
+            }
             cursor = next.cursor;
             const dropped = prune();
             receive(next.ops);
@@ -660,13 +728,8 @@
                 clearTimeout(cue.timer); cue.label.remove(); labels.delete(id);
             }
             showRemoteLaser(next.rev < targetRev ? null : next.laser, requestedAt);
-            if (reloadDoc) {
-                clearDocument();
-                fileWanted = !!next.doc && (options.autoReceive === true || (next.doc.mime !== 'application/pdf' && next.doc.bytes <= autoImageLimit));
-            }
+            if (reloadDoc) clearDocument();
             if (changedPaper) {
-                // Do not briefly show a page from the previous document during parsing.
-                fileControl(next.doc);
                 blankPaper(next.doc);
                 show(next,scope);
             } else if (resetPage || revoked || dropped || (next.ops.length && (pending.length || sent.length || next.ops.some(op => op.tool === 'erase-stroke')))) {
@@ -674,10 +737,15 @@
                 if (!resetPage && !catchingUp && !document.hidden) lastWriters(next.ops);
             }
             else if (next.ops.length) presentInk(next, catchingUp);
+            if (!changedPaper && (wasNavigating !== controlsView() || (!controlsView() && viewChanged))) fitView();
+            if (restoringView) {
+                const [l,t,r,b] = framing.crop;
+                focusAt([(l+r)/20000,(t+b)/20000]);
+            }
             const caption = next.doc ? pageNumber.format(next.page) : '';
             if (el('board-page-label').textContent !== caption) el('board-page-label').textContent = caption;
             el('board-footer').hidden = !caption;
-            if (staff) {
+            if (controlsView()) {
                 const stamp = next.docs.map(d => d.id).join(',');
                 const select = el('board-doc');
                 if (stamp !== docsKey) {
@@ -693,27 +761,21 @@
             toolState();
         }
         function reset() {
-            data = transport = null; fileWanted = false;
-            wipeInk(); clearDocument(); fileControl(null);
+            data = transport = null; zoomLevel = 1; framing = fullView;
+            cancelAnimationFrame(viewFrame); viewFrame = undefined;
+            wipeInk(); clearDocument(); fileRetry.hidden = true;
             stage.classList.remove('has-document');
             fit(1600,1000);
-            setZoom(1, null);
             if (card.classList.contains('expanded')) setExpanded(false);
             el('board-page-label').textContent = ''; el('board-footer').hidden = true; toolState();
         }
         loadFile.addEventListener('click', () => {
-            if (!data?.doc || !transport || !options.canEdit()) return;
-            fileWanted = !fileWanted;
-            fileControl(data.doc);
-            if (!fileWanted) {
-                // Keep only the current, successfully painted PDF in worker memory. Hiding a
-                // loading page aborts it; any document/lesson/connection change drops it.
-                if (!pdfSession?.painted || pdfSession.reads) clearDocument();
-                blankPaper(data.doc);
-            }
+            if (!data?.doc || !transport || !options.canEdit() || fileRetry.hidden) return;
             show(data,transport);
         });
         function setExpanded(expand) {
+            const anchor = controlsView() ? relative(center()) : null;
+            stopGestures();
             card.classList.toggle('expanded',expand);
             options.onExpand(expand);
             for (const node of root.querySelectorAll('.room-top, .staff-actions, .receive-tools, .screen-panel, .speaker-strip, .camera-strip, .room-side')) node.inert = expand;
@@ -722,6 +784,7 @@
             btn.setAttribute('aria-label', expand ? 'بازگشت به کلاس' : 'نمای بزرگ تخته');
             btn.title = expand ? 'بازگشت به کلاس' : 'نمای بزرگ تخته';
             fitView();
+            if (anchor) focusAt(anchor);
             if (expand) btn.focus({preventScroll:true});
         }
         el('board-expand').addEventListener('click', () => setExpanded(!card.classList.contains('expanded')));
@@ -731,27 +794,32 @@
             if (wakeControl?.open) { wakeControl.open = false; wakeControl.querySelector('summary').focus(); }
             else setExpanded(false);
         });
-        zoom.addEventListener('click', () => setZoom(1));
-        zoomOut.addEventListener('click', () => stepZoom(-1));
-        zoomIn.addEventListener('click', () => stepZoom(1));
-        if ('ResizeObserver' in window) new ResizeObserver(fitView).observe(viewport);
-        else window.addEventListener('resize', fitView);
-        setZoom(1, null);
+        zoom?.addEventListener('click', () => setZoom(1));
+        zoomOut?.addEventListener('click', () => stepZoom(-1));
+        zoomIn?.addEventListener('click', () => stepZoom(1));
+        if (!options.rasterOnly) {
+            if ('ResizeObserver' in window) new ResizeObserver(fitView).observe(viewport);
+            else window.addEventListener('resize', fitView);
+            viewport.addEventListener('scroll', queueView, {passive:true});
+        }
+        fitView();
 
         if (staff) {
             const files = el('board-files'), toggle = el('toggle-files');
             toggle.addEventListener('click', () => {
+                if (!canNavigate()) return;
                 files.hidden = !files.hidden;
                 toggle.setAttribute('aria-expanded', String(!files.hidden));
             });
         }
         function setTool(value) {
+            if (value === 'pan' && !canNavigate()) return;
             pointerEnd();
             tool = value;
             el('pen').setAttribute('aria-pressed',String(value==='pen'));
             el('eraser').setAttribute('aria-pressed',String(value==='erase'));
             el('board-laser')?.setAttribute('aria-pressed',String(value==='laser'));
-            el('pan').setAttribute('aria-pressed',String(value==='pan'));
+            el('pan')?.setAttribute('aria-pressed',String(value==='pan'));
             stage.classList.toggle('pan',value==='pan');
             toolState();
         }
@@ -852,6 +920,7 @@
             dragState();
         }
         function moveDrag(event) {
+            if (!canNavigate()) return;
             viewport.scrollLeft = drag.x-event.clientX;
             viewport.scrollTop = drag.y-event.clientY;
         }
@@ -861,10 +930,13 @@
         }
         function beginPinch() {
             cancelAnimationFrame(pinchFrame); pinchFrame = undefined;
-            const ids = [...contacts.keys()].slice(0,2), sample = pair(ids);
-            pinch = {ids, level:zoomLevel, distance:sample.distance, anchor:relative(sample.point), zooming:false};
             drag = null; touchBlocked = true;
-            abandonUnsentTouch(); pointerEnd(); aimPending = null; clearTrail(localLaser); dragState();
+            abandonUnsentTouch(); pointerEnd(); aimPending = null; clearTrail(localLaser);
+            if (canNavigate()) {
+                const ids = [...contacts.keys()].slice(0,2), sample = pair(ids);
+                pinch = {ids, level:zoomLevel, distance:sample.distance, anchor:relative(sample.point), zooming:false};
+            }
+            dragState();
         }
         function movePinch() {
             if (pinchFrame !== undefined) return;
@@ -886,12 +958,12 @@
         function start(event) {
             const type = event.pointerType, id = event.pointerId;
             if (type === 'touch') {
-                if (pointerType === 'pen' || performance.now() < penUntil) return;
+                if (pointerType === 'pen' || performance.now() < penUntil || (!editable() && !canNavigate())) return;
                 if (!contacts.size) touchBlocked = false;
                 contacts.set(id,at(event)); grab(event);
                 if (!pinch && contacts.size >= 2 && pointerType !== 'pen') { beginPinch(); return; }
                 if (touchBlocked || pointer !== null) return;
-                if (!editable() || tool === 'pan' || !drawingTarget(event)) { beginDrag(event); return; }
+                if (tool === 'pan' || !drawingTarget(event)) { if (canDrag()) beginDrag(event); return; }
                 const rect = ink.getBoundingClientRect();
                 if (!rect.width || !rect.height) return;
                 if (tool === 'laser') beginStroke(id,type,xy(event,rect),rect);
@@ -906,6 +978,7 @@
             }
             if (event.button === 1 || space || !editable() || tool === 'pan' || !drawingTarget(event)) {
                 if (canDrag() && pointer === null) { grab(event); beginDrag(event); }
+                else if (event.button === 1) event.preventDefault();
                 return;
             }
             const rect = ink.getBoundingClientRect();
@@ -977,6 +1050,7 @@
             setZoom(zoomLevel*Math.exp(clamp(-event.deltaY*.003,-.22,.22)),at(event));
         }, {passive:false});
         viewport.addEventListener('keydown',event => {
+            if (!canNavigate()) return;
             if (event.code === 'Space') { event.preventDefault(); space = true; dragState(); }
             if (event.key === '+' || event.key === '=') { event.preventDefault(); stepZoom(1); }
             if (event.key === '-') { event.preventDefault(); stepZoom(-1); }
@@ -987,23 +1061,24 @@
         el('pen').addEventListener('click',() => setTool('pen'));
         el('eraser').addEventListener('click',() => setTool('erase'));
         el('board-laser')?.addEventListener('click',() => setTool('laser'));
-        el('pan').addEventListener('click',() => setTool('pan'));
+        el('pan')?.addEventListener('click',() => setTool('pan'));
         if (staff) {
-            async function act(work) {
-                if (!editable()) return;
+            async function act(work, navigate = false) {
+                if (!editable() || (navigate && !canNavigate())) return;
                 const stamp = generation;
                 busy = true; pointerEnd(); aimPending = null; clearTrail(localLaser); toolState();
                 try {
                     // Commit the last drawn points on this page before changing the revision.
                     while (stamp === generation && options.canEdit() && (writing || pending.length)) await (writing || write());
-                    if (stamp !== generation || !options.canEdit()) return;
-                    const result = await work(() => stamp === generation && options.canEdit());
+                    const current = () => stamp === generation && options.canEdit() && (!navigate || controlsView());
+                    if (!current()) return;
+                    const result = await work(current);
                     if (stamp === generation && result?.boardRev) targetRev = result.boardRev;
                 } catch (e) { if (stamp === generation) message(options.explain(e)); }
                 finally { busy = false; toolState(); scheduleWrite(); }
             }
             function page(doc,n) {
-                act(() => options.send('board-page',{board:data.rev,doc,page:n}));
+                act(() => options.send('board-page',{board:data.rev,doc,page:n}), true);
             }
             el('page-prev').addEventListener('click',() => page(data?.doc?.id || null,data.page-1));
             el('page-next').addEventListener('click',() => page(data?.doc?.id || null,data.page+1));
@@ -1030,9 +1105,10 @@
                     const result = await options.send('upload',{board:rev,pages},file);
                     field.value = '';
                     return result;
-                });
+                }, true);
             });
         }
-        return {position:() => ({board:data?.rev || 0,ink:cursor}),takeAim,sync,reset};
+        toolState();
+        return {position:() => ({board:data?.rev || 0,ink:cursor}),framing:() => framing,takeView,takeAim,sync,reset};
     };
 })();

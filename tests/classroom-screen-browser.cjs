@@ -193,7 +193,7 @@ test('packaged teacher and admin recording controls, pupil notice and explicit y
     assert.equal(await pupil.locator('#record-start').count(),0);
     for (const [role,yes] of [['teacher',false],['admin',true]]) {
         operator=role;
-        const page=await browser.newPage({viewport:{width:540,height:700}});
+        const page=await browser.newPage({viewport:{width:540,height:700},reducedMotion:role==='admin'?'reduce':'no-preference'});
         const errs=[];
         page.on('pageerror',error=>errs.push(error.message));
         await page.goto(`${origin}/${role}`);
@@ -202,13 +202,27 @@ test('packaged teacher and admin recording controls, pupil notice and explicit y
         await start.waitFor({timeout:10000});
         assert.equal(await start.evaluate(el=>el.nextElementSibling.id),'quality-open','between board access and settings');
         assert.equal(await start.textContent().then(s=>s.trim()),'ضبط کلاس');
+        const header = await page.locator('.room-top').boundingBox();
+        const pupilHeader = await pupil.locator('.room-top').boundingBox();
         await start.click();
         assert.match(await page.locator('#record-start-help').textContent(),/دبیر همین زنگ یا مدیر مجاز/);
         assert.equal(recording,false,'opening the dialog does not start capture');
         await page.locator('#record-start-yes').click();
-        await page.locator('#recording-notice').waitFor();
-        await pupil.locator('#recording-notice').waitFor({timeout:8500});
-        assert.match(await pupil.locator('#recording-notice').textContent(),/کلاس در حال ضبط است/);
+        const activeDot = (p, timeout=8000) => p.locator('#classroom[data-recording=yes]').waitFor({timeout});
+        await activeDot(page); await activeDot(pupil);
+        assert.match(await pupil.locator('#recording-status').textContent(),/کلاس در حال ضبط است/);
+        assert.equal(await pupil.locator('#recording-status').evaluate(el=>el.getBoundingClientRect().height),1);
+        assert.equal(await page.locator('#recording-notice').count(),0);
+        assert.deepEqual(await page.locator('.room-top').boundingBox(),header);
+        assert.deepEqual(await pupil.locator('.room-top').boundingBox(),pupilHeader);
+        const light = async (p,sel) => p.locator(sel).evaluate(el=>{
+            const style=getComputedStyle(el,'::before');
+            return [style.backgroundColor,style.animationName,style.borderRadius];
+        });
+        assert.deepEqual(await light(page,'#status-dot'),['rgb(255, 77, 98)',role==='admin'?'none':'recording-blink','50%']);
+        await pupil.locator('#board-expand').click();
+        assert.deepEqual(await light(pupil,'.board-signal'),['rgb(255, 77, 98)','recording-blink','50%']);
+        await pupil.locator('#board-expand').click();
         assert.equal(await pupil.getByText('گروه آزمایشی').count(),0,'group is private to staff');
         await page.locator('#toggle-access').click();
         await page.getByRole('button',{name:'بستن کلاس برای همه'}).click();
@@ -221,10 +235,146 @@ test('packaged teacher and admin recording controls, pupil notice and explicit y
         await page.locator('#toggle-access').click();
         await page.getByRole('button',{name:'بستن کلاس برای همه'}).click();
         await dialog.getByRole('button',{name:yes?'بله':'خیر',exact:true}).click();
-        await page.locator('#recording-notice').waitFor({state:'hidden'});
+        await page.locator('#classroom[data-recording=no]').waitFor();
+        await pupil.locator('#classroom[data-recording=no]').waitFor({timeout:9000});
         assert.deepEqual(decisions.at(-1),{action:'close',class:22,lesson,recording:rec,sendRecording:yes});
         assert.deepEqual(errs,[]);
         await page.close();
         recording=false; closed=false;
     }
+});
+
+function twoPageBoardPDF() {
+    const page=(w,h,i)=>`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${w} ${h}] /Resources <<>> /Contents ${i} 0 R >>`;
+    const stream=s=>`<< /Length ${s.length} >>\nstream\n${s}\nendstream`;
+    const objects=['<< /Type /Catalog /Pages 2 0 R >>','<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>',
+        page(480,300,5),page(260,380,6),stream('1 1 0 rg 0 0 480 300 re f'),stream('0 1 1 rg 0 0 260 380 re f')];
+    let file='%PDF-1.4\n';
+    const offsets=objects.map((obj,i)=>{const offset=file.length; file+=`${i+1} 0 obj\n${obj}\nendobj\n`; return offset;});
+    return Buffer.from(`${file}xref\n0 7\n0000000000 65535 f \n${offsets.map(n=>`${String(n).padStart(10,'0')} 00000 n \n`).join('')}trailer\n<< /Size 7 /Root 1 0 R >>\nstartxref\n${file.length}\n%%EOF\n`);
+}
+
+test('teacher and mobile pupil share the actual page, crop and ink; only the teacher navigates', {skip,timeout:42000}, async t=>{
+    const fixture=packaged(t), html={teacher:fixture.render('teacher',true),student:fixture.render('student',true)};
+    const lesson='active-lesson', epoch='epoch', pdf=twoPageBoardPDF(), doc={id:'page-doc',name:'fixture.pdf',mime:'application/pdf',bytes:pdf.length,pages:2};
+    const members={'teacher-1':'PA_teacher-1','student-1':'PA_student-1'};
+    let rev=1, pageNumber=1, view, ink=[], granted=false;
+    const requests=[], files=[];
+    const {browser,origin}=await serveBrowser(t,async (req,res,url)=>{
+        const role=new URL(req.headers.referer || '/',url).pathname==='/teacher'?'teacher':'student', teacher=role==='teacher';
+        const identity=`${role}-1`;
+        if (html[url.pathname.slice(1)]) return send(res,'text/html; charset=UTF-8',html[url.pathname.slice(1)]);
+        if (url.pathname==='/fixture.js') return send(res,'text/javascript',`(${fakeMedia})('${identity}','${teacher?'student':'teacher'}-1',false);`);
+        if (url.searchParams.get('route')==='content') {
+            assert.equal(url.searchParams.get('sid'),members[identity]);
+            assert.equal(url.searchParams.get('doc'),doc.id);
+            files.push(identity);
+            return send(res,'application/pdf',pdf,{'Cache-Control':'no-store'});
+        }
+        if (url.searchParams.get('route')==='api') {
+            let buf=''; for await (const chunk of req) buf+=chunk;
+            const input=JSON.parse(buf), access=()=>({board:{all:granted,members:{}}});
+            requests.push({identity,input});
+            const board=()=>{
+                const reset=input.board!==rev, write=granted||teacher;
+                return {rev,cursor:ink.length,write,owner:write?(teacher?'a':'b').repeat(16):undefined,
+                    navigate:teacher,view,viewMoving:!!input.view,ops:ink.slice(reset?0:input.ink),
+                    ...(reset?{reset,doc,page:pageNumber,docs:teacher?[doc]:[]}:{})};
+            };
+            let out;
+            const admitted=input.sid===members[identity] && input.epoch===epoch && input.lesson===lesson;
+            if (input.action==='status') out={phase:'live',ready:true,lesson,epoch,joinable:true,slot:11,wakeMode:'system',admitted,
+                ...(admitted?{members,access:access(),board:board()}: {})};
+            else if (input.action==='ticket') out={lesson,epoch,url:'wss://fixture.invalid',token:'fixture'};
+            else {
+                assert.ok(admitted);
+                if (input.action==='board-sync') {
+                    if (input.view) {assert.ok(teacher && input.board===rev); view=input.view;}
+                    out={board:board()};
+                } else if (input.action==='board-page') {
+                    assert.ok(teacher && input.doc===doc.id && input.board===rev);
+                    pageNumber=input.page; view=undefined; ink=[]; out={boardRev:++rev};
+                } else if (input.action==='set-access') {
+                    assert.ok(teacher && input.feature==='board'); granted=input.enabled; out={access:access()};
+                } else if (input.action==='board-ink') {
+                    assert.ok((teacher || granted) && input.board===rev);
+                    ink.push(...input.strokes); out={ink:ink.length};
+                } else throw new Error(`unexpected request: ${input.action}`);
+            }
+            return send(res,'application/json',JSON.stringify({ok:true,...out}));
+        }
+        if (!fixture.serve(url,res)) res.writeHead(404).end();
+    });
+    const teacher=await browser.newPage({viewport:{width:1080,height:790}}), pupil=await browser.newPage({viewport:{width:320,height:690}});
+    const errors=[];
+    for (const p of [teacher,pupil]) {p.setDefaultTimeout(6800); p.on('pageerror',e=>errors.push(e.message));}
+    const color=(p,name,rgb,at=[5000,5000])=>p.waitForFunction(({name,rgb,at})=>{
+        const canvas=document.getElementById(name);
+        const data=canvas.getContext('2d').getImageData(Math.floor(canvas.width*at[0]/10000),Math.floor(canvas.height*at[1]/10000),1,1).data;
+        return rgb.every((v,i)=>data[i]===v);
+    },{name,rgb,at});
+    await Promise.all([teacher.goto(`${origin}/teacher`),pupil.goto(`${origin}/student`)]);
+    await Promise.all([teacher,pupil].map(p=>color(p,'board-paper',[255,255,0])));
+    assert.deepEqual(files.slice().sort(),['student-1','teacher-1']);
+    assert.equal(await pupil.locator('#board-load-file').isVisible(),false);
+    assert.equal(await pupil.locator('#pen').isVisible(),false);
+    for (let i=0;i<3;i++) await teacher.locator('#board-zoom-in').click();
+    await pupil.waitForFunction(()=>document.getElementById('board-zoom-shared').textContent==='۲۰۰٪');
+    const rect=(p,follow)=>p.evaluate(follow=>{
+        const clip=document.getElementById(follow?'board-bed':'board-scroll'), stage=document.getElementById('board-stage').getBoundingClientRect();
+        const box=clip.getBoundingClientRect();
+        return [[box.left-stage.left,stage.width],[box.top-stage.top,stage.height],
+            [box.left+clip.clientWidth-stage.left,stage.width],[box.top+clip.clientHeight-stage.top,stage.height]]
+            .map(([n,d])=>Math.round(Math.min(1,Math.max(0,n/d))*10000));
+    },follow);
+    const close=(a,b)=>a.every((n,i)=>Math.abs(n-b[i])<55);
+    const waitCrop=async () => {
+        const want=await rect(teacher,false);
+        for(let i=0;i<40;i++) {
+            const have=await rect(pupil,true);
+            if(close(have,want)) return have;
+            await new Promise(r=>setTimeout(r,60));
+        }
+        assert.fail(`crop ${await rect(pupil,true)} did not converge to teacher ${want}`);
+    };
+    await waitCrop();
+    await teacher.locator('#pan').click();
+    const boardBox=await teacher.locator('#board-scroll').boundingBox();
+    const x=boardBox.x+boardBox.width*.6,y=boardBox.y+boardBox.height*.65;
+    await teacher.mouse.move(x,y); await teacher.mouse.down(); await teacher.mouse.move(x-190,y-130,{steps:10}); await teacher.mouse.up();
+    const crop=await waitCrop();
+    assert.ok(crop[0]>900 && crop[1]>1300 && crop[3]-crop[1]<6000,'not a centered/full-page approximation');
+    await pupil.locator('#board-expand').click();
+    await pupil.setViewportSize({width:440,height:730});
+    await waitCrop();
+    await teacher.locator('#toggle-access').click();
+    await teacher.locator('#all-board-give').click();
+    await pupil.locator('#pen').waitFor();
+    assert.equal(await pupil.locator('#pan,#page-next,#board-zoom-in,#toggle-files').count(),0);
+    const clip=pupil.locator('#board-scroll');
+    await clip.press('+'); await clip.press('ArrowRight');
+    await clip.dispatchEvent('wheel',{ctrlKey:true,deltaY:-120});
+    assert.deepEqual(await clip.evaluate(el=>{el.scrollLeft=400;el.scrollTop=400;return [el.scrollLeft,el.scrollTop];}),[0,0]);
+    assert.ok(close(await rect(pupil,true),crop));
+    const mark=[Math.round((crop[0]+crop[2])/2),Math.round((crop[1]+crop[3])/2)];
+    await pupil.locator('#ink-color').fill('#cc0077');
+    const touch=()=>pupil.locator('#board-ink').evaluate((c,mark)=>{const r=c.getBoundingClientRect();return [r.left+r.width*mark[0]/10000,r.top+r.height*mark[1]/10000];},mark);
+    await pupil.mouse.click(...await touch());
+    await color(teacher,'board-ink',[204,0,119,255],mark);
+    await pupil.locator('#eraser').click(); await pupil.mouse.click(...await touch());
+    await color(teacher,'board-ink',[0,0,0,0],mark);
+    await teacher.locator('#all-board-cut').click();
+    await pupil.locator('#pen').waitFor({state:'hidden'});
+    await pupil.mouse.click(...await touch());
+    await teacher.locator('#toggle-access').click();
+    await teacher.locator('#page-next').click();
+    await color(pupil,'board-paper',[0,255,255]);
+    assert.equal(await pupil.locator('#board-page-label').textContent(),'۲');
+    assert.equal(await pupil.locator('#board-zoom-shared').textContent(),'۱۰۰٪');
+    assert.ok(close(await waitCrop(),[0,0,10000,10000]));
+    assert.equal(files.length,2,'zooming, erasing, page changes and resize do not reload the same PDF');
+    const writes=requests.filter(({identity,input})=>identity==='student-1' && !['status','board-sync','ticket'].includes(input.action));
+    assert.deepEqual(writes.map(({input})=>input.strokes[0].tool),['pen','erase-stroke']);
+    assert.ok(!requests.some(({identity,input})=>identity==='student-1' && input.view));
+    assert.deepEqual(errors,[]);
 });

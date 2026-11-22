@@ -58,6 +58,11 @@ function cl_lesson_expired(array $cfg, array $lesson, int $now): bool
     return ($grant['id'] ?? null) !== $lesson['test'] || $grant['students'] !== (($lesson['test_students'] ?? false) === true);
 }
 
+function cl_lesson_teacher(array $lesson, array $actor): bool
+{
+    return $actor['role'] === 'teacher' && ($actor['id'] ?? null) === ($lesson['teacher'] ?? 0);
+}
+
 function cl_can_lesson(array $lesson, array $actor): bool
 {
     if (cl_is_friday_test($lesson)) {
@@ -475,6 +480,10 @@ function cl_set_access(ClassroomStore $s, array $cfg, array $lesson, array $acto
         || ($identity !== null && !cl_media_identity($identity, $feature === 'board'))) {
         throw new ClassroomError(400, 'نوع دسترسی یا شرکت‌کننده معتبر نیست.');
     }
+    // Staff can still withdraw a grant, but only this bell's teacher can grant pupil ink.
+    if ($feature === 'board' && $enabled && !cl_lesson_teacher($lesson, $actor)) {
+        throw new ClassroomError(403, 'اجازهٔ نوشتن روی تخته فقط با دبیر همین زنگ است.');
+    }
     $sid = $identity === null ? null : ($lesson['seen'][$identity] ?? null);
     if ($identity !== null && !cl_entered($lesson, ['identity'=>$identity], $sid, $now)) {
         throw new ClassroomError(409, 'ورود این شرکت‌کننده هنوز تأیید نشده است.');
@@ -524,7 +533,7 @@ function cl_wake_mode(array $lesson): string
 function cl_wake_control(array $lesson, array $actor): bool
 {
     // This is a teaching choice for this bell, not a per-device preference or a global admin setting.
-    return $actor['role'] === 'teacher' && $actor['id'] === ($lesson['teacher'] ?? 0);
+    return cl_lesson_teacher($lesson, $actor);
 }
 
 function cl_set_wake(ClassroomStore $s, array $lesson, array $actor, array $body): array

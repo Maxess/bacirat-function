@@ -83,6 +83,7 @@ try {
     $defaults = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.15.zip';
     $recordings = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.16.zip';
     $adminRecordings = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.17.zip';
+    $sharedBoard = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.18.zip';
     $menus = static fn() => [file_get_contents($root . '/other-settings.php'), file_get_contents($root . '/includes/header.php')];
     $managerMenus = [$other, $header];
     expect($menus() === $managerMenus, 'initialization does not rewrite the host');
@@ -513,6 +514,16 @@ try {
         && mpm_query($db,"SELECT payload FROM `$store` WHERE bucket='record-links' AND item=?",['1404/1405:22'])->fetchColumn() === $linkedGroup
         && mpm_query($db,"SELECT payload FROM `$store` WHERE bucket='recording' AND item=?",[$historicId])->fetchColumn() === $historicRecording,
         'upgrade preserves active recorder configuration, encrypted key, group link, and recording history');
+    submit($db,$site,'enable');
+    denied(fn()=>mpm_install($db,$dir,$sharedBoard));
+    submit($db,$site,'disable');
+    expect(mpm_install($db,$dir,$sharedBoard), 'install shared board release over 0.4.17');
+    $row = mpm_row($db,$slug);
+    expect($row['version'] === '0.4.18' && $row['owner'] === $oldRow['owner'] && mpm_check_store($db,$row) === $store
+        && mpm_settings($db,$dir,$row) === $recordingSettings
+        && mpm_query($db,"SELECT payload FROM `$store` WHERE bucket='record-links' AND item=?",['1404/1405:22'])->fetchColumn() === $linkedGroup
+        && mpm_query($db,"SELECT payload FROM `$store` WHERE bucket='recording' AND item=?",[$historicId])->fetchColumn() === $historicRecording,
+        'the shared board release retains recorder settings, group link, and recording history');
     submit($db,$site,'enable');
     $_GET = ['view'=>'recordings','class'=>22];
     foreach ([['student_id'=>1],['admin_id'=>2],['admin_id'=>3]] as $unauthorized) {

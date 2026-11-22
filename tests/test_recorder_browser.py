@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'server/recorder'))
 from capture import CSP, FPS, HEIGHT, WIDTH, Capture, Renderer, clips, encoder, view
 
-ARTIFACT = ROOT / 'artifacts/baci-classroom-recorder-v0.4.17.zip'
+ARTIFACT = ROOT / 'artifacts/baci-classroom-recorder-v0.4.18.zip'
 # Stub signaling only. Use the pinned SDK attach/detach methods and real inbound RTP audio
 # so this test detects the old silent graph (local oscillators alone masked it).
 FAKE_ROOM = b'''
@@ -89,7 +89,7 @@ FAKE_ROOM = b'''
 
 
 def make_pdf():
-    stream = b'1 0.9 0.2 rg 0 0 480 300 re f\n'
+    stream = b'1 0.9 0.2 rg 0 0 480 300 re f 0.05 0.85 0.75 rg 0 0 120 300 re f\n'
     content = [b'<</Type /Catalog /Pages 2 0 R>>', b'<</Type /Pages /Count 1 /Kids [3 0 R]>>',
                b'<</Type /Page /Parent 2 0 R /MediaBox [0 0 480 300] /Resources <<>> /Contents 4 0 R>>',
                b'<</Length ' + str(len(stream)).encode() + b'>>\nstream\n' + stream + b'endstream']
@@ -104,13 +104,15 @@ def make_pdf():
 
 class RecorderPackageTest(unittest.TestCase):
     def test_standalone_payload_matches_sources_and_keeps_protocol_assets(self):
-        original = ROOT / 'artifacts/baci-classroom-recorder-v0.4.16.zip'
+        original = ROOT / 'artifacts/baci-classroom-recorder-v0.4.17.zip'
         with ZipFile(ARTIFACT) as new, ZipFile(original) as old:
-            self.assertEqual(set(new.namelist()), set(old.namelist()) | {'frame.js'})
-            for name in ('frame.js','view.html','view.css','view.js','capture.py','recording.py','README-fa.md'):
-                self.assertEqual(new.read(name), (ROOT / 'server/recorder' / name).read_bytes())
-            for name in set(old.namelist()) - {'view.html','view.css','view.js','capture.py','recording.py','README-fa.md'}:
+            self.assertEqual(set(new.namelist()), set(old.namelist()))
+            changed = {'frame.js','view.js','recording.py','README-fa.md','board.js'}
+            for name in set(old.namelist()) - changed:
                 self.assertEqual(new.read(name), old.read(name))
+            for name in changed - {'board.js'}:
+                self.assertEqual(new.read(name), (ROOT / 'server/recorder' / name).read_bytes())
+            self.assertEqual(new.read('board.js'), (ROOT / 'school-addon/upload/online-classroom/assets/board.js').read_bytes())
 
 
 @unittest.skipUnless(os.environ.get('MPM_TEST_CHROMIUM') and os.environ.get('MPM_REC_FFMPEG'),
@@ -121,13 +123,15 @@ class CompositorTest(unittest.IsolatedAsyncioTestCase):
         ffmpeg = os.environ['MPM_REC_FFMPEG']
         pdf, doc, job = make_pdf(), 'd' * 32, '1' * 32
         room = f'test-{"a" * 20}-v4-c42-{"c" * 24}'
-        requests, show_doc = [], False
+        requests, show_doc, framing = [], False, None
 
         class School:
             def __call__(self, action, given, **data):
                 requests.append((action, given, data['room']))
                 rev = 2 if show_doc else 1
                 base = {'rev': rev, 'cursor': int(show_doc), 'write': False}
+                if framing:
+                    base |= {'view': framing, 'viewMoving': True}
                 if data['board'] == rev:
                     return {'board': base}
                 document = {'id': doc, 'mime': 'application/pdf', 'name': 'fixture.pdf', 'bytes': len(pdf), 'pages': 1}
@@ -176,8 +180,13 @@ class CompositorTest(unittest.IsolatedAsyncioTestCase):
                         await wait(f'pix(329,312)[2]>180 && pix(1030,294)[0]>190 && pix(1030,294)[1]<100 && pix(1030,294)[2]>160 && {cameras}')
                         self.assertEqual(before, await p.evaluate(f'() => Array.from(({gallery}).filter((_,i)=>i%137===0))'),
                                          'starting PDF/ink and screen presentation must not move any webcams')
-                        # Keep this composition for several encoded frames as well.
+                        await wait('pix(736,202)[0]<80 && pix(736,202)[1]>175') # Full PDF: left teal stripe is visible.
                         await asyncio.sleep(.4)
+                        # The next delta has the same document/ink revision: pan/zoom only.
+                        framing = {'zoom': 200, 'crop': [5000,0,10000,10000]}
+                        await wait(f'pix(736,202)[1]<70 && pix(830,202)[0]>200 && pix(850,292)[2]>160 && pix(850,292)[1]<100 && {cameras}')
+                        self.assertEqual(before, await p.evaluate(f'() => Array.from(({gallery}).filter((_,i)=>i%137===0))'))
+                        await asyncio.sleep(.55)
                         await p.evaluate('fixture.camera(false)')
                         await wait('pix(695,602)[0]<130 && pix(430,602)[1]>160')
                         await p.evaluate('fixture.camera(true)')
@@ -216,6 +225,10 @@ class CompositorTest(unittest.IsolatedAsyncioTestCase):
                                 and pixel(i,695,602)[0]>150 and pixel(i,430,602)[1]>135
                                 for i in range(0,len(raw),stride)),
                             'an encoded frame must contain the board, screen and both cameras in their own areas')
+            self.assertTrue(any(pixel(i,736,202)[1]<85 and pixel(i,830,202)[0]>180 and pixel(i,850,292)[2]>123
+                                and pixel(i,850,292)[1]<125 and pixel(i,329,312)[2]>155 and pixel(i,695,602)[0]>150
+                                and pixel(i,430,602)[1]>135 for i in range(0,len(raw),stride)),
+                            'decoded MP4 must crop out the teal stripe and retain aligned ink, screen and webcam positions')
             sample = subprocess.check_output([ffmpeg, '-v', 'error', '-i', str(part), '-vn', '-ar', '8000', '-f', 's16le', '-'], timeout=10)
             pcm = array.array('h', sample)
             def power(hz, start):

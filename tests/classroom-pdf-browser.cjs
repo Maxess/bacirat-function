@@ -34,8 +34,8 @@ const root = document.getElementById('classroom');
 document.getElementById('live-panel').hidden = false;
 const doc = {id:'sample',mime:'application/pdf',pages:${pages},name:'گچ.pdf',bytes:${bytes}};
 let scope = {lesson:'test',epoch:'epoch',sid:'PA_fixture'};
-let page = 1, rev = 1;
-const sync = () => board.sync({rev,doc,page,docs:[doc],cursor:1,
+let page = 1, rev = 1, connection = 0;
+const sync = () => board.sync({rev,doc,page,docs:[doc],cursor:1,navigate:true,
     ops:[{tool:'pen',id:'fixture',size:9,color:page===1?'#dd0033':'#0044ee',points:[[3500,5500]]}]},scope);
 const board = window.ClassroomBoard(root, {canEdit:()=>true,identity:()=> 'teacher-1',onExpand(){},
     notice(text){if (text) window.lastBoardNotice=text;},explain:e=>String(e),
@@ -43,7 +43,7 @@ const board = window.ClassroomBoard(root, {canEdit:()=>true,identity:()=> 'teach
         if (action !== 'board-page' || data.board !== rev || data.page < 1 || data.page > doc.pages) throw Error('bad page');
         page=data.page; rev++; setTimeout(sync,0); return {boardRev:rev};
     }});
-window.changePDFConnection = () => { scope = {...scope,sid:'PA_new_fixture'}; sync(); };
+window.changePDFConnection = () => { scope = {...scope,sid:'PA_fixture_'+(++connection)}; sync(); };
 sync();`;
 
 async function pdfFixture(t,pdf,pages) {
@@ -115,9 +115,6 @@ test('packaged PDF draws Persian fallback glyphs and keeps page rotation, naviga
     assert.equal(await page.locator('#quality-dialog select').count(),4);
     assert.deepEqual(await page.locator('#quality-dialog select').evaluateAll(nodes => nodes.map(node=>[...node.options].map(opt=>opt.value))),
         Array.from({length:4},()=>['default','low','medium','high']));
-    await page.locator('#board-load-file').waitFor();
-    assert.equal(requests.length,0,'PDF is not downloaded before an explicit click');
-    await page.locator('#board-load-file').click();
     const waitPaint = n => page.waitForFunction(n=>window.paintedGlyphs.length >= n,n,{timeout:6000});
     await waitPaint(2);
     const inspect = () => page.evaluate(() => {
@@ -189,57 +186,41 @@ async function waitColor(page, rgb) {
 }
 const payload = entries => ({requests:entries.length, bytes:entries.reduce((sum,r)=>sum+r.queued,0)});
 
-test('large PDF reads ranges only, and hiding or revisiting pages does not transfer them again', {skip, timeout:40000}, async t => {
+test('automatic PDF following fetches only current ranges and cancels a replaced SID', {skip, timeout:40000}, async t => {
     const pages=32, pdf=scanPDF(pages);
     const {browser,origin,requests,staticRequests,delivery} = await pdfFixture(t,pdf,pages);
-    const page = await browser.newPage(), file=page.locator('#board-load-file');
+    const page = await browser.newPage();
     page.setDefaultTimeout(6500);
     await page.goto(origin);
-    await file.waitFor();
-    assert.equal(requests.length,0);
-    assert.equal(staticRequests.filter(s=>s.includes('route=pdf')).length,0,'the runtime is lazy too');
-    await file.click(); await waitColor(page,[255,0,255]);
+    await waitColor(page,[255,0,255]);
     const first=payload(requests), firstRequests=requests.slice();
     await page.locator('#page-next').click(); await waitColor(page,[0,255,255]);
     const second=payload(requests.slice(first.requests));
     await page.locator('#page-prev').click(); await waitColor(page,[255,0,255]);
     const revisit=payload(requests.slice(first.requests+second.requests));
-    const beforeHide=requests.length;
-    await file.click(); await waitColor(page,[255,255,255]);
-    await file.click(); await waitColor(page,[255,0,255]);
-    const reopen=payload(requests.slice(beforeHide));
-    t.diagnostic(`PDF ${pdf.length} B; first=${JSON.stringify(first)}, first 206 bodies=${payload(firstRequests.filter(r=>r.status===206)).bytes} B; `
-        + `next=${JSON.stringify(second)}, prev=${JSON.stringify(revisit)}, hide/show=${JSON.stringify(reopen)}`);
+    t.diagnostic(`PDF ${pdf.length} B; first=${JSON.stringify(first)}, next=${JSON.stringify(second)}, prev=${JSON.stringify(revisit)}`);
     assert.equal(firstRequests[0].range,'bytes=0-16383','no unbounded GET to discover range support');
     assert.ok(requests.every(r=>r.status===206 && r.range && r.sid==='PA_fixture'));
     assert.ok(first.bytes < pdf.length/8 && first.requests < 12);
     assert.ok(second.bytes > 0 && second.bytes < pdf.length/8 && second.requests < 12);
     assert.deepEqual(revisit,{requests:0,bytes:0});
-    assert.deepEqual(reopen,{requests:0,bytes:0});
+    assert.equal(await page.locator('#board-load-file').isVisible(),false);
 
-    // A fresh connection remains opt-in and cannot reuse private lesson bytes from the old SID.
     const oldStatic=staticRequests.filter(s=>s.includes('route=pdf')).length;
-    const fresh=requests.length;
-    await page.evaluate(() => window.changePDFConnection());
-    await waitColor(page,[255,255,255]);
-    assert.equal(requests.length,fresh);
-    // Hide during the first real range request; it must abort without leaving a reader in flight.
     const paused = new Promise(resolve => { delivery.pause = r => resolve(r); });
-    await file.click();
+    await page.evaluate(() => window.changePDFConnection());
     const inflight = await paused;
-    assert.equal(inflight.sid,'PA_new_fixture');
-    await file.click();
-    for (let i=0;i<60 && !inflight.closed;i++) await new Promise(resolve=>setTimeout(resolve,15));
-    assert.ok(inflight.closed && !inflight.queued, 'hiding the loading PDF cancels the HTTP request');
+    assert.equal(inflight.sid,'PA_fixture_1','the new SID opens its own private file');
     delivery.pause=null;
-    await file.click(); await waitColor(page,[255,0,255]);
+    await page.evaluate(() => window.changePDFConnection());
+    await waitColor(page,[255,0,255]);
+    assert.ok(inflight.closed && !inflight.queued, 'replacing the loading PDF cancels the old HTTP request');
+    assert.equal(requests.at(-1).sid,'PA_fixture_2');
     assert.equal(staticRequests.filter(s=>s.includes('route=pdf')).length,oldStatic,'recreating one worker uses cacheable non-personal assets');
     const beforeNav=requests.length;
-    await page.goto(`${origin}/?return=1`);
-    await file.waitFor();
-    assert.equal(requests.length,beforeNav);
     delivery.ignoreRange=true;
-    await file.click(); await waitColor(page,[255,0,255]);
+    await page.goto(`${origin}/?return=1`);
+    await waitColor(page,[255,0,255]);
     assert.deepEqual(payload(requests.slice(beforeNav)),{requests:1,bytes:pdf.length},'range-ignoring proxy serves one full fallback, not two transfers');
     assert.equal(staticRequests.filter(s=>s.includes('route=pdf')).length,oldStatic,'fresh navigation does not revalidate fingerprinted PDF assets');
 });

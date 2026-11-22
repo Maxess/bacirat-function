@@ -5,7 +5,7 @@
     const canvas = byId('film'), paper = byId('board-paper'), ink = byId('board-ink'), sinks = byId('media-sinks');
     const frame = window.ArchiveFrame(canvas), lk = window.LivekitClient, fps = 12;
     const board = window.ClassroomBoard(byId('capture-board'), {
-        autoReceive: true, canEdit: () => false, identity: () => null, authorName: () => '', notice: () => {},
+        rasterOnly: true, canEdit: () => false, identity: () => null, authorName: () => '', notice: () => {},
     });
     const tracks = new Map(), cameras = new Map();
     let room, audio, mix, stream, recorder, frameTimer, boardTimer, stopping, ended, roomScope, leaseUntil = 0;
@@ -74,10 +74,10 @@
         const gallery = Array.from(cameras, ([id,item]) => ({role:id.split('-',1)[0],video:videoOf(item)}));
         const rank = {teacher:0,admin:1,student:2};
         gallery.sort((a,b) => rank[a.role] - rank[b.role]);
-        frame({paper,ink,doc,hasInk:board.position().ink > 0,cameras:gallery,screen});
+        frame({paper,ink,doc,view:board.framing(),hasInk:board.position().ink > 0,cameras:gallery,screen});
     }
     async function updateBoard() {
-        let more = false;
+        let delay = 850;
         try {
             const pos = board.position();
             const res = await fetch('/board', {method:'POST', cache:'no-store', redirect:'error', signal:AbortSignal.timeout(2400),
@@ -87,9 +87,10 @@
             if (!view || !running) return;
             board.sync(view,roomScope);
             if ('doc' in view) doc = view.doc;
-            more = view.more === true;
+            if (view.more) delay = 90;
+            else if (view.viewMoving) delay = 300;
         } catch (_) { /* A stale fetch while closing does not keep the recorder alive. */ }
-        finally { if (running) boardTimer = setTimeout(updateBoard, more ? 90 : 850); }
+        finally { if (running) boardTimer = setTimeout(updateBoard, delay); }
     }
     function bytes64(buffer) {
         const bytes = new Uint8Array(buffer);

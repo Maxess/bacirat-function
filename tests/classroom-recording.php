@@ -126,6 +126,11 @@ foreach ([$teacher,$admin] as $operator) {
 ok(!cl_rec_status($s,$cfg,$live,$deputy)['recording']['canSend'], 'unassigned deputy cannot approve sending');
 $board = $worker('board',$id,$t+6,['room'=>$live['room'],'board'=>0,'ink'=>0]);
 ok(isset($board['board']) && !isset($board['chat']) && $board['board']['write'] === false, 'recorder reads only current board');
+$view = ['zoom'=>200,'crop'=>[5000,0,10000,10000]];
+cl_board_read($s,$live,$teacher,['lesson'=>$id,'epoch'=>cl_epoch($live),'sid'=>'PA_staff','board'=>1,'view'=>$view]);
+$delta = $worker('board',$id,$t+6,['room'=>$live['room'],'board'=>1,'ink'=>0,'compact'=>true,'view'=>CL_VIEW_FULL])['board'];
+ok($delta['view'] === $view && $delta['rev'] === 1 && !$delta['write'] && !isset($delta['navigate']) && !isset($delta['doc']),
+    'worker receives the cropped viewport in the compact delta but cannot change it');
 deny(409, fn()=> $worker('board',$id,$t+6,['room'=>'other']));
 // The recorder is not a roster entry and doesn't need the teacher's tab.
 $live['pulses'][$admin['identity']] = ['sid'=>'PA_office','at'=>$t+6];

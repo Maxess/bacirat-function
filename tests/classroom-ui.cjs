@@ -135,7 +135,7 @@ function fixture(staff, autoSlot = 0) {
                 return {getVideoTracks:()=>[raw],getTracks:()=>[raw]};
             }}},
             ClassroomAttention:choose=>{wakeChoice=choose;return {setLive(...args){wakeStates.push(args);},snapshot(){},expand(){}};},
-            ClassroomBoard:(_,config)=>{boardConfig=config;return {position:()=>({board:0,ink:0}),takeAim:()=>{
+            ClassroomBoard:(_,config)=>{boardConfig=config;return {position:()=>({board:0,ink:0}),takeView:()=>({}),takeAim:()=>{
                 const value=aim; aim=null; return value ? {aim:value} : {};
             },sync:(...p)=>boards.push(p),reset:()=>boards.push('reset')};}},
         document:{getElementById:id=>elements[id],baseURI:'https://school.fixture.test/',createElement,addEventListener(k,f){documentEvents[k]=f;},get hidden(){return srv.hidden;}},
@@ -155,7 +155,7 @@ function fixture(staff, autoSlot = 0) {
                     const profilesRev=JSON.stringify(srv.profiles);
                     if (input.people) reply.seconds=srv.seconds;
                     if (input.profilesRev!==profilesRev) reply.profiles=srv.profiles;
-                    Object.assign(reply,{admitted:true,profilesRev,chat:srv.chat,board:{rev:1,moving:srv.moving,write:srv.write,laser:srv.laser},
+                    Object.assign(reply,{admitted:true,profilesRev,chat:srv.chat,board:{rev:1,moving:srv.moving,write:srv.write,laser:srv.laser,navigate:staff},
                         cameraCodec:srv.cameraCodec,screen:srv.screen || null,
                         wakeMode:srv.wakeMode || 'live',wakeControl:staff && srv.wakeControl !== false});
                     const current = quality();

@@ -69,7 +69,31 @@ function cl_activity_sync(ClassroomStore $s, array $lesson, array $actor, array 
         'board'=>cl_board_view($s, $id, $actor, $input, $state, $lesson)];
 }
 
-function cl_board_view(ClassroomStore $s, string $id, array $actor, array $input, array $state, ?array $lesson = null): array
+const CL_VIEW_FULL = ['zoom'=>100, 'crop'=>[0,0,10000,10000]];
+
+function cl_board_teacher(array $lesson, array $actor, array $body): void
+{
+    if (!cl_lesson_teacher($lesson, $actor)) throw new ClassroomError(403, 'فایل، صفحه و نمای تخته فقط در اختیار دبیر همین زنگ است.');
+    $sid = $body['sid'] ?? null;
+    if (!cl_match_transport($lesson, $body) || !cl_sid($sid) || ($lesson['staff'][$actor['identity']] ?? null) !== $sid) {
+        throw new ClassroomError(409, 'اتصال دبیر عوض شده است؛ دوباره وارد کلاس شو.');
+    }
+}
+
+function cl_view_input(mixed $value): array
+{
+    $zoom = is_array($value) ? ($value['zoom'] ?? null) : null;
+    $crop = is_array($value) ? ($value['crop'] ?? null) : null;
+    if (!is_int($zoom) || $zoom < 75 || $zoom > 300 || !is_array($crop) || !array_is_list($crop) || count($crop) !== 4
+        || count(array_filter($crop, 'is_int')) !== 4 || min($crop) < 0 || max($crop) > 10000
+        || $crop[2]-$crop[0] < 3000 || $crop[3]-$crop[1] < 3000 || ($zoom <= 100 && $crop !== CL_VIEW_FULL['crop'])) {
+        throw new ClassroomError(400, 'درصد بزرگ‌نمایی یا محدودهٔ نمای تخته معتبر نیست.');
+    }
+    return ['zoom'=>$zoom, 'crop'=>$crop];
+}
+
+// A null actor is the read-only recorder, with neither editing nor presenter cues.
+function cl_board_view(ClassroomStore $s, string $id, ?array $actor, array $input, array $state, ?array $lesson = null): array
 {
     $layer = cl_layer($s, $id, $state);
     $clock = $layer['clock'] ?? $layer['seq']; // Older rows are one tick each.
@@ -98,10 +122,16 @@ function cl_board_view(ClassroomStore $s, string $id, array $actor, array $input
         }
     }
     $doc = $state['doc'] === null ? null : $state['docs'][$state['doc']];
-    $write = $lesson !== null && cl_may_write($lesson, $actor);
+    $write = $actor && $lesson && cl_may_write($lesson, $actor);
+    $frame = $state['view'] ?? null;
+    $shared = $actor && $lesson && cl_lesson_teacher($lesson, $actor) ? ['navigate'=>true] : [];
+    if ($lesson && $frame && $frame['epoch'] === cl_epoch($lesson)) {
+        if ($frame['value'] !== CL_VIEW_FULL) $shared['view'] = $frame['value'];
+        if ($frame['at'] > $now - 1.2) $shared['viewMoving'] = true;
+    }
     $laser = $state['laser'] ?? null;
     $aim = null;
-    if ($lesson && isset($laser['points']) && $laser['rev'] === $state['rev'] && $laser['epoch'] === cl_epoch($lesson)
+    if ($actor && $lesson && isset($laser['points']) && $laser['rev'] === $state['rev'] && $laser['epoch'] === cl_epoch($lesson)
         && ($lesson['staff'][$laser['by']] ?? null) === $laser['sid']) {
         $remaining = CL_LASER_TTL_MS - max(0, (int)(1000 * ($now - $laser['at'])));
         if ($remaining > 0) {
@@ -119,12 +149,12 @@ function cl_board_view(ClassroomStore $s, string $id, array $actor, array $input
         return ['rev'=>$state['rev'], 'cursor'=>$cursor, 'write'=>$write]
             + ($write ? ['owner'=>cl_ink_prefix($id, $actor['identity'])] : [])
             + ($cursor < $clock ? ['more'=>true] : []) + ($ops ? ['ops'=>$ops] : [])
-            + ($moving ? ['moving'=>true] : []) + ($aim ? ['laser'=>$aim] : []);
+            + ($moving ? ['moving'=>true] : []) + ($aim ? ['laser'=>$aim] : []) + $shared;
     }
     return ['doc'=>$doc, 'page'=>$state['page'], 'rev'=>$state['rev'], 'cursor'=>$cursor, 'more'=>$cursor < $clock,
         'reset'=>$reset, 'write'=>$write, 'owner'=>$write ? cl_ink_prefix($id, $actor['identity']) : null,
         'ops'=>$ops, 'moving'=>$moving, 'laser'=>$aim,
-        'docs'=>cl_is_staff($actor) ? array_values($state['docs']) : []];
+        'docs'=>$actor && cl_is_staff($actor) ? array_values($state['docs']) : []] + $shared;
 }
 
 function cl_may_write(array $lesson, array $actor): bool
@@ -178,6 +208,21 @@ function cl_board_read(ClassroomStore $s, array $lesson, array $actor, array $bo
 {
     $id = $lesson['id'];
     $state = cl_activity($s, $id);
+    $now = microtime(true);
+    $changed = false;
+    if (array_key_exists('view', $body)) {
+        cl_board_teacher($lesson, $actor, $body);
+        $view = cl_view_input($body['view']);
+        $prior = $state['view'] ?? null;
+        $epoch = cl_epoch($lesson);
+        // Do not apply requests from the previous page. Reply with the current board so
+        // a delayed read can recover without a second request. One snapshot, not a log.
+        if (($body['board'] ?? null) === $state['rev'] && (($prior['epoch'] ?? null) !== $epoch
+            || ($prior['value'] !== $view && $prior['at'] <= $now - .18))) {
+            $state['view'] = ['epoch'=>$epoch, 'value'=>$view, 'at'=>$now];
+            $changed = true;
+        }
+    }
     if (array_key_exists('aim', $body)) {
         if (!cl_is_staff($actor)) throw new ClassroomError(403, 'نشانگر ارائه فقط برای دبیر یا مسئول مجاز است.');
         $points = $body['aim'];
@@ -197,7 +242,6 @@ function cl_board_read(ClassroomStore $s, array $lesson, array $actor, array $bo
         if (!cl_sid($sid) || ($lesson['staff'][$actor['identity']] ?? null) !== $sid) {
             throw new ClassroomError(409, 'اتصال ارائه‌دهنده عوض شده است.');
         }
-        $now = microtime(true);
         // A request waiting for the classroom lock does not get a fresh pointer lifetime.
         $delay = max(0, (int)ceil(($now - ($receivedAt ?? $now)) * 1000));
         if (($body['board'] ?? null) === $state['rev'] && $older + $delay < CL_LASER_TTL_MS
@@ -205,9 +249,10 @@ function cl_board_read(ClassroomStore $s, array $lesson, array $actor, array $bo
             $points = array_map(static fn(array $point): array => [$point[0], $point[1], $point[2] + $delay], $points);
             $state['laser'] = ['by'=>$actor['identity'], 'sid'=>$sid, 'epoch'=>cl_epoch($lesson),
                 'rev'=>$state['rev'], 'points'=>$points, 'at'=>$now];
-            $s->put('activity', $id, $state); // Overwrite; no event, ink row, attachment or recording.
+            $changed = true;
         }
     }
+    if ($changed) $s->put('activity', $id, $state);
     return cl_board_view($s, $id, $actor, $body, $state, $lesson);
 }
 
@@ -225,7 +270,7 @@ function cl_board_action(ClassroomStore $s, array $lesson, array $input, string 
             $state['doc'] = $doc;
             $state['page'] = $page;
             $state['rev']++;
-            unset($state['laser']);
+            unset($state['laser'], $state['view']);
             $s->put('activity', $id, $state);
         }
         return ['boardRev'=>$state['rev']];
@@ -402,6 +447,7 @@ function cl_upload(ClassroomStore $s, array $lesson, array $input, array $file):
     $state['doc'] = $doc;
     $state['page'] = 1;
     $state['rev']++;
+    unset($state['laser'], $state['view']);
     try { $s->put('activity', $lesson['id'], $state); }
     catch (Throwable $error) { @unlink($target); throw $error; }
     return ['boardRev'=>$state['rev']];

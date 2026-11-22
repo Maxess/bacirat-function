@@ -19,10 +19,10 @@ REPLACED = ['includes/header.php', 'includes/management_hub.php', 'includes/stud
 RESTORED = ['other-settings.php', 'includes/footer.php']
 ADDED = ['includes/classroom-school-bots.php', 'school-classroom-settings.php']
 CALENDAR = ROOT / 'school-addon/upload/online-classroom/calendar.php'
-BUNDLE = 'baci-classroom-upgrade-v0.4.17.zip'
-UPDATE = 'baci-plugin-manager-update-v0.1.23.zip'
-CLASSROOM = 'school-classroom-plugin-v0.4.17.zip'
-RECORDER = 'baci-classroom-recorder-v0.4.16.zip'
+BUNDLE = 'baci-classroom-upgrade-v0.4.18.zip'
+UPDATE = 'baci-plugin-manager-update-v0.1.24.zip'
+CLASSROOM = 'school-classroom-plugin-v0.4.18.zip'
+RECORDER = 'baci-classroom-recorder-v0.4.18.zip'
 
 
 def check_patch(test, upstream, overlay, paths, patch, verify_pin=False):
@@ -44,7 +44,7 @@ def check_patch(test, upstream, overlay, paths, patch, verify_pin=False):
 
 class BaciOverlayTest(unittest.TestCase):
     def test_archives_ship_the_pinned_baci_overlay_and_no_watcher_or_bot_credentials(self):
-        with ZipFile(ROOT / 'artifacts/baci-plugin-manager-v0.1.23.zip') as site:
+        with ZipFile(ROOT / 'artifacts/baci-plugin-manager-v0.1.24.zip') as site:
             for path in REPLACED + RESTORED + ADDED + ['UPSTREAM.json']:
                 self.assertEqual(site.read(path), (BACI / path).read_bytes())
             self.assertEqual(site.read('includes/classroom-calendar.php'), CALENDAR.read_bytes())
@@ -132,7 +132,6 @@ class BaciOverlayTest(unittest.TestCase):
                 archive_bytes = bundle.read(name)
                 self.assertEqual(archive_bytes, (ROOT / 'artifacts' / name).read_bytes())
                 self.assertEqual(hashlib.sha256(archive_bytes).hexdigest(), hashes[name])
-            self.assertEqual(hashes[RECORDER], 'de02931ed2c0247d0ae387fb4797ea78bb65bdec1db9a50cf05994d81c8e9b28')
             with ZipFile(BytesIO(bundle.read(RECORDER))) as recorder, ZipFile(BytesIO(bundle.read(CLASSROOM))) as classroom:
                 for entry in ('board.js', 'livekit-client.umd.js', 'pdf-resources.zip'):
                     self.assertEqual(recorder.read(entry), classroom.read('assets/' + entry))

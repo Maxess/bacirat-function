@@ -131,8 +131,11 @@ cl_json_reply(static function (): array {
         if ($action === 'set-wake') return cl_set_wake($s, $lesson, $actor, $body);
         if ($action === 'set-quality') return cl_set_quality($s, $cfg, $class, $lesson, $actor, $body, $now);
         if ($action === 'set-access') return cl_set_access($s, $cfg, $lesson, $actor, $body, $now, $rpc);
-        if ($action === 'upload' && $isUpload) return cl_upload($s, $lesson, $body, $_FILES['file'] ?? []);
-        if (in_array($action, ['board-page','board-clear'], true)) return cl_board_action($s, $lesson, $body, $action);
+        if ($action === 'board-page' || ($action === 'upload' && $isUpload)) {
+            cl_board_teacher($lesson, $actor, $body);
+            return $action === 'board-page' ? cl_board_action($s, $lesson, $body, $action) : cl_upload($s, $lesson, $body, $_FILES['file'] ?? []);
+        }
+        if ($action === 'board-clear') return cl_board_action($s, $lesson, $body, $action);
         throw new ClassroomError(400, 'عملیات شناخته نشد.');
     });
 });

@@ -18,7 +18,7 @@ import time
 from capture import CLIP, Capture, CaptureError, HEX, Renderer, check_clip, clips, lease_ms
 from transport import ProtocolError, School, send_video
 
-VERSION = '0.4.17'
+VERSION = '0.4.18'
 TTL = 26 * 3600  # Hard local maximum, even if PHP/DB remains unavailable.
 SPACE_LIMIT = 1800 * 1024 * 1024
 ROOT = Path(__file__).resolve().parent

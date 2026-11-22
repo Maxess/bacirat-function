@@ -320,7 +320,7 @@ function cl_rec_worker(ClassroomStore $s, array $cfg, array $input, int $now, ca
             }
             $state = cl_activity($s, $id);
             if ($action === 'board') {
-                $view = cl_board_view($s, $id, ['role'=>'student','identity'=>'recorder-' . $id], $input, $state);
+                $view = cl_board_view($s, $id, null, $input, $state, $lesson);
                 foreach ($view['ops'] ?? [] as $i=>$op) unset($view['ops'][$i]['author']);
                 return ['board'=>$view];
             }

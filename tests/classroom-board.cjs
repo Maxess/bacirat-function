@@ -7,9 +7,9 @@ const { webcrypto } = require('node:crypto');
 const script = fs.readFileSync(path.join(__dirname, '../school-addon/upload/online-classroom/assets/board.js'), 'utf8');
 
 // The real board, with DOM/canvas and the network acknowledgement stubbed.
-function fixture({staff=true,reducedMotion=false}={}) {
+function fixture({staff=true,navigate=staff,reducedMotion=false}={}) {
     const elements = new Map(), timers = new Map(), frames = new Map(), calls = [], notices = [];
-    let time = 0, seq = 0, access = staff, response, points;
+    let time = 0, seq = 0, access = staff, response, points, failDownload = false;
     const downloads = [];
     const display = { strokes:[], paths:[] };
     const context = {
@@ -21,7 +21,7 @@ function fixture({staff=true,reducedMotion=false}={}) {
     };
     const rect = { left:0,top:0,width:1000,height:500 };
     function el(id) {
-        if (!staff && ['board-laser','board-file','board-doc','board-upload','board-clear','page-prev','page-next','page-go','page-number'].includes(id)) return null;
+        if (!staff && ['pan','board-zoom','board-zoom-in','board-zoom-out','board-laser','board-file','board-doc','board-upload','board-clear','page-prev','page-next','page-go','page-number'].includes(id)) return null;
         if (!elements.has(id)) {
             const classes = new Set(), events = {};
             elements.set(id, {
@@ -41,7 +41,7 @@ function fixture({staff=true,reducedMotion=false}={}) {
     vm.runInNewContext(script, {
         document:{baseURI:'https://school.fixture.test/',getElementById:el,createElement:tag=>el(`${tag}-${++seq}`),createElementNS:(_,tag)=>el(`${tag}-${++seq}`),addEventListener(){}},
         AbortController, URL, window, crypto:webcrypto, performance:{now:()=>time},
-        async fetch(url,options) { downloads.push({url,options}); return {ok:true,async blob(){return {};}}; },
+        async fetch(url,options) { downloads.push({url,options}); return {ok:!failDownload,async blob(){return {};}}; },
         requestAnimationFrame(fn){const id=++seq;frames.set(id,fn);return id;}, cancelAnimationFrame:id=>frames.delete(id),
         setTimeout(fn,ms){const id=++seq;timers.set(id,{at:time+ms,fn});return id;}, clearTimeout:id=>timers.delete(id),
     });
@@ -57,7 +57,7 @@ function fixture({staff=true,reducedMotion=false}={}) {
         explain: e=>e.message,
     });
     function sync(ops=[], extras={}, scope={lesson:'L',epoch:'E',sid:'PA_staff'}, requestedAt) {
-        board.sync({rev:1,reset:false,doc:null,page:1,docs:[],cursor:0,ops,...extras}, scope, requestedAt);
+        board.sync({rev:1,reset:false,doc:null,page:1,docs:[],cursor:0,ops,navigate,...extras}, scope, requestedAt);
     }
     async function flush() {
         const next = [...timers.entries()].sort((a,b)=>a[1].at-b[1].at)[0];
@@ -69,7 +69,7 @@ function fixture({staff=true,reducedMotion=false}={}) {
         const planned=[...frames.values()]; frames.clear();
         for (const callback of planned) callback(time);
     }
-    return {el,board,sync,display,calls,notices,downloads,flush,frame,delay:s=>response=s, access:v=>access=v, draw(type,x,y,other){el('board-scroll').fire(type,{target:el('board-ink'),clientX:x,clientY:y,...other});}};
+    return {el,board,sync,display,calls,notices,downloads,flush,frame,delay:s=>response=s, access:v=>access=v, failDownload:v=>failDownload=v, draw(type,x,y,other){el('board-scroll').fire(type,{target:el('board-ink'),clientX:x,clientY:y,...other});}};
 }
 const drawOp = (id, points, color='#0099ff') => ({tool:'pen',size:4,id,points,color});
 
@@ -325,33 +325,74 @@ test('fast movement is bounded and unsent laser samples expire without refreshin
 });
 
 
-test('compact ink and permission deltas keep the same unloaded file; only a click starts a large download', async()=>{
+test('the selected file loads automatically; idle deltas do not re-fetch, and a failed file can be retried', async()=>{
     const f=fixture({staff:false}); f.access(true);
     const scope={lesson:'L',epoch:'E',sid:'PA_student'};
-    const doc={id:'large',width:600,height:800,bytes:400000, mime:'image/jpeg', pages:1};
+    const doc={id:'large',width:600,height:800,bytes:400000,mime:'image/jpeg',pages:1};
     f.sync([],{doc,write:true},scope);
-    assert.equal(f.el('board-file-receive').hidden,false);
-    assert.equal(f.el('board-load-file')['aria-pressed'],'false');
-    assert.match(f.el('board-file-size').textContent,/۳۹۱/);
-    assert.equal(f.downloads.length,0);
+    assert.equal(f.el('board-file-receive').hidden,true);
+    await f.flush();
+    assert.equal(f.downloads.length,1);
+    assert.equal(f.display.images,1);
+    assert.equal(f.downloads[0].options.priority,'low');
+    assert.deepEqual(Object.fromEntries(new URL(f.downloads[0].url).searchParams),{class:'22',lesson:'L',epoch:'E',sid:'PA_student',doc:'large'});
     f.board.sync({rev:1,cursor:1,write:false,ops:[drawOp('one',[[100,100],[200,400]])]},scope);
     assert.equal(f.el('ink-tools').hidden,true);
     assert.equal(f.el('board-stage').style.aspectRatio,'1500 / 2000');
     assert.equal(f.display.strokes.length,1);
-    f.el('board-load-file').fire('click'); await f.flush();
-    assert.equal(f.downloads.length,1);
-    assert.equal(f.downloads[0].options.priority,'low');
-    assert.deepEqual(Object.fromEntries(new URL(f.downloads[0].url).searchParams),{class:'22',lesson:'L',epoch:'E',sid:'PA_student',doc:'large'});
-    assert.equal(f.display.images,1);
-    f.board.sync({rev:1,cursor:1,write:false},scope);
-    assert.equal(f.downloads.length,1,'noop does not restart the document');
-    f.el('board-load-file').fire('click');
+    assert.equal(f.downloads.length,1,'an ink/permission delta does not restart the document');
+    f.failDownload(true);
+    f.sync([],{doc:{...doc,id:'another'},rev:2},scope); await f.flush();
     assert.equal(f.downloads[0].options.signal.aborted,true);
-    assert.equal(f.el('board-load-file')['aria-pressed'],'false');
-    f.sync([],{doc:{...doc,id:'small',bytes:20000},rev:2},scope); await f.flush();
-    assert.equal(f.downloads.length,2,'small image still appears automatically');
-    f.sync([],{doc:{...doc,id:'tiny-pdf',mime:'application/pdf',bytes:4000},rev:3},scope);
-    assert.equal(f.el('board-load-file')['aria-pressed'],'false','even a tiny PDF does not load the renderer by surprise');
-    f.board.reset();
+    assert.equal(f.el('board-file-receive').hidden,false);
+    f.failDownload(false); f.el('board-load-file').fire('click'); await f.flush();
+    assert.equal(f.downloads.length,3);
     assert.equal(f.el('board-file-receive').hidden,true);
+    f.board.reset();
+    assert.equal(f.downloads[2].options.signal.aborted,true);
+});
+
+test('the shared crop is independent of ink and resets only with the authoritative view or scope',async()=>{
+    const f=fixture({staff:false}); f.access(true); f.sync([],{write:true});
+    const scope={lesson:'L',epoch:'E',sid:'PA_staff'}, view={zoom:200,crop:[5000,1000,10000,7000]};
+    f.board.sync({rev:1,view,cursor:0,write:true},scope);
+    assert.deepEqual(structuredClone(f.board.framing()),view);
+    const width=f.el('board-stage').style.width, anchor=f.el('board-stage').style.left;
+    assert.ok(parseFloat(anchor)<0);
+    f.el('board-scroll').fire('wheel',{ctrlKey:true,deltaY:-90});
+    f.el('board-scroll').fire('keydown',{key:'+'});
+    f.draw('pointerdown',140,150,{button:1}); f.draw('pointermove',200,200,{button:1});
+    const touch=id=>({pointerId:id,pointerType:'touch'});
+    f.draw('pointerdown',200,200,touch(2)); f.draw('pointerdown',300,300,touch(3));
+    f.draw('pointermove',500,400,touch(3)); f.frame(130);
+    f.draw('pointerup',500,400,touch(3)); f.draw('pointerup',200,200,touch(2));
+    await f.flush();
+    assert.deepEqual(f.calls,[]);
+    assert.equal(f.el('board-stage').style.width,width);
+    assert.equal(f.el('board-stage').style.left,anchor);
+    assert.deepEqual(structuredClone(f.board.takeView()),{});
+    f.board.sync({rev:1,view:{zoom:300,crop:[0,0,6000,6000]},cursor:0},{...scope,epoch:'next'});
+    assert.deepEqual(structuredClone(f.board.framing()),view,'ignore a compact response without a matching document scope');
+    f.sync([],{rev:1},{...scope,epoch:'next'});
+    assert.equal(f.board.framing().zoom,100);
+});
+
+test('only the assigned teacher publishes viewport deltas, retrying the newest geometry until echoed',async()=>{
+    const f=fixture(); f.sync();
+    f.el('board-zoom-in').fire('click'); f.el('board-zoom-in').fire('click');
+    const latest=structuredClone(f.board.takeView());
+    assert.equal(latest.view.zoom,150);
+    assert.deepEqual(structuredClone(f.board.takeView()),latest);
+    f.sync([],{view:{zoom:125,crop:[0,0,10000,8000]}});
+    assert.deepEqual(structuredClone(f.board.takeView()),latest,'a late response never undoes the local zoom');
+    f.sync([],{view:latest.view});
+    assert.deepEqual(structuredClone(f.board.takeView()),{});
+    f.sync([],{rev:2,doc:{id:'new',mime:'image/jpeg',bytes:12,pages:1}});
+    assert.equal(f.el('board-zoom').textContent,'۱۰۰٪');
+    const manager=fixture({staff:true,navigate:false}); manager.sync();
+    manager.el('page-next').fire('click'); manager.el('board-zoom-in').fire('click');
+    assert.equal(manager.el('board-pages').hidden,true);
+    assert.equal(manager.el('board-zoom-in').hidden,true);
+    assert.deepEqual(structuredClone(manager.board.takeView()),{});
+    await manager.flush(); assert.deepEqual(manager.calls,[]);
 });
