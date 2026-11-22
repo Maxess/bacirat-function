@@ -16,13 +16,19 @@ HOST = ROOT / 'plugin-manager'
 SRC = ROOT / 'school-addon/upload/online-classroom'
 LEGACY = ARTIFACTS / 'school-classroom-pilot-v0.1.0.zip'
 LEGACY_SHA = 'bebc35a02f57346880373a034ee493b757a8017a12812a133ab957358d9de161'
-VERSION = '0.4.19'
-MANAGER_VERSION = '0.1.25'
+VERSION = '0.4.20'
+MANAGER_VERSION = '0.1.26'
 # Reuse byte-verified SDK/PDF assets; ship the same board implementation as the site.
-RECORDER_BASE = 'baci-classroom-recorder-v0.4.17.zip'
-RECORDER_BASE_SHA = '6929be4f172b08a88709c1601b4351e7f6ea13574d7299126fcc482b1787dfaa'
-RECORDER_VERSION = '0.4.18'
+RECORDER_BASE = 'baci-classroom-recorder-v0.4.18.zip'
+RECORDER_BASE_SHA = 'e25950993723b8a3441c8f1acc86dca8756e9a935d42b716ffc0bfc0eeaebad0'
+RECORDER_VERSION = '0.4.20'
 RECORDER_SRC = ROOT / 'server/recorder'
+# Vazirmatn v33.003, byte-identical to the live classroom webfonts (see fonts/README.md).
+RECORDER_FONTS = {
+    'fonts/Vazirmatn-Regular.woff2': 'e382101336c6eb32cfb31381c027d02d2e0354bad08f6a395d4088beb3db3d91',
+    'fonts/Vazirmatn-Bold.woff2': '836fae7d42d83faa249bc00e0099592be98a1fa260d22d82f269b6091e585627',
+    'fonts/OFL.txt': 'e6f4ce7b6c830d5a25a4f8ac777c267cd7d3c180bc2a7150ca57cbb9b280c4b7',
+}
 BACI = HOST / 'baci'
 BACI_PATCH = 'baci-4.221.0-e0f3f686.patch'
 BACI_FILES = ('other-settings.php', 'includes/header.php', 'includes/footer.php', 'includes/management_hub.php',
@@ -113,7 +119,7 @@ def plugin_entries(pdf_archive):
         'report_menus': {role: 'حضور و غیاب کلاس مجازی' for role in ('teacher', 'admin', 'deputy')},
         'routes': {'page': 'index.php', 'api': 'api.php', 'content': 'content.php', 'events': 'events.php', 'job': 'job.php', 'recording': 'recording-api.php'},
         'store': True, 'pdf_resources': 'assets/pdf-resources.zip',
-        'preserve_settings_from': ['0.2.0', '0.2.1', '0.2.2', '0.2.3', '0.3.0', '0.4.0', '0.4.1', '0.4.2', '0.4.3', '0.4.4', '0.4.5', '0.4.6', '0.4.7', '0.4.8', '0.4.9', '0.4.10', '0.4.11', '0.4.12', '0.4.13', '0.4.14', '0.4.15', '0.4.16', '0.4.17', '0.4.18'],
+        'preserve_settings_from': ['0.2.0', '0.2.1', '0.2.2', '0.2.3', '0.3.0', '0.4.0', '0.4.1', '0.4.2', '0.4.3', '0.4.4', '0.4.5', '0.4.6', '0.4.7', '0.4.8', '0.4.9', '0.4.10', '0.4.11', '0.4.12', '0.4.13', '0.4.14', '0.4.15', '0.4.16', '0.4.17', '0.4.18', '0.4.19'],
         'hooks': {'deactivate': 'deactivate.php'},
         'settings': [
             {'key': 'signal_url', 'type': 'wss', 'label': 'آدرس رسانه (wss://)'},
@@ -141,14 +147,22 @@ def plugin_entries(pdf_archive):
     return files
 
 
-def recorder_release(output_dir, previous):
+def recorder_release(output_dir):
+    previous = (ARTIFACTS / RECORDER_BASE).read_bytes()
+    if hashlib.sha256(previous).hexdigest() != RECORDER_BASE_SHA:
+        raise ValueError('Expected the unchanged published Recorder base ZIP')
     with ZipFile(BytesIO(previous)) as archive:
         assets = {name: archive.read(name) for name in ('livekit-client.umd.js', 'livekit-client.LICENSE.txt',
                 'pdf-resources.zip', 'pdf.LICENSE.txt')}
     assets['board.js'] = (SRC / 'assets/board.js').read_bytes()
     files = {name: (RECORDER_SRC / name).read_bytes() for name in ('README-fa.md', 'requirements.txt',
              'capture.py', 'recording.py', 'transport.py', 'view.html', 'view.css', 'view.js', 'frame.js',
-             'school-classroom-recorder.service')}
+             'school-classroom-recorder.service', 'fonts/README.md')}
+    for name, digest in RECORDER_FONTS.items():
+        data = (RECORDER_SRC / name).read_bytes()
+        if hashlib.sha256(data).hexdigest() != digest:
+            raise ValueError(f'Expected the reviewed Recorder font/license: {name}')
+        files[name] = data
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / f'baci-classroom-recorder-v{RECORDER_VERSION}.zip'
     write_zip(path, files | assets)
@@ -164,12 +178,9 @@ def main():
     parser.add_argument('--pdf-archive', type=Path, help='use a local copy of the same pinned PDF.js npm archive')
     opts = parser.parse_args()
     if opts.recorder_only:
-        recorder_base = (ARTIFACTS / RECORDER_BASE).read_bytes()
-        if hashlib.sha256(recorder_base).hexdigest() != RECORDER_BASE_SHA:
-            raise ValueError('Expected the unchanged published Recorder base ZIP')
         if opts.approve_reviewed_manifest or opts.pdf_archive:
             parser.error('site manifest and PDF build options do not apply to the standalone Recorder')
-        recorder_release(opts.output_dir, recorder_base)
+        recorder_release(opts.output_dir)
         return
     entries = plugin_entries(opts.pdf_archive)
     expected = hashlib.sha256(entries['plugin.json']).hexdigest()
@@ -208,8 +219,13 @@ def main():
             for name in ('README-fa.md', 'WEBHOOK-fa.md', 'install.py', 'admission.py')},
         f'patches/{BACI_PATCH}': (HOST / 'patches' / BACI_PATCH).read_bytes(),
     })
-    # This hotfix only changes the school site; leave the published VPS release alone.
-    bundle = {name: (opts.output_dir / name).read_bytes() for name in (upgrade, classroom)}
+    recorder = recorder_release(opts.output_dir)
+    upgrader = RECORDER_SRC / f'upgrade-v{RECORDER_VERSION}.sh'
+    script = upgrader.read_bytes()
+    if f'readonly digest={hashlib.sha256(recorder.read_bytes()).hexdigest()}\n'.encode() not in script:
+        raise ValueError('Recorder upgrade script does not pin the new archive')
+    bundle = {name: (opts.output_dir / name).read_bytes() for name in (upgrade, classroom, recorder.name)}
+    bundle[upgrader.name] = script
     checksums = ''.join(f'{hashlib.sha256(data).hexdigest()}  {name}\n' for name, data in bundle.items())
     write_zip(opts.output_dir / f'baci-classroom-upgrade-v{VERSION}.zip', {
         **bundle, 'START-HERE-fa.txt': (ROOT / 'docs/baci-classroom-upgrade.fa.txt').read_bytes(),

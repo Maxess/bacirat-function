@@ -173,6 +173,11 @@ function cl_rec_history(array $class): string
     return 'record-list:' . cl_rec_link_key($class);
 }
 
+function cl_rec_title(ClassroomStore $s, array $lesson): array
+{
+    return ['school'=>cl_school_name($s->db), 'subject'=>cl_safe_label($lesson['subject'] ?? '', 100)];
+}
+
 function cl_rec_start(ClassroomStore $s, array $cfg, array $class, array $lesson, array $actor, int $now): array
 {
     if (!cl_rec_enabled($cfg) || cl_is_friday_test($lesson) || !cl_rec_operator($lesson, $actor)) {
@@ -188,10 +193,12 @@ function cl_rec_start(ClassroomStore $s, array $cfg, array $class, array $lesson
     cl_room_lock($s->db, $cfg['room_prefix'] . ':recorder', static function () use ($s, $cfg, $class, $lesson, $link, $now) {
         if ($s->get('record-slot', 'current')) throw new ClassroomError(409, 'سرویس ضبط در حال ضبط یا ارسال زنگ دیگری است.');
         if (!cl_rec_health($s, $cfg, $now)) throw new ClassroomError(503, 'سرویس ضبط VPS آماده نیست. مدیر مدرسه وضعیت سرویس را بررسی کند.');
-        $s->tx(static function () use ($s, $class, $lesson, $link, $now) {
+        // Pin the displayed names once so every part and reconnect of this recording agrees.
+        $title = cl_rec_title($s, $lesson);
+        $s->tx(static function () use ($s, $class, $lesson, $link, $now, $title) {
             $id = $lesson['id'];
             $s->put('recording', $id, ['id'=>$id,'class'=>$lesson['class_id'],'year'=>$lesson['year'], 'target'=>$link,
-                'teacher'=>$lesson['teacher'],'begin'=>$now + 5, 'deadline'=>$lesson['deadline'],'expires'=>$lesson['deadline'] + CL_REC_RETENTION,
+                'teacher'=>$lesson['teacher'],'title'=>$title,'begin'=>$now + 5, 'deadline'=>$lesson['deadline'],'expires'=>$lesson['deadline'] + CL_REC_RETENTION,
                 'state'=>'recording','live'=>false,'sent'=>0,'total'=>0]);
             $s->put('lesson', $id, $lesson + ['recorder'=>'recorder-' . $id]);
             $s->put('record-slot', 'current', ['id'=>$id]);
@@ -344,9 +351,12 @@ function cl_rec_worker(ClassroomStore $s, array $cfg, array $input, int $now, ca
                 if ($running !== $job['live']) $s->put('recording', $id, array_replace($job, ['live'=>$running]));
                 $cmd = ['command'=>'record','id'=>$id,'room'=>$lesson['room'],'expires'=>$job['expires'],
                     'lease'=>min($now + 8, $lesson['deadline'])];
-                if (!$running) $cmd['token'] = cl_jwt($cfg, ['roomJoin'=>true, 'room'=>$lesson['room'], 'canSubscribe'=>true,
-                    'canPublish'=>false,'canPublishData'=>false,'canUpdateOwnMetadata'=>false,'hidden'=>true,'recorder'=>true],
-                    25, ['identity'=>'recorder-' . $id, 'name'=>'Recorder'], $now);
+                if (!$running) {
+                    $cmd['title'] = $job['title'] ?? cl_rec_title($s, $lesson);
+                    $cmd['token'] = cl_jwt($cfg, ['roomJoin'=>true, 'room'=>$lesson['room'], 'canSubscribe'=>true,
+                        'canPublish'=>false,'canPublishData'=>false,'canUpdateOwnMetadata'=>false,'hidden'=>true,'recorder'=>true],
+                        25, ['identity'=>'recorder-' . $id, 'name'=>'Recorder'], $now);
+                }
                 return $cmd;
             } elseif ($job['live']) $s->put('recording', $id, array_replace($job, ['live'=>false]));
         }

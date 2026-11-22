@@ -1,6 +1,8 @@
 (() => {
     'use strict';
-    const font = 'ClassroomPDFPersian, "Noto Sans Arabic", "DejaVu Sans", sans-serif';
+    const font = 'ArchiveVazir, sans-serif';
+    const cut = new Intl.Segmenter('fa',{granularity:'grapheme'});
+    const brand = 'کلاس مجازی', credit = 'طراحی و توسعه : س. مهدی بیات';
     const roles = {teacher:'دبیر', admin:'مدیر'};
     const percent = new Intl.NumberFormat('fa-IR',{style:'percent'});
     const margin = 24, gap = 12, top = 68, footer = 22, galleryHeight = 166;
@@ -20,8 +22,13 @@
             ctx.fillStyle = fill; ctx.fill();
             if (stroke) { ctx.strokeStyle = stroke; ctx.stroke(); }
         }
+        const face = (size,weight) => `${weight} ${size}px ${font}`;
+        function measure(text,size,weight) {
+            ctx.font = face(size,weight);
+            return ctx.measureText(text).width;
+        }
         function label(text,x,y,{size=16,color='#e6efff',weight=400,align='right'}={}) {
-            ctx.font = `${weight} ${size}px ${font}`;
+            ctx.font = face(size,weight);
             ctx.direction = 'rtl'; ctx.textAlign = align; ctx.textBaseline = 'middle';
             ctx.fillStyle = color; ctx.fillText(text,x,y);
         }
@@ -30,6 +37,55 @@
         }
         function line(x,y,w,color) {
             ctx.fillStyle = color; ctx.fillRect(x,y,w,1);
+        }
+        function shorten(text,max,size,weight) {
+            if (measure(text,size,weight) <= max) return text;
+            const parts = Array.from(cut.segment(text), hit => hit.segment);
+            let lo = 0, hi = parts.length;
+            while (lo < hi) {
+                const mid = Math.ceil((lo + hi)/2);
+                if (measure(parts.slice(0,mid).join('').trimEnd()+'…',size,weight) <= max) lo = mid;
+                else hi = mid - 1;
+            }
+            return parts.slice(0,lo).join('').trimEnd()+'…';
+        }
+        let headerSource, headerLayout;
+        function header(heading) {
+            // Compute widths once per capture. Keep both names readable even if one is long.
+            if (!headerLayout || heading !== headerSource) {
+                headerSource = heading;
+                const school = typeof heading?.school === 'string' ? heading.school.trim() : '';
+                const subject = typeof heading?.subject === 'string' ? heading.subject.trim() : '';
+                const creditWidth = Math.ceil(measure(credit,16,400)) + 32;
+                const right = width-margin-48, split = 24, brandWidth = measure(brand,24,700);
+                const room = right - (margin + creditWidth + 28) - brandWidth - split*(Number(!!school)+Number(!!subject));
+                const schoolRoom = school ? Math.min(measure(school,22,700), subject ? Math.max(room/2,room-measure(subject,21,700)) : room) : 0;
+                const titles = [
+                    [shorten(school,schoolRoom,22,700),22,'#f2f7ff'],
+                    [brand,24,'#d9eeff'],
+                    [shorten(subject,room-schoolRoom,21,700),21,'#bfe4ff'],
+                ].filter(([text])=>text);
+                let x = right;
+                const labels = titles.map(([text,size,color],i) => {
+                    const mark = i ? x - split/2 : null;
+                    if (i) x -= split;
+                    const entry = {text,size,color,x,mark};
+                    x -= measure(text,size,700);
+                    return entry;
+                });
+                headerLayout = {labels,creditWidth};
+            }
+            line(margin,55,width-2*margin,'#304460');
+            box(width-margin-34,12,34,34,9,'#1d4a53');
+            box(width-margin-26,20,18,12,2,'#7defd9');
+            line(width-margin-22,24,10,'#1d4a53'); line(width-margin-22,27,6,'#1d4a53');
+            const {labels,creditWidth} = headerLayout;
+            box(margin,13,creditWidth,32,16,'#1f3450');
+            label(credit,margin+creditWidth/2,29,{color:'#bfe4ff',size:16,align:'center'});
+            for (const {text,size,color,x,mark} of labels) {
+                if (mark !== null) dot(mark,29,'#7ba0be');
+                label(text,x,29,{size,weight:700,color});
+            }
         }
         function fit(sw,sh,{x,y,w,h}) {
             const scale = Math.min(w/sw,h/sh);
@@ -114,15 +170,9 @@
                 ctx.restore();
             });
         }
-        return ({paper,ink,doc,hasInk,view,cameras,screen}) => {
+        return ({paper,ink,doc,hasInk,view,cameras,screen,heading}) => {
             ctx.fillStyle = background; ctx.fillRect(0,0,width,height);
-            line(margin,55,width-2*margin,'#304460');
-            box(width-margin-34,12,34,34,9,'#1d4a53');
-            box(width-margin-26,20,18,12,2,'#7defd9');
-            line(width-margin-22,24,10,'#1d4a53'); line(width-margin-22,27,6,'#1d4a53');
-            label('کلاس مجازی',width-margin-48,29,{size:24,weight:700});
-            box(margin,14,130,28,14,'#1f3450');
-            label('نسخهٔ آرشیو',margin+65,28,{color:'#bfe4ff',size:14,align:'center'});
+            header(heading);
             if (screen && (doc || hasInk)) {
                 const w = (presentation.w-gap)/2;
                 screenPane({...presentation,w},screen);

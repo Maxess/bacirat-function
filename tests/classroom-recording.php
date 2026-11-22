@@ -13,7 +13,7 @@ $db->exec("CREATE TABLE `$table` (bucket TEXT,item TEXT,payload TEXT,PRIMARY KEY
     CREATE TABLE academic_years (year_name TEXT,status INT,is_default INT);
     INSERT INTO academic_years VALUES ('1405/1406',1,1),('1404/1405',1,0);
     CREATE TABLE settings (key_name TEXT PRIMARY KEY,key_value TEXT);
-    INSERT INTO settings VALUES ('current_academic_year','1405/1406');
+    INSERT INTO settings VALUES ('current_academic_year','1405/1406'), ('school_name','مدرسهٔ پژوهش');
     CREATE TABLE classes (id INT PRIMARY KEY,name TEXT,academic_year TEXT);
     INSERT INTO classes VALUES (15,'هفتم ۱','1405/1406'),(16,'هفتم ۲','1405/1406'),(17,'هفتم ۳','1404/1405');
     CREATE TABLE admins (id INT PRIMARY KEY,name TEXT,role TEXT,permissions TEXT,status INT);
@@ -112,12 +112,25 @@ ok(cl_live_media_peers(['participants'=>[$peer]],$identity) === [], 'hidden reco
 deny(502, fn()=>cl_live_media_peers(['participants'=>[$peer]]));
 $peer['permission']['can_publish'] = true;
 deny(502, fn()=>cl_live_media_peers(['participants'=>[$peer]],$identity));
-ok($worker('poll',null,$t+4)['command'] === 'hold', 'notice before capturing A/V');
+$hold = $worker('poll',null,$t+4);
+ok($hold['command'] === 'hold' && !isset($hold['title']), 'notice before capturing A/V');
 $job = $worker('poll',$id,$t+5);
+$title = ['school'=>'مدرسهٔ پژوهش','subject'=>'ریاضی'];
+ok($job['title'] === $title, 'video title uses school settings and the subject of this bell, not the class name');
+$db->exec("UPDATE settings SET key_value='نام تازه' WHERE key_name='school_name'");
+ok($worker('poll',$id,$t+5)['title'] === $title, 'video title is pinned from recording start for later parts or room reopens');
+$legacy = $s->get('recording',$id);
+unset($legacy['title']);
+$s->put('recording',$id,$legacy);
+ok($worker('poll',$id,$t+5)['title'] === array_replace($title,['school'=>'نام تازه']), 'active jobs from older releases can still be captured');
+$s->put('recording',$id,$legacy + ['title'=>$title]);
+ok(cl_rec_title($s, ['subject'=>"\u{202E}فیزیک\n" . str_repeat('X',150)])['subject'] === 'فیزیک ' . str_repeat('X',94),
+    'worker receives bounded, single-line subject text with no directional overrides');
 $claims = json_decode(base64_decode(strtr(explode('.',$job['token'])[1],'-_','+/')),true);
 ok($job['room'] === $live['room'] && $claims['sub'] === $identity && $claims['video']['canPublish'] === false
     && $claims['video']['recorder'] === true && $claims['video']['hidden'] === true, 'only a hidden/receiving JWT for this room');
-$worker('poll',$id,$t+6,['running'=>$live['room']]);
+$renewal = $worker('poll',$id,$t+6,['running'=>$live['room']]);
+ok($renewal['command'] === 'record' && !isset($renewal['title']) && !isset($renewal['token']), 'token and title are only for capture startup');
 ok(cl_rec_status($s,$cfg,$live,$student) === ['recording'=>['notice'=>'live']], 'students only see recording indicator, not destination or control');
 foreach ([$teacher,$admin] as $operator) {
     $controls = cl_rec_status($s,$cfg,$live,$operator)['recording'];

@@ -18,7 +18,7 @@ import time
 from capture import CLIP, Capture, CaptureError, HEX, Renderer, check_clip, clips, lease_ms
 from transport import ProtocolError, School, send_video
 
-VERSION = '0.4.18'
+VERSION = '0.4.20'
 TTL = 26 * 3600  # Hard local maximum, even if PHP/DB remains unavailable.
 SPACE_LIMIT = 1800 * 1024 * 1024
 ROOT = Path(__file__).resolve().parent
@@ -220,7 +220,7 @@ class Runner:
                 if not isinstance(room, str) or not re.fullmatch(r'test-[a-f0-9]{20}-v[34]-c[1-9][0-9]{0,9}-[a-f0-9]{24}', room) or not isinstance(token, str):
                     raise ProtocolError()
                 self.capture = Capture(self.browser, self.renderer, self.school, room, job, self.room_dir(reply['expires']), self.ffmpeg)
-                if await self.capture.start(token, lease):
+                if await self.capture.start(token, lease, reply.get('title')):
                     self.connect_failures = 0
                 else:
                     await self.stop()

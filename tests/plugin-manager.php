@@ -535,6 +535,17 @@ try {
         && mpm_query($db,"SELECT payload FROM `$store` WHERE bucket='record-links' AND item=?",['1404/1405:22'])->fetchColumn() === $linkedGroup
         && mpm_query($db,"SELECT payload FROM `$store` WHERE bucket='recording' AND item=?",[$historicId])->fetchColumn() === $historicRecording,
         'the presenter fix does not replace existing settings, reports, group mappings, or recording history');
+    $archiveTitle = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.20.zip';
+    submit($db,$site,'enable');
+    denied(fn()=>mpm_install($db,$dir,$archiveTitle));
+    submit($db,$site,'disable');
+    expect(mpm_install($db,$dir,$archiveTitle), 'install the updated recorder protocol labels over the live-site version');
+    $row = mpm_row($db,$slug);
+    expect($row['version'] === '0.4.20' && $row['owner'] === $oldRow['owner'] && mpm_check_store($db,$row) === $store
+        && mpm_owned_row($db,$row)['settings'] === $recordingCipher && mpm_settings($db,$dir,$row) === $recordingSettings
+        && mpm_query($db,"SELECT payload FROM `$store` WHERE bucket='record-links' AND item=?",['1404/1405:22'])->fetchColumn() === $linkedGroup
+        && mpm_query($db,"SELECT payload FROM `$store` WHERE bucket='recording' AND item=?",[$historicId])->fetchColumn() === $historicRecording,
+        'archive titles require no reset of keys, settings, group assignments, or previous recordings');
     submit($db,$site,'enable');
     $_GET = ['view'=>'recordings','class'=>22];
     foreach ([['student_id'=>1],['admin_id'=>2],['admin_id'=>3]] as $unauthorized) {

@@ -22,7 +22,9 @@ CSP = ("default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'sel
 WIDTH, HEIGHT, FPS = 1280, 720, 12
 ASSETS = {'/': ('view.html', 'text/html'), '/view.css': ('view.css', 'text/css'),
           '/frame.js': ('frame.js', 'text/javascript'), '/view.js': ('view.js', 'text/javascript'),
-          '/board.js': ('board.js', 'text/javascript'), '/livekit-client.umd.js': ('livekit-client.umd.js', 'text/javascript')}
+          '/board.js': ('board.js', 'text/javascript'), '/livekit-client.umd.js': ('livekit-client.umd.js', 'text/javascript'),
+          '/fonts/Vazirmatn-Regular.woff2': ('fonts/Vazirmatn-Regular.woff2', 'font/woff2'),
+          '/fonts/Vazirmatn-Bold.woff2': ('fonts/Vazirmatn-Bold.woff2', 'font/woff2')}
 
 
 def lease_ms(until):
@@ -67,7 +69,7 @@ class Renderer:
         code, headers, raw = 404, {}, b''
         if req.method == 'GET' and not path.query and path.path in self.static:
             mime, raw = self.static[path.path]
-            code, headers = 200, {'content-type': mime + '; charset=utf-8'}
+            code, headers = 200, {'content-type': mime + '; charset=utf-8' if mime.startswith('text/') else mime}
             if path.path == '/':
                 headers['content-security-policy'] = CSP
         elif req.method == 'GET' and not path.query and (match := PDF_PATH.fullmatch(path.path)):
@@ -91,8 +93,8 @@ class Renderer:
 
     async def check(self, browser):
         async with view(browser, self) as page:
-            if not await page.evaluate('recorder.supported()'):
-                raise CaptureError('renderer codec unavailable')
+            if not await page.evaluate('recorder.ready()'):
+                raise CaptureError('renderer codec or bundled font unavailable')
 
 
 class view:
@@ -161,7 +163,7 @@ class Capture:
             self.fault = True
             raise CaptureError('encoder input failed') from None
 
-    async def start(self, token, lease):
+    async def start(self, token, lease, title=None):
         parts = sorted(p.name for p in self.directory.glob('clip-*') if CLIP.fullmatch(p.name))
         generation = int(parts[-1][5:8]) + 1 if parts else 0
         if len(parts) >= 32 or generation >= 32 or self.marker.exists():
@@ -172,8 +174,12 @@ class Capture:
                                                             stderr=asyncio.subprocess.DEVNULL)
         try:
             self.page = await self.view.__aenter__()
+            # Optional protocol-v1 metadata, bounded plain text. Older sites omit it.
+            names = {key: title[key][:limit] for key, limit in [('school', 150), ('subject', 100)]
+                     if isinstance(title, dict) and isinstance(title.get(key), str)}
             return await asyncio.wait_for(self.page.evaluate('config => recorder.start(config)',
-                {'url': SIGNAL, 'token': token, 'lesson': self.job, 'epoch': self.room[-24:], 'leaseMs': lease_ms(lease)}), 12)
+                {'url': SIGNAL, 'token': token, 'lesson': self.job, 'epoch': self.room[-24:],
+                 'leaseMs': lease_ms(lease), 'title': names}), 12)
         except Exception:
             raise CaptureError('renderer did not start') from None
 

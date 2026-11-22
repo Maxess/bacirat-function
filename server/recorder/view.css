@@ -1,6 +1,22 @@
-@font-face { font-family: ClassroomPDFPersian; src: local("Noto Sans Arabic"); font-weight: 400; }
-@font-face { font-family: ClassroomPDFPersian; src: local("Noto Sans Arabic Bold"); font-weight: 700; }
+/* Use the same bundled Vazirmatn bytes as the Baci classroom, not VPS system fonts. */
+@font-face { font-family: ArchiveVazir; src: url('/fonts/Vazirmatn-Regular.woff2') format('woff2'); font-weight: 400; }
+@font-face { font-family: ArchiveVazir; src: url('/fonts/Vazirmatn-Bold.woff2') format('woff2'); font-weight: 700; }
+/* Apply the fallback only to Arabic-script glyphs of PDF fonts that are not embedded. */
+@font-face {
+    font-family: ClassroomPDFPersian;
+    src: url('/fonts/Vazirmatn-Regular.woff2') format('woff2');
+    font-weight: 400;
+    unicode-range: U+0600-06FF, U+0750-077F, U+08A0-08FF, U+FB50-FDFF, U+FE70-FEFF;
+}
+@font-face {
+    font-family: ClassroomPDFPersian;
+    src: url('/fonts/Vazirmatn-Bold.woff2') format('woff2');
+    font-weight: 700;
+    unicode-range: U+0600-06FF, U+0750-077F, U+08A0-08FF, U+FB50-FDFF, U+FE70-FEFF;
+}
 html, body { margin: 0; background: #0b1527; overflow: hidden; }
 #film { display: block; width: 100%; height: auto; }
 #capture-board, #media-sinks { position: absolute; left: -5000px; top: 0; width: 1280px; }
-#board-scroll { width: 1280px; height: 720px; }
+/* Match the live .board-scroll: PDF.js places glyphs at physical x origins.
+   Inherited RTL makes Canvas 'start' align each glyph on its right edge instead. */
+#board-scroll { width: 1280px; height: 720px; direction: ltr; }

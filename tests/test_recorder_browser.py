@@ -13,14 +13,19 @@ import tempfile
 from threading import Thread
 import time
 import unittest
+from urllib.parse import urlsplit
 from unittest.mock import patch
 from zipfile import ZipFile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'server/recorder'))
 from capture import CSP, FPS, HEIGHT, WIDTH, Capture, Renderer, clips, encoder, view
+from recording import Runner
 
-ARTIFACT = ROOT / 'artifacts/baci-classroom-recorder-v0.4.18.zip'
+ARTIFACT = ROOT / 'artifacts/baci-classroom-recorder-v0.4.20.zip'
+PREVIOUS = ROOT / 'artifacts/baci-classroom-recorder-v0.4.18.zip'
+SCHOOL_SITE = ROOT / 'artifacts/school-classroom-plugin-v0.4.20.zip'
+CREDIT = 'طراحی و توسعه : س. مهدی بیات'
 # Stub signaling only. Use the pinned SDK attach/detach methods and real inbound RTP audio
 # so this test detects the old silent graph (local oscillators alone masked it).
 FAKE_ROOM = b'''
@@ -88,31 +93,70 @@ FAKE_ROOM = b'''
 '''
 
 
-def make_pdf():
+def make_pdf(persian=False):
     stream = b'1 0.9 0.2 rg 0 0 480 300 re f 0.05 0.85 0.75 rg 0 0 120 300 re f\n'
+    def obj_stream(data):
+        return b'<</Length ' + str(len(data)).encode() + b'>>\nstream\n' + data + b'endstream'
+    resources, fonts = b'', []
+    if persian:
+        # Visual-order presentation forms for «پژوهش» with Vazirmatn advances.
+        # No embedded font: desktop and the VPS must agree on the fallback before rasterizing.
+        stream = b'0 g BT /F 48 Tf 144 124 Td <00010002000300040005> Tj ET\n1 0 0.7 rg 470 288 10 12 re f\n'
+        resources = b'/Font <</F 5 0 R>>'
+        cmap = b'''/CIDInit /ProcSet findresource begin
+12 dict begin
+begincmap
+/CIDSystemInfo <</Registry (Adobe)/Ordering (UCS)/Supplement 0>> def
+/CMapName /PersianFixture def
+/CMapType 2 def
+1 begincodespacerange
+<0000> <FFFF>
+endcodespacerange
+5 beginbfchar
+<0001> <FEB6>
+<0002> <FEEB>
+<0003> <FEED>
+<0004> <FB8B>
+<0005> <FB58>
+endbfchar
+endcmap
+CMapName currentdict /CMap defineresource pop
+end
+end
+'''
+        fonts = [b'<</Type /Font /Subtype /Type0 /BaseFont /PersianFixtureMissing /Encoding /Identity-H /DescendantFonts [6 0 R] /ToUnicode 8 0 R>>',
+                 b'<</Type /Font /Subtype /CIDFontType2 /BaseFont /PersianFixtureMissing /FontDescriptor 7 0 R '
+                 b'/CIDSystemInfo <</Registry (Adobe)/Ordering (Identity)/Supplement 0>> /W [1 [1237 695 444 386 312]]>>',
+                 b'<</Type /FontDescriptor /FontName /PersianFixtureMissing /Flags 4 /FontBBox [0 -250 1800 1000] '
+                 b'/ItalicAngle 0 /Ascent 900 /Descent -200 /CapHeight 800 /StemV 100>>', obj_stream(cmap)]
     content = [b'<</Type /Catalog /Pages 2 0 R>>', b'<</Type /Pages /Count 1 /Kids [3 0 R]>>',
-               b'<</Type /Page /Parent 2 0 R /MediaBox [0 0 480 300] /Resources <<>> /Contents 4 0 R>>',
-               b'<</Length ' + str(len(stream)).encode() + b'>>\nstream\n' + stream + b'endstream']
+               b'<</Type /Page /Parent 2 0 R /MediaBox [0 0 480 300] /Resources <<' + resources + b'>> /Contents 4 0 R>>',
+               obj_stream(stream), *fonts]
     out = b'%PDF-1.4\n'
     offsets = []
     for i, obj in enumerate(content, 1):
         offsets.append(len(out))
         out += f'{i} 0 obj\n'.encode() + obj + b'\nendobj\n'
-    return (out + b'xref\n0 5\n0000000000 65535 f \n' + b''.join(f'{x:010d} 00000 n \n'.encode() for x in offsets)
-            + f'trailer\n<</Size 5 /Root 1 0 R>>\nstartxref\n{len(out)}\n%%EOF\n'.encode())
+    size = len(content) + 1
+    return (out + f'xref\n0 {size}\n0000000000 65535 f \n'.encode() + b''.join(f'{x:010d} 00000 n \n'.encode() for x in offsets)
+            + f'trailer\n<</Size {size} /Root 1 0 R>>\nstartxref\n{len(out)}\n%%EOF\n'.encode())
 
 
 class RecorderPackageTest(unittest.TestCase):
     def test_standalone_payload_matches_sources_and_keeps_protocol_assets(self):
-        original = ROOT / 'artifacts/baci-classroom-recorder-v0.4.17.zip'
-        with ZipFile(ARTIFACT) as new, ZipFile(original) as old:
-            self.assertEqual(set(new.namelist()), set(old.namelist()))
-            changed = {'frame.js','view.js','recording.py','README-fa.md','board.js'}
+        with ZipFile(ARTIFACT) as new, ZipFile(PREVIOUS) as old:
+            fonts = {f'fonts/{name}' for name in ('OFL.txt','README.md','Vazirmatn-Regular.woff2','Vazirmatn-Bold.woff2')}
+            self.assertEqual(set(new.namelist()), set(old.namelist()) | fonts)
+            changed = {'frame.js','view.js','view.css','capture.py','recording.py','README-fa.md'}
             for name in set(old.namelist()) - changed:
                 self.assertEqual(new.read(name), old.read(name))
-            for name in changed - {'board.js'}:
+            for name in changed | fonts:
                 self.assertEqual(new.read(name), (ROOT / 'server/recorder' / name).read_bytes())
             self.assertEqual(new.read('board.js'), (ROOT / 'school-addon/upload/online-classroom/assets/board.js').read_bytes())
+            if site := os.environ.get('MPM_TEST_BACI'):
+                for name in fonts:
+                    if name.endswith('.woff2'):
+                        self.assertEqual(new.read(name), (Path(site) / 'assets/fonts/screen' / Path(name).name).read_bytes())
 
 
 @unittest.skipUnless(os.environ.get('MPM_TEST_CHROMIUM') and os.environ.get('MPM_REC_FFMPEG'),
@@ -238,6 +282,140 @@ class CompositorTest(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(any(min(power(392,i),power(658,i))>180 for i in windows),
                             'both real WebRTC microphones must be audible in the same window of the emitted AAC/MP4')
             self.assertLess(max(power(976,i) for i in windows), 35, 'muted microphone must not leak into the MP4')
+
+    async def test_persian_pdf_raster_and_complete_header_are_preserved_in_mp4(self):
+        from playwright.async_api import async_playwright
+        ffmpeg = os.environ['MPM_REC_FFMPEG']
+        pdf, doc, job = make_pdf(persian=True), 'f'*32, '2'*32
+        room = f'test-{"a"*20}-v4-c42-{"d"*24}'
+        title = {'school': 'مدرسهٔ پژوهش Baci', 'subject': 'فیزیک ۲'}
+        state = {'rev': 1, 'cursor': 0, 'reset': True, 'page': 1, 'ops': [], 'write': False,
+                 'doc': {'id': doc, 'mime': 'application/pdf', 'name': 'پژوهش.pdf', 'bytes': len(pdf), 'pages': 1}}
+
+        class School:
+            def __call__(self, action, given, **data):
+                if action == 'poll':
+                    now = int(time.time())
+                    return {'command': 'record', 'id': job, 'room': room, 'token': 'local-fixture',
+                            'lease': now+8, 'expires': now+600, 'title': title}
+                assert action == 'board' and given == job and data['room'] == room
+                return {'board': state if not data['board'] else {'rev': 1, 'cursor': 0, 'write': False}}
+
+            def document(self, given, epoch, key, byte_range):
+                assert given == job and epoch == room and key == doc
+                return 200, {'content-type': 'application/pdf'}, pdf
+
+        async def raster(page):
+            await page.wait_for_function('''() => {
+                const p = document.getElementById('board-paper');
+                const [r,g,b] = p.getContext('2d').getImageData(p.width-2,2,1,1).data;
+                return r > 220 && g < 25 && b > 150; // last PDF op: magenta registration mark
+            }''', timeout=4500)
+            return await page.locator('#board-paper').evaluate('canvas => canvas.toDataURL()')
+
+        school, fonts = School(), []
+
+        class RecorderRenderer(Renderer):
+            async def route(self, route, capture=None):
+                path = urlsplit(route.request.url).path
+                if path.startswith('/fonts/'):
+                    fonts.append(path)
+                await super().route(route, capture)
+
+        with (tempfile.TemporaryDirectory() as tmp, ZipFile(ARTIFACT) as recorder, ZipFile(SCHOOL_SITE) as site):
+            work = Path(tmp)
+            recorder.extractall(work)
+            out = work / 'spool'
+            out.mkdir()
+            renderer, live = RecorderRenderer(work), Renderer(work)
+            renderer.static['/livekit-client.umd.js'] = ('text/javascript', recorder.read('livekit-client.umd.js') + FAKE_ROOM)
+            # Independent reference: the live plugin's own board code and CSS, running on the same PDF and browser.
+            live.static['/board.js'] = ('text/javascript', site.read('assets/board.js'))
+            live.static['/view.css'] = ('text/css', site.read('assets/classroom.css'))
+            live.static['/view.js'] = ('text/javascript', b'')
+            for weight in ('Regular','Bold'):
+                name = f'Vazirmatn-{weight}.woff2'
+                live.static[f'/assets/fonts/screen/{name}'] = ('font/woff2', recorder.read(f'fonts/{name}'))
+            async with async_playwright() as playwright:
+                browser = await playwright.chromium.launch(executable_path=os.environ['MPM_TEST_CHROMIUM'],
+                    args=['--autoplay-policy=no-user-gesture-required'], headless=True, chromium_sandbox=True)
+                runner = Runner(school, out, browser, renderer, ffmpeg)
+                try:
+                    live_board = Capture(browser, live, school, room, job, out, ffmpeg)
+                    async with live_board.view as page:
+                        await page.evaluate('''({state, scope}) => {
+                            // The room template uses .board-scroll (its physical direction is LTR even in an RTL page).
+                            document.getElementById('board-scroll').classList.add('board-scroll');
+                            ClassroomBoard(document.getElementById('capture-board'), {
+                                rasterOnly:true, canEdit:()=>false, notice:()=>{}
+                            }).sync(state,scope);
+                        }''', {'state': state, 'scope': {'lesson': job, 'epoch': room[-24:]}})
+                        expected = await raster(page)
+                    await renderer.check(browser)
+                    fonts.clear()
+                    await runner.tick()
+                    p = runner.capture.page
+                    self.assertTrue((await raster(p)) == expected, 'archive PDF pixels differ from the live board raster')
+                    self.assertEqual(set(fonts), {f'/fonts/Vazirmatn-{weight}.woff2' for weight in ('Regular','Bold')})
+                    art = await p.evaluate('''title => {
+                        const probe = document.createElement('canvas');
+                        const film = document.getElementById('film');
+                        probe.width = film.width; probe.height = film.height;
+                        const ctx = probe.getContext('2d',{alpha:false}), draw = ArchiveFrame(probe), rows = [];
+                        const fill = ctx.fillText.bind(ctx);
+                        ctx.fillText = (text,x,y) => {
+                            if (y === 29) {
+                                const m = ctx.measureText(text);
+                                rows.push({text, rtl:ctx.direction === 'rtl', l:Math.floor(x-m.actualBoundingBoxLeft), r:Math.ceil(x+m.actualBoundingBoxRight)});
+                            }
+                            fill(text,x,y);
+                        };
+                        function layout(heading) {
+                            rows.length = 0;
+                            draw({heading,cameras:[]});
+                            return [...rows];
+                        }
+                        const long = layout({school:'مدرسه 12 مدرسهٔ پژوهش '.repeat(7),subject:'Advanced فیزیک ۲ '.repeat(7)});
+                        const missing = layout({});
+                        const normal = layout(title);
+                        const samples = normal.map(({l,r}) => [l,10,r-l+1,39]);
+                        const red = (from,rect) => [...from.getImageData(...rect).data.filter((_,i)=>i%4===0)];
+                        return {layouts:[normal,long,missing], probes:samples.map(rect=>[rect,red(ctx,rect)])};
+                    }''', title)
+                    normal, long, missing = art['layouts']
+                    self.assertEqual([r['text'] for r in normal], [CREDIT, title['school'], 'کلاس مجازی', title['subject']])
+                    self.assertEqual([r['text'] for r in missing], [CREDIT, 'کلاس مجازی'])
+                    self.assertEqual([long[0]['text'], long[2]['text']], [CREDIT, 'کلاس مجازی'])
+                    self.assertTrue(all(long[i]['text'].endswith('…') for i in (1,3)))
+                    for labels in art['layouts']:
+                        self.assertTrue(all(r['rtl'] and 24 <= r['l'] < r['r'] <= WIDTH-58 for r in labels))
+                        order = [labels[0], *reversed(labels[1:])]
+                        self.assertTrue(all(a['r'] < b['l'] for a,b in zip(order,order[1:])), 'RTL titles must not overlap or reorder')
+                    # Allow several stable board frames to reach the encoder before finalizing.
+                    await asyncio.sleep(1)
+                    region = [465,270,405,135]
+                    board_pixels = await p.locator('#film').evaluate('''(c, rect) => [...c.getContext('2d')
+                        .getImageData(...rect).data.filter((_,i)=>i%4===0)]''', region)
+                    await runner.stop()
+                finally:
+                    await runner.stop(False)
+                    await browser.close()
+            [mp4] = clips(out / job)
+            image = subprocess.check_output([ffmpeg, '-v', 'error', '-sseof', '-0.4', '-i', str(mp4), '-an',
+                '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-threads', '1', '-'], timeout=10)
+            self.assertEqual(len(image), WIDTH*HEIGHT*3)
+
+            def compare_mask(rect, reference, dark=False):
+                x,y,w,h = rect
+                found = [image[(row*WIDTH+col)*3] for row in range(y,y+h) for col in range(x,x+w)]
+                glyph = (lambda v: v<120) if dark else (lambda v: v>145)
+                want, got = ({i for i,v in enumerate(values) if glyph(v)} for values in (reference,found))
+                self.assertGreater(len(want), 60, 'expected visible glyphs in this region')
+                self.assertGreater(len(want & got) / len(want | got), .83, 'decoded MP4 lost or misplaced text pixels')
+
+            for rect, reference in art['probes']:
+                compare_mask(rect, reference)
+            compare_mask(region, board_pixels, dark=True)
 
     async def test_gallery_keeps_all_60_camera_tiles_inside_its_band(self):
         from playwright.async_api import async_playwright

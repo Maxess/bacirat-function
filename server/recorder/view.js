@@ -8,6 +8,16 @@
         rasterOnly: true, canEdit: () => false, identity: () => null, authorName: () => '', notice: () => {},
     });
     const tracks = new Map(), cameras = new Map();
+    const supported = () => MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus') && !!canvas.captureStream && !!lk && !!window.AudioContext;
+    let fonts;
+    function loadFonts() {
+        // Canvas pixels are final: do not start painting while a fallback font is pending.
+        return fonts ??= Promise.all(['ArchiveVazir','ClassroomPDFPersian'].flatMap(family => [400,700].map(async weight => {
+            const loaded = await document.fonts.load(`${weight} 16px ${family}`, 'گچ‌پژکی');
+            if (!loaded.some(face => face.family === family && face.status === 'loaded')) throw new Error('bundled Persian font unavailable');
+        })));
+    }
+    let heading;
     let room, audio, mix, stream, recorder, frameTimer, boardTimer, stopping, ended, roomScope, leaseUntil = 0;
     let running = false, failure = false, pending = 0, writes = Promise.resolve(), doc = null;
 
@@ -74,7 +84,7 @@
         const gallery = Array.from(cameras, ([id,item]) => ({role:id.split('-',1)[0],video:videoOf(item)}));
         const rank = {teacher:0,admin:1,student:2};
         gallery.sort((a,b) => rank[a.role] - rank[b.role]);
-        frame({paper,ink,doc,view:board.framing(),hasInk:board.position().ink > 0,cameras:gallery,screen});
+        frame({paper,ink,doc,view:board.framing(),hasInk:board.position().ink > 0,cameras:gallery,screen,heading});
     }
     async function updateBoard() {
         let delay = 850;
@@ -118,12 +128,18 @@
     function fault() { failure = true; queueMicrotask(() => finish().catch(() => {})); }
 
     window.recorder = {
-        supported: () => MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus') && !!canvas.captureStream && !!lk && !!window.AudioContext,
-        async start({url,token,lesson,epoch,leaseMs}) {
+        supported,
+        async ready() {
+            if (!supported()) return false;
+            await loadFonts();
+            return true;
+        },
+        async start({url,token,lesson,epoch,leaseMs,title}) {
             leaseUntil = performance.now() + leaseMs;
+            heading = title;
             // Render Web Audio without relying on a sound device on the VPS.
             audio = new AudioContext({sampleRate:48000,sinkId:{type:'none'}});
-            await Promise.all([audio.resume(), Promise.allSettled([400,700].map(weight => document.fonts.load(`${weight} 16px ClassroomPDFPersian`, 'کلاس مجازی')))]);
+            await Promise.all([audio.resume(), loadFonts()]);
             if (audio.state !== 'running') throw new Error('recording audio context unavailable');
             const bus = audio.createMediaStreamDestination(); bus.channelCount = 1;
             mix = audio.createDynamicsCompressor();
