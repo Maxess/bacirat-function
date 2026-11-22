@@ -492,13 +492,15 @@
             clearTrail(localLaser); clearTrail(remoteLaser);
         }
         function showRemoteLaser(aim, requestedAt) {
-            if (!aim?.points?.length || aim.by === options.identity() || document.hidden) { clearTrail(remoteLaser); return; }
+            if (!aim?.points?.length || (!options.rasterOnly && (aim.by === options.identity() || document.hidden))) {
+                clearTrail(remoteLaser); return;
+            }
             const now = performance.now();
             // Conservatively spend the read's round-trip time from the cue, so delayed replies never replay it.
             remoteLaser.samples = aim.points.filter(([, , left]) => requestedAt+left > now)
                 .map(([x,y,left]) => [x,y,requestedAt+left]);
-            if (remoteLaser.samples.length) animateLaser();
-            else clearTrail(remoteLaser);
+            if (!remoteLaser.samples.length) clearTrail(remoteLaser);
+            else if (!options.rasterOnly) animateLaser(); // The archive paints and fades its own clipped canvas overlay.
         }
         function pointerEnd() {
             pointer = null; pointerType = ''; stroke = null; candidate = null;
@@ -1109,6 +1111,6 @@
             });
         }
         toolState();
-        return {position:() => ({board:data?.rev || 0,ink:cursor}),framing:() => framing,takeView,takeAim,sync,reset};
+        return {position:() => ({board:data?.rev || 0,ink:cursor}),framing:() => framing,laser:() => remoteLaser.samples,takeView,takeAim,sync,reset};
     };
 })();

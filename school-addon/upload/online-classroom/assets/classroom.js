@@ -41,11 +41,12 @@
     const permissionIcons = el('permission-icons')?.content;
     const cameraSource = lk?.Track.Source.Camera, micSource = lk?.Track.Source.Microphone, screenSource = lk?.Track.Source.ScreenShare;
     const profileKey = p => p && `${p.width}×${p.height}/${p.frameRate}/${p.bitrate}`;
-    const screenToggle = el('screen-toggle'), screenAction = el('screen-action');
+    const screenToggle = el('screen-toggle'), screenAction = el('screen-action'), screenVideo = el('screen-video');
     const screenHint = el('screen-hint'), boardScreenHint = el('board-screen-hint');
     const qualityButton = el('quality-open'), qualityDialog = el('quality-dialog');
     const recordButton = el('record-start'), recordStart = el('record-start-dialog'), recordClose = el('record-close-dialog');
     const recordStatus = el('recording-status');
+    const recordBoard = el('record-board-display'), recordScreen = el('record-screen-display');
     let closeIntent = null;
     const qualityFields = ['teacherCamera','studentCamera','teacherScreen','studentScreen'];
     const canCaptureCamera = typeof window.navigator?.mediaDevices?.getUserMedia === 'function';
@@ -53,7 +54,7 @@
     const screenBlocked = displayPolicy?.features?.().includes('display-capture') && displayPolicy.allowsFeature?.('display-capture') === false
         ? 'اجازهٔ مرورگر برای اشتراک صفحه در این برگه بسته است؛ کلاس را دوباره باز کن.'
         : typeof window.navigator?.mediaDevices?.getDisplayMedia !== 'function'
-            ? 'این مرورگر امکان اشتراک صفحه ندارد؛ کلاس را با مرورگر سازگار روی رایانه باز کن.' : '';
+            ? 'این مرورگر امکان اشتراک صفحه ندارد. این محدودیت از مرورگر است، نه اجازهٔ کلاس؛ برای اشتراک از یک مرورگر سازگار روی رایانه وارد شو.' : '';
     const canCaptureScreen = !screenBlocked;
     const attention = window.ClassroomAttention(changeWake);
     let active = null, connecting = false, busy = false, polling = false, needsRefresh = false, permanent = false, stopped = false;
@@ -64,7 +65,7 @@
     const cameraTiles = new Map();
     const cameraPreview = el('camera-preview'), previewVideo = el('camera-preview-video');
     let previewTile = null;
-    let shownScreen = null;
+    let shownScreen = null, shownPublication = null;
     let toastTimer, lastNotice = '', lastNoticeAt = -Infinity;
 
     function note(text = '') {
@@ -437,32 +438,63 @@
             }
         } finally { refresh(); }
     }
+    function playableScreen() {
+        return shownPublication && screenVideo.readyState >= 2 && screenVideo.videoWidth > 0 ? shownPublication : null;
+    }
+    function renderArchiveControls() {
+        const publication = playableScreen();
+        const prefs = state.recording?.archive;
+        const allowed = hasAccess() && state.board?.navigate === true && !!prefs;
+        for (const [button,selected,visible] of [[recordBoard,prefs?.board === true,allowed],
+            [recordScreen,!!publication && prefs?.screen === publication.track,allowed && !!publication]]) {
+            if (!button) continue;
+            button.hidden = !visible;
+            button.disabled = !visible || busy;
+            button.setAttribute('aria-pressed',String(selected && visible));
+        }
+    }
+    function setArchiveSource(source) {
+        return run(async () => {
+            const prefs = state.recording?.archive;
+            const publication = source === 'screen' ? playableScreen() : null;
+            if (!hasAccess() || !prefs || state.board?.navigate !== true || (source === 'screen' && !publication)) return;
+            const link = active, local = scope(link), recording = state.recording.id;
+            const enabled = source === 'board' ? !prefs.board : prefs.screen !== publication.track;
+            try {
+                const reply = await api('record-source',{...local,source,enabled,...publication});
+                if (link !== active || !hasAccess() || scope().sid !== local.sid || state.recording?.id !== recording) return;
+                flow++;
+                state = {...state,recording:{...state.recording,archive:reply.archive}};
+            } finally { refresh(); }
+        });
+    }
     function renderScreen() {
         const live = hasAccess();
         const selected = state.screen;
         const local = active?.room.localParticipant;
         const mine = live && itsScreen(active);
         if (active?.screenProfile && (!mine || !state.screenEnabled || !mayScreen(local))) stopScreen(active);
-        let person, display = null;
+        let person, pub, display = null;
         if (live && selected && !document.hidden) {
             person = mine ? local : active.room.remoteParticipants.get(selected.identity);
-            const pub = person?.getTrackPublication(screenSource);
+            pub = person?.getTrackPublication(screenSource);
             if (person?.sid === selected.sid && mayScreen(person) && pub?.track?.kind === lk.Track.Kind.Video && !pub.isMuted
                 && (mine ? pub.track === active.screenTrack : pub.isDesired && canReceiveVideo(person, pub))) display = pub.track;
         }
-        const video = el('screen-video');
         if (shownScreen !== display) {
-            shownScreen?.detach(video);
-            display?.attach(video);
+            shownScreen?.detach(screenVideo);
+            display?.attach(screenVideo);
             shownScreen = display;
         }
         el('screen-panel').hidden = !display;
         if (display) put(el('screen-label'), `اشتراک صفحهٔ ${personName(person)}`);
+        shownPublication = display && /^TR_[A-Za-z0-9_-]+$/.test(pub.trackSid ?? '') ? {track:pub.trackSid,publisherSid:selected.sid} : null;
+        renderArchiveControls();
         if (!screenToggle) return false;
         const button = screenToggle;
         // The invitation is visible independently of picker support and the SFU update's arrival order.
         const configured = live && state.screenEnabled === true;
-        const show = configured && (staff ? canCaptureScreen && !!state.quality?.screen : mine);
+        const show = configured && (staff ? !!state.quality?.screen : mine);
         const sharing = !!(mine && active.screenTrack);
         const pending = !!mine && (!state.quality?.screen || !mayScreen(local));
         button.hidden = !show;
@@ -473,12 +505,17 @@
         button.setAttribute('aria-pressed',String(sharing));
         button.dataset.prepared = String(!!mine && !sharing);
         if (screenAction) put(screenAction, sharing ? 'توقف اشتراک' : 'اشتراک صفحه');
-        if (screenHint && boardScreenHint) {
-            const reason = screenBlocked || (pending ? 'در حال همگام‌سازی اجازهٔ اشتراک صفحه…' : '');
-            const invited = show && !sharing;
-            put(screenHint, invited ? reason || 'دبیر اجازه داد؛ برای شروع، «اشتراک صفحه» را بزن.' : '');
-            put(boardScreenHint, invited ? reason || 'دبیر اجازهٔ اشتراک صفحه داد. برای شروع به نمای کلاس برگرد.' : '');
-            screenHint.hidden = boardScreenHint.hidden = !invited;
+        const invited = show && !sharing;
+        const reason = screenBlocked || (pending ? 'در حال همگام‌سازی اجازهٔ اشتراک صفحه…' : '');
+        if (screenHint) {
+            const hint = invited ? (staff ? screenBlocked : reason || 'دبیر اجازه داد؛ برای شروع، «اشتراک صفحه» را بزن.') : '';
+            put(screenHint,hint);
+            screenHint.hidden = !hint;
+        }
+        if (boardScreenHint) {
+            const hint = invited ? (staff ? screenBlocked : reason || 'دبیر اجازهٔ اشتراک صفحه داد. برای شروع به نمای کلاس برگرد.') : '';
+            put(boardScreenHint,hint);
+            boardScreenHint.hidden = !hint;
         }
         return show;
     }
@@ -821,6 +858,7 @@
         state.board = view;
         board.sync(view, local, requestedAt);
         if (presenterChanged) {
+            renderArchiveControls();
             renderAccessMenu(hasAccess());
             renderPeople();
         }
@@ -1122,6 +1160,10 @@
             if (link === active) render();
         }
     });
+    screenVideo?.addEventListener('loadeddata', renderArchiveControls);
+    screenVideo?.addEventListener('emptied', renderArchiveControls);
+    recordBoard?.addEventListener('click', () => setArchiveSource('board'));
+    recordScreen?.addEventListener('click', () => setArchiveSource('screen'));
     screenToggle?.addEventListener('click', async () => {
         const link = active, shareVideo = state.quality?.screen;
         if (!hasAccess() || !state.screenEnabled || !shareVideo || !canCaptureScreen || link.screenBusy || busy) return;

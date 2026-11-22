@@ -208,7 +208,56 @@ function cl_rec_start(ClassroomStore $s, array $cfg, array $class, array $lesson
     return cl_rec_status($s, $cfg, $s->get('lesson', $lesson['id']), $actor);
 }
 
-function cl_rec_status(ClassroomStore $s, array $cfg, array $lesson, array $actor): array
+function cl_rec_source_prefs(array $job, array $lesson): array
+{
+    $epoch = cl_epoch($lesson);
+    return isset($job['source_prefs']['epoch']) && $job['source_prefs']['epoch'] === $epoch
+        ? $job['source_prefs'] : ['epoch'=>$epoch];
+}
+
+function cl_rec_layout(array $cfg, array $job, array $lesson, bool $worker = false): array
+{
+    $prefs = cl_rec_source_prefs($job, $lesson);
+    $owner = cl_screen_state($cfg, $lesson);
+    $screen = $prefs['screen'] ?? null;
+    return ['board'=>($prefs['board'] ?? false) === true, 'screen'=>$screen && $screen['owner'] === $owner ? $screen['track'] : null]
+        + ($worker ? ['screenOwner'=>$owner] : []);
+}
+
+// Called only with a confirmed participant, a checked transport and the class lock held.
+function cl_rec_set_source(ClassroomStore $s, array $cfg, array $lesson, array $actor, array $body, int $now): array
+{
+    cl_require_board_control($lesson, $actor, $body, $now);
+    $job = isset($lesson['recorder']) ? $s->get('recording', $lesson['id']) : null;
+    if (!cl_rec_enabled($cfg) || cl_is_friday_test($lesson) || ($job['state'] ?? null) !== 'recording'
+        || ($job['layout_capable'] ?? false) !== true) {
+        throw new ClassroomError(409, 'کنترل نمای فیلم فقط در ضبط فعال و با نسخهٔ سازگار در دسترس است.');
+    }
+    $source = $body['source'] ?? null;
+    $enabled = $body['enabled'] ?? null;
+    if (!in_array($source, ['board','screen'], true) || !is_bool($enabled)) {
+        throw new ClassroomError(400, 'منبع یا وضعیت نمایش در ضبط معتبر نیست.');
+    }
+    $prefs = cl_rec_source_prefs($job, $lesson);
+    if ($source === 'board') $prefs['board'] = $enabled;
+    else {
+        $owner = cl_screen_state($cfg, $lesson);
+        $track = $body['track'] ?? null;
+        if (!$owner || $owner['sid'] !== ($body['publisherSid'] ?? null) || !cl_sid($track) || !str_starts_with($track, 'TR_')) {
+            throw new ClassroomError(409, 'صفحهٔ اشتراکی عوض شده است؛ نمای کلاس را دوباره بررسی کن.');
+        }
+        // A new publication (even by the same account) must not inherit a prior click.
+        // The recorder compares this SID to its actual subscribed LiveKit screen track.
+        $choice = ['owner'=>$owner,'track'=>$track];
+        if ($enabled) $prefs['screen'] = $choice;
+        elseif (($prefs['screen'] ?? null) === $choice) unset($prefs['screen']);
+    }
+    $job['source_prefs'] = $prefs;
+    $s->put('recording', $job['id'], $job);
+    return ['archive'=>cl_rec_layout($cfg, $job, $lesson)];
+}
+
+function cl_rec_status(ClassroomStore $s, array $cfg, array $lesson, array $actor, bool $archiveControl = false): array
 {
     $job = isset($lesson['recorder']) ? $s->get('recording', $lesson['id']) : null;
     $on = ($job['state'] ?? null) === 'recording' && $lesson['phase'] !== 'closing';
@@ -217,6 +266,9 @@ function cl_rec_status(ClassroomStore $s, array $cfg, array $lesson, array $acto
     $out = $on ? ['notice'=>($job['live'] ?? false) && $lesson['phase'] === 'live' ? 'live' : 'preparing'] : [];
     if ($staff && $job) $out += ['id'=>$job['id'],'confirm'=>$on,'state'=>$job['state'], 'canSend'=>$operator,
         'group'=>$job['target']['title'],'messenger'=>CL_REC_PROVIDERS[$job['target']['provider']]];
+    if ($archiveControl && $on && cl_rec_enabled($cfg) && !cl_is_friday_test($lesson) && ($job['layout_capable'] ?? false) === true) {
+        $out['archive'] = cl_rec_layout($cfg, $job, $lesson);
+    }
     if ($staff && ($job['state'] ?? null) === 'discarded' && ($job['reason'] ?? '') !== '') $out['notice'] = 'stopped';
     if (!$job && $operator && !cl_is_friday_test($lesson) && cl_rec_enabled($cfg)) $out['start'] = true;
     return ['recording'=>$out ?: null];
@@ -329,6 +381,8 @@ function cl_rec_worker(ClassroomStore $s, array $cfg, array $input, int $now, ca
             if ($action === 'board') {
                 $view = cl_board_view($s, $id, null, $input, $state, $lesson);
                 foreach ($view['ops'] ?? [] as $i=>$op) unset($view['ops'][$i]['author']);
+                if (($job['layout_capable'] ?? false) === true) return ['board'=>$view,'archive'=>cl_rec_layout($cfg, $job, $lesson, true)];
+                unset($view['laser']); // Old workers did not composite this layer.
                 return ['board'=>$view];
             }
             $doc = $input['doc'] ?? null;
@@ -348,11 +402,20 @@ function cl_rec_worker(ClassroomStore $s, array $cfg, array $input, int $now, ca
                 $job['state'] = 'discarded';
             } elseif (cl_rec_capture_room($cfg, $job, $lesson, $now)) {
                 $running = ($input['running'] ?? null) === $lesson['room'];
-                if ($running !== $job['live']) $s->put('recording', $id, array_replace($job, ['live'=>$running]));
+                $layout = ($input['archiveLayout'] ?? false) === true;
+                if ($running !== $job['live'] || $layout !== ($job['layout_capable'] ?? false)) {
+                    $job = array_replace($job, ['live'=>$running, 'layout_capable'=>$layout]);
+                    $s->put('recording', $id, $job);
+                }
                 $cmd = ['command'=>'record','id'=>$id,'room'=>$lesson['room'],'expires'=>$job['expires'],
                     'lease'=>min($now + 8, $lesson['deadline'])];
                 if (!$running) {
                     $cmd['title'] = $job['title'] ?? cl_rec_title($s, $lesson);
+                    if ($layout) {
+                        $teacher = $job['teacher'] ?? $lesson['teacher'] ?? 0;
+                        $cmd['teacher'] = $teacher > 0 ? 'teacher-' . $teacher : null;
+                        $cmd['archive'] = cl_rec_layout($cfg, $job, $lesson, true);
+                    }
                     $cmd['token'] = cl_jwt($cfg, ['roomJoin'=>true, 'room'=>$lesson['room'], 'canSubscribe'=>true,
                         'canPublish'=>false,'canPublishData'=>false,'canUpdateOwnMetadata'=>false,'hidden'=>true,'recorder'=>true],
                         25, ['identity'=>'recorder-' . $id, 'name'=>'Recorder'], $now);

@@ -92,7 +92,7 @@ function cl_view_input(mixed $value): array
     return ['zoom'=>$zoom, 'crop'=>$crop];
 }
 
-// A null actor is the read-only recorder, with neither editing nor presenter cues.
+// A null actor is the read-only recorder. It gets normalized laser points, never their author or SID.
 function cl_board_view(ClassroomStore $s, string $id, ?array $actor, array $input, array $state, ?array $lesson = null, ?int $at = null): array
 {
     $layer = cl_layer($s, $id, $state);
@@ -131,7 +131,7 @@ function cl_board_view(ClassroomStore $s, string $id, ?array $actor, array $inpu
     }
     $laser = $state['laser'] ?? null;
     $aim = null;
-    if ($actor && $lesson && isset($laser['points']) && $laser['rev'] === $state['rev'] && $laser['epoch'] === cl_epoch($lesson)
+    if ($lesson && isset($laser['points']) && $laser['rev'] === $state['rev'] && $laser['epoch'] === cl_epoch($lesson)
         && ($lesson['staff'][$laser['by']] ?? null) === $laser['sid']) {
         $remaining = CL_LASER_TTL_MS - max(0, (int)(1000 * ($now - $laser['at'])));
         if ($remaining > 0) {
@@ -139,7 +139,7 @@ function cl_board_view(ClassroomStore $s, string $id, ?array $actor, array $inpu
             foreach ($laser['points'] as [$x, $y, $age]) {
                 if ($age < $remaining) $points[] = [$x, $y, $remaining - $age];
             }
-            if ($points) $aim = ['by'=>$laser['by'], 'points'=>$points];
+            if ($points) $aim = ['points'=>$points] + ($actor ? ['by'=>$laser['by']] : []);
         }
     }
     $moving = ($layer['changed_at'] ?? 0) > $now - 1.6;

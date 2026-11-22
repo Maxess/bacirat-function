@@ -18,7 +18,7 @@ import time
 from capture import CLIP, Capture, CaptureError, HEX, Renderer, check_clip, clips, lease_ms
 from transport import ProtocolError, School, send_video
 
-VERSION = '0.4.20'
+VERSION = '0.4.21'
 TTL = 26 * 3600  # Hard local maximum, even if PHP/DB remains unavailable.
 SPACE_LIMIT = 1800 * 1024 * 1024
 ROOT = Path(__file__).resolve().parent
@@ -183,7 +183,7 @@ class Runner:
             await self.receipt(path / 'receipt.json')
         available = shutil.disk_usage(self.root).free >= 256 * 1024 * 1024 and (
             sum(p.stat().st_size for d in self.dirs() for p in d.glob('clip-*.mp4')) < SPACE_LIMIT)
-        reply = await self.rpc('poll', running=running, available=available)
+        reply = await self.rpc('poll', running=running, available=available, archiveLayout=True)
         op, job = reply.get('command'), reply.get('id')
         if op == 'idle' and not self.job:
             return 4
@@ -220,7 +220,7 @@ class Runner:
                 if not isinstance(room, str) or not re.fullmatch(r'test-[a-f0-9]{20}-v[34]-c[1-9][0-9]{0,9}-[a-f0-9]{24}', room) or not isinstance(token, str):
                     raise ProtocolError()
                 self.capture = Capture(self.browser, self.renderer, self.school, room, job, self.room_dir(reply['expires']), self.ffmpeg)
-                if await self.capture.start(token, lease, reply.get('title')):
+                if await self.capture.start(token, lease, reply.get('title'), reply.get('teacher'), reply.get('archive')):
                     self.connect_failures = 0
                 else:
                     await self.stop()

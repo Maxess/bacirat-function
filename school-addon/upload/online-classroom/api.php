@@ -72,7 +72,7 @@ cl_json_reply(static function (): array {
                 'startTime'=>isset($lesson['started']) ? cl_tehran_clock($lesson['started']) : null,
                 'joinable'=>$ready && !$expired && cl_joinable($lesson, $actor, $now),
                 'resumable'=>$ready && !$expired && $lesson['phase'] === 'paused' && $lesson['room'] === null];
-            $result += cl_rec_status($s, $cfg, $lesson, $actor);
+            $result += cl_rec_status($s, $cfg, $lesson, $actor, $allowed && cl_controls_board($lesson, $actor, $now));
             if ($allowed) {
                 $result += ['cameraCodec'=>cl_webcam_codec($cfg, $lesson), 'screen'=>cl_screen_state($cfg, $lesson),
                     'wakeMode'=>cl_wake_mode($lesson), 'wakeControl'=>cl_wake_control($lesson, $actor)]
@@ -128,6 +128,7 @@ cl_json_reply(static function (): array {
         if ($action === 'screen-access') return cl_set_screen($s, $cfg, $lesson, $actor, $body, $now, $rpc);
         if (!cl_is_staff($actor)) throw new ClassroomError(403, 'این عملیات فقط برای دبیر یا مسئول مجاز است.');
         if ($action === 'start-recording') return cl_rec_start($s, $cfg, $class, $lesson, $actor, $now);
+        if ($action === 'record-source') return cl_rec_set_source($s, $cfg, $lesson, $actor, $body, $now);
         if ($action === 'set-wake') return cl_set_wake($s, $lesson, $actor, $body);
         if ($action === 'set-quality') return cl_set_quality($s, $cfg, $class, $lesson, $actor, $body, $now);
         if ($action === 'set-access') return cl_set_access($s, $cfg, $lesson, $actor, $body, $now, $rpc);

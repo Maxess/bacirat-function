@@ -163,7 +163,7 @@ class Capture:
             self.fault = True
             raise CaptureError('encoder input failed') from None
 
-    async def start(self, token, lease, title=None):
+    async def start(self, token, lease, title=None, teacher=None, archive=None):
         parts = sorted(p.name for p in self.directory.glob('clip-*') if CLIP.fullmatch(p.name))
         generation = int(parts[-1][5:8]) + 1 if parts else 0
         if len(parts) >= 32 or generation >= 32 or self.marker.exists():
@@ -177,9 +177,10 @@ class Capture:
             # Optional protocol-v1 metadata, bounded plain text. Older sites omit it.
             names = {key: title[key][:limit] for key, limit in [('school', 150), ('subject', 100)]
                      if isinstance(title, dict) and isinstance(title.get(key), str)}
+            teacher = teacher if isinstance(teacher, str) and re.fullmatch(r'teacher-[1-9][0-9]{0,17}', teacher) else None
             return await asyncio.wait_for(self.page.evaluate('config => recorder.start(config)',
                 {'url': SIGNAL, 'token': token, 'lesson': self.job, 'epoch': self.room[-24:],
-                 'leaseMs': lease_ms(lease), 'title': names}), 12)
+                 'leaseMs': lease_ms(lease), 'title': names, 'teacher': teacher, 'archive': archive}), 12)
         except Exception:
             raise CaptureError('renderer did not start') from None
 

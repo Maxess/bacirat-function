@@ -22,9 +22,9 @@ sys.path.insert(0, str(ROOT / 'server/recorder'))
 from capture import CSP, FPS, HEIGHT, WIDTH, Capture, Renderer, clips, encoder, view
 from recording import Runner
 
-ARTIFACT = ROOT / 'artifacts/baci-classroom-recorder-v0.4.20.zip'
-PREVIOUS = ROOT / 'artifacts/baci-classroom-recorder-v0.4.18.zip'
-SCHOOL_SITE = ROOT / 'artifacts/school-classroom-plugin-v0.4.20.zip'
+ARTIFACT = ROOT / 'artifacts/baci-classroom-recorder-v0.4.21.zip'
+PREVIOUS = ROOT / 'artifacts/baci-classroom-recorder-v0.4.20.zip'
+SCHOOL_SITE = ROOT / 'artifacts/school-classroom-plugin-v0.4.21.zip'
 CREDIT = 'طراحی و توسعه : س. مهدی بیات'
 # Stub signaling only. Use the pinned SDK attach/detach methods and real inbound RTP audio
 # so this test detects the old silent graph (local oscillators alone masked it).
@@ -32,7 +32,7 @@ FAKE_ROOM = b'''
 (() => {
     const lk = window.LivekitClient, {RoomEvent:E,Track:{Source:S}} = lk;
     window.LivekitClient = {...lk,Room:class {
-        constructor() { this.events=new Map(); this.stop=[]; this.videos=new Map(); }
+        constructor() { this.events=new Map(); this.stop=[]; this.videos=new Map(); this.trackCount=0; }
         on(event,fn) { this.events.set(event,fn); return this; }
         async connect() {
             this.state='connected';
@@ -40,25 +40,29 @@ FAKE_ROOM = b'''
             this.video('student-1',S.Camera,'#19d822');
             window.fixture = {
                 audio:() => this.mics(),
-                screen:on => on ? this.video('student-1',S.ScreenShare,'#164cfa') : this.unpublish('student-1',S.ScreenShare),
+                screen:(on,id='student-1',sid=`PA_${id}`) => on ? this.video(id,S.ScreenShare,'#164cfa',sid) : this.unpublish(id,S.ScreenShare),
                 camera:on => on ? this.video('teacher-1',S.Camera,'#ef301c') : this.unpublish('teacher-1',S.Camera),
+                mute:(id,source,muted) => { const {pub,info} = this.videos.get(id+source); pub.updateInfo({...info,muted}); },
             };
         }
-        video(identity,source,color) {
+        video(identity,source,color,sid=`PA_${identity}`) {
             const c=document.createElement('canvas'); c.width=320; c.height=180;
             const ctx=c.getContext('2d'), paint=()=>{ctx.fillStyle=color;ctx.fillRect(0,0,320,180);};
             paint(); const media=c.captureStream(12); paint();
-            const timer=setInterval(paint,80), trackSid=identity+source;
+            const timer=setInterval(paint,80), trackSid=`TR_${++this.trackCount}`;
             const stop=()=>{clearInterval(timer);media.getVideoTracks()[0].stop();};
             this.stop.push(stop);
             const track=new lk.RemoteVideoTrack(media.getVideoTracks()[0],trackSid,undefined);
-            const pub={trackSid,source,isMuted:false};
-            this.videos.set(trackSid,{track,pub,stop});
-            this.events.get(E.TrackSubscribed)(track,pub,{identity});
+            const info={sid:trackSid,source:source===S.Camera?1:3,name:'',muted:false,width:320,height:180};
+            const pub=new lk.RemoteTrackPublication(lk.Track.Kind.Video,info,true);
+            pub.setTrack(track);
+            this.videos.set(identity+source,{track,pub,stop,info,sid});
+            this.events.get(E.TrackSubscribed)(track,pub,{identity,sid});
+            return trackSid;
         }
         unpublish(identity,source) {
-            const key=identity+source, {track,pub,stop}=this.videos.get(key);
-            this.events.get(E.TrackUnsubscribed)(track,pub,{identity});
+            const key=identity+source, {track,pub,stop,sid}=this.videos.get(key);
+            this.events.get(E.TrackUnsubscribed)(track,pub,{identity,sid});
             stop(); this.videos.delete(key);
         }
         async mics() {
@@ -146,11 +150,12 @@ class RecorderPackageTest(unittest.TestCase):
     def test_standalone_payload_matches_sources_and_keeps_protocol_assets(self):
         with ZipFile(ARTIFACT) as new, ZipFile(PREVIOUS) as old:
             fonts = {f'fonts/{name}' for name in ('OFL.txt','README.md','Vazirmatn-Regular.woff2','Vazirmatn-Bold.woff2')}
-            self.assertEqual(set(new.namelist()), set(old.namelist()) | fonts)
-            changed = {'frame.js','view.js','view.css','capture.py','recording.py','README-fa.md'}
+            self.assertEqual(set(new.namelist()), set(old.namelist()))
+            self.assertTrue(fonts <= set(new.namelist()))
+            changed = {'board.js','frame.js','view.js','capture.py','recording.py','README-fa.md'}
             for name in set(old.namelist()) - changed:
                 self.assertEqual(new.read(name), old.read(name))
-            for name in changed | fonts:
+            for name in (changed - {'board.js'}) | fonts:
                 self.assertEqual(new.read(name), (ROOT / 'server/recorder' / name).read_bytes())
             self.assertEqual(new.read('board.js'), (ROOT / 'school-addon/upload/online-classroom/assets/board.js').read_bytes())
             if site := os.environ.get('MPM_TEST_BACI'):
@@ -162,7 +167,7 @@ class RecorderPackageTest(unittest.TestCase):
 @unittest.skipUnless(os.environ.get('MPM_TEST_CHROMIUM') and os.environ.get('MPM_REC_FFMPEG'),
                      'set MPM_TEST_CHROMIUM, MPM_REC_FFMPEG and install Playwright for real compositor tests')
 class CompositorTest(unittest.IsolatedAsyncioTestCase):
-    async def test_fixed_webcam_band_pdf_screen_and_real_remote_audio_in_mp4(self):
+    async def test_pdf_crop_screen_active_webcams_and_real_remote_audio_in_mp4(self):
         from playwright.async_api import async_playwright
         ffmpeg = os.environ['MPM_REC_FFMPEG']
         pdf, doc, job = make_pdf(), 'd' * 32, '1' * 32
@@ -177,11 +182,11 @@ class CompositorTest(unittest.IsolatedAsyncioTestCase):
                 if framing:
                     base |= {'view': framing, 'viewMoving': True}
                 if data['board'] == rev:
-                    return {'board': base}
+                    return {'board': base, 'archive': {'board': True}}
                 document = {'id': doc, 'mime': 'application/pdf', 'name': 'fixture.pdf', 'bytes': len(pdf), 'pages': 1}
                 stroke = {'tool': 'pen', 'id': 'stroke', 'size': 24, 'color': '#ff00e8', 'points': [[2000, 4500], [8000, 4500]]}
                 return {'board': base | {'reset': True, 'page': 1, 'docs': [], 'doc': document if show_doc else None,
-                                        'ops': [stroke] if show_doc else []}}
+                                        'ops': [stroke] if show_doc else []}, 'archive': {'board': True}}
 
             def document(self, given, epoch, key, byte_range):
                 requests.append(('document', given, epoch))
@@ -232,7 +237,7 @@ class CompositorTest(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(before, await p.evaluate(f'() => Array.from(({gallery}).filter((_,i)=>i%137===0))'))
                         await asyncio.sleep(.55)
                         await p.evaluate('fixture.camera(false)')
-                        await wait('pix(695,602)[0]<130 && pix(430,602)[1]>160')
+                        await wait('pix(695,602)[0]<130 && pix(565,602)[1]>160')
                         await p.evaluate('fixture.camera(true)')
                         await wait(cameras)
                         self.assertEqual(before, await p.evaluate(f'() => Array.from(({gallery}).filter((_,i)=>i%137===0))'))
@@ -282,6 +287,135 @@ class CompositorTest(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(any(min(power(392,i),power(658,i))>180 for i in windows),
                             'both real WebRTC microphones must be audible in the same window of the emitted AAC/MP4')
             self.assertLess(max(power(976,i) for i in windows), 35, 'muted microphone must not leak into the MP4')
+
+    async def test_camera_priority_screen_republish_no_empty_strip_and_laser_fade_in_mp4(self):
+        from playwright.async_api import async_playwright
+        ffmpeg = os.environ['MPM_REC_FFMPEG']
+        lesson, doc, pdf = '7'*32, 'a'*32, make_pdf()
+        room = f'test-{"c"*20}-v4-c42-{"d"*24}'
+        document = {'id': doc, 'mime': 'application/pdf', 'bytes': len(pdf), 'name': 'fixture.pdf', 'pages': 1}
+        layout = {'board': False, 'screen': None, 'screenOwner': {'identity': 'student-1', 'sid': 'PA_student-1'}}
+        framing = {'zoom': 200, 'crop': [5000, 2000, 10000, 8000]}
+        laser_until = 0
+
+        class School:
+            def __call__(self, action, given, **pos):
+                assert action == 'board' and given == lesson and pos['room'] == room
+                board = {'rev': 1, 'cursor': 0, 'write': False, 'view': framing}
+                if not pos['board']:
+                    board |= {'doc': document, 'page': 1, 'reset': True, 'ops': [], 'docs': []}
+                left = int(1000 * (laser_until - time.monotonic()))
+                if left > 0:
+                    # Start outside the crop, then point into the paper. Server reports remaining lifetime, not a replay.
+                    board['laser'] = {'points': [[3750,4500,left-150],[7500,4500,left]] if left > 150 else [[7500,4500,left]]}
+                return {'board': board, 'archive': dict(layout)}
+
+            def document(self, given, epoch, key, byte_range):
+                assert given == lesson and epoch == room and key == doc
+                return 200, {'content-type':'application/pdf'}, pdf
+
+        with tempfile.TemporaryDirectory() as tmp, ZipFile(ARTIFACT) as zipped:
+            work = Path(tmp)
+            zipped.extractall(work)
+            out = work / 'spool'
+            out.mkdir()
+            renderer = Renderer(work)
+            renderer.static['/livekit-client.umd.js'] = ('text/javascript', zipped.read('livekit-client.umd.js') + FAKE_ROOM)
+            async with async_playwright() as playwright:
+                browser = await playwright.chromium.launch(executable_path=os.environ['MPM_TEST_CHROMIUM'], headless=True,
+                    args=['--autoplay-policy=no-user-gesture-required'], chromium_sandbox=True)
+                cap = Capture(browser, renderer, School(), room, lesson, out, ffmpeg)
+                try:
+                    self.assertTrue(await cap.start('local-fixture', time.time()+8, teacher='teacher-1', archive=layout))
+                    p = cap.page
+                    async def wait(test, record=False):
+                        await p.wait_for_function('''() => {
+                            const ctx=document.getElementById('film').getContext('2d');
+                            const pix=(x,y)=>ctx.getImageData(x,y,1,1).data, red=(x,y)=>pix(x,y)[0]>195 && pix(x,y)[1]<96,
+                                blue=(x,y)=>pix(x,y)[2]>180 && pix(x,y)[0]<82,
+                                green=(x,y)=>pix(x,y)[1]>175 && pix(x,y)[0]<90, yellow=(x,y)=>pix(x,y)[0]>200 && pix(x,y)[1]>195;
+                            return ''' + test + ';}', timeout=4200)
+                        if record:
+                            await cap.renew(time.time()+8)
+                            await asyncio.sleep(.46)  # Multiple stable encoded frames of each state.
+
+                    # A loaded PDF does not split the active teacher camera by default.
+                    await p.wait_for_function("() => document.getElementById('board-paper').getContext('2d').getImageData(800,100,1,1).data[0]>200", timeout=4500)
+                    first = await p.evaluate('fixture.screen(true)')
+                    await p.wait_for_function("() => [...document.querySelectorAll('#media-sinks video')].filter(v=>v.readyState>=2).length===3", timeout=4000)
+                    await wait('red(640,280) && green(565,602) && !red(195,390) && !yellow(990,320)', record=True)
+                    layout['screen'] = first
+                    await wait('blue(640,280) && red(695,602) && green(430,602) && !yellow(990,320)', record=True)
+                    await p.evaluate("fixture.mute('student-1','screen_share',true)")
+                    await wait('red(640,280) && green(565,602)')
+                    await p.evaluate("fixture.mute('student-1','screen_share',false)")
+                    await wait('blue(640,280) && red(695,602)')
+                    second = await p.evaluate('() => {fixture.screen(false); return fixture.screen(true);}')
+                    self.assertNotEqual(first, second, 'republishing the same source uses a new publication SID')
+                    await p.wait_for_function("() => [...document.querySelectorAll('#media-sinks video')].filter(v=>v.readyState>=2).length===3", timeout=4000)
+                    await wait('red(640,280) && !blue(640,280)', record=True)
+                    await p.evaluate("fixture.mute('student-1','camera',true)")
+                    await wait('red(195,390) && red(640,640) && !green(565,602)', record=True)
+
+                    # Only the selected publisher's SID counts, even if an old video is still attached.
+                    await p.evaluate("fixture.mute('teacher-1','camera',true)")
+                    await wait('blue(195,390) && blue(640,640) && !yellow(990,320)', record=True)
+                    layout['screenOwner'] = {'identity': 'student-1', 'sid': 'PA_Replaced'}
+                    await wait('yellow(640,280) && !blue(195,390)', record=True)
+                    layout.update(board=True, screen=second, screenOwner={'identity':'student-1','sid':'PA_student-1'})
+                    await wait('blue(330,366) && yellow(680,365) && yellow(951,365)', record=True)
+                    ink_before = await p.locator('#board-ink').evaluate('c=>c.toDataURL()')
+                    laser_until = time.monotonic()+1.9
+                    # Paper occupies x=656..1246 after cropping. (7500,4500) maps to x=951, y≈365.
+                    await wait('red(951,365) && pix(680,365)[1]<125 && !red(650,365) && yellow(951,413)')
+                    await wait('pix(680,365)[1]>140 && pix(680,365)[1]<200 && yellow(951,413)')
+                    await wait('yellow(680,365) && yellow(951,365) && blue(330,366)', record=True)
+                    self.assertEqual(await p.locator('#board-ink').evaluate('c=>c.toDataURL()'), ink_before, 'laser is never painted onto ink')
+                    self.assertTrue(await cap.running())
+                finally:
+                    try:
+                        await cap.stop()
+                    finally:
+                        await browser.close()
+
+            [part] = clips(out)
+            # Use half resolution to keep the decoded fixture small without erasing the trail or the tip.
+            w, h = WIDTH//2, HEIGHT//2
+            raw = subprocess.check_output([ffmpeg, '-v', 'error', '-i', str(part), '-an', '-vf', f'scale={w}:{h}',
+                '-pix_fmt','rgb24','-threads','1','-f','rawvideo','-'], timeout=15)
+            size = w*h*3
+            self.assertEqual(len(raw) % size, 0)
+            def px(i,x,y):
+                o = i+((y//2)*w+x//2)*3
+                return raw[o:o+3]
+            def red(i,x,y):
+                r,g,b = px(i,x,y)
+                return r > 185 and g < 110 and b < 115
+            def blue(i,x,y):
+                r,g,b = px(i,x,y)
+                return r < 95 and b > 170
+            def green(i,x,y):
+                r,g,b = px(i,x,y)
+                return r < 110 and g > 150 and b < 100
+            def yellow(i,x,y):
+                r,g,b = px(i,x,y)
+                return r > 200 and g > 180 and b < 105
+            offsets = range(0,len(raw),size)
+            def present(check, message):
+                self.assertGreaterEqual(sum(check(i) for i in offsets), 2, message)
+            present(lambda i: red(i,640,280) and green(i,565,602) and not red(i,195,390) and not yellow(i,990,320), 'default camera without split, with only the other webcam')
+            present(lambda i: blue(i,640,280) and red(i,695,602) and green(i,430,602) and not yellow(i,990,320), 'promoted screen with teacher and pupil in the strip')
+            present(lambda i: red(i,195,390) and red(i,640,640), 'teacher fills area when the strip has no other cameras')
+            present(lambda i: blue(i,195,390) and blue(i,640,640), 'screen fills area when all cameras are off')
+            present(lambda i: yellow(i,640,280) and not blue(i,195,390), 'board fallback after invalidating the only screen lease')
+            def split(i):
+                return blue(i,330,366) and yellow(i,951,413) and not red(i,650,365)
+            with_laser = [i for i in offsets if split(i) and red(i,951,365) and px(i,680,365)[1] < 130]
+            self.assertTrue(with_laser, 'laser trail and tip are encoded at the cropped PDF coordinates, not spilling outside')
+            fading = [i for i in offsets if i > with_laser[-1] and split(i) and 139 < px(i,680,365)[1] < 196]
+            self.assertTrue(fading, 'the trail fades before disappearing, rather than becoming red ink')
+            self.assertTrue(any(i > fading[-1] and split(i) and yellow(i,680,365) and yellow(i,951,365) for i in offsets),
+                            'late MP4 frames retain the exact cropped board without the transient cue')
 
     async def test_persian_pdf_raster_and_complete_header_are_preserved_in_mp4(self):
         from playwright.async_api import async_playwright

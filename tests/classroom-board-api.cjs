@@ -8,7 +8,7 @@ const {join, resolve} = require('node:path');
 const test = require('node:test');
 const {twoPageBoardPDF} = require('./fixtures/classroom-board-docs.cjs');
 
-const {MPM_TEST_PHP_WASM:runtime, MPM_TEST_CLASSROOM_ZIP:archive=join(__dirname,'../artifacts/school-classroom-plugin-v0.4.20.zip')} = process.env;
+const {MPM_TEST_PHP_WASM:runtime, MPM_TEST_CLASSROOM_ZIP:archive=join(__dirname,'../artifacts/school-classroom-plugin-v0.4.21.zip')} = process.env;
 
 test('packaged API restores board controls for the admitted manager in normal and Friday lessons', {skip:!runtime,timeout:25000}, async t=>{
     const load = createRequire(resolve(runtime,'package.json'));
@@ -122,8 +122,34 @@ test('packaged API restores board controls for the admitted manager in normal an
             await api('manager','set-access',grant,403);
             await api('manager','set-access',{feature:'board',enabled:false});
             assert.equal((await api('pupil','board-sync')).board.write,false,'the following manager can still revoke');
+            await seed('record');
+            const filter = {source:'board',enabled:true};
+            assert.deepEqual((await api('teacher','status')).recording.archive,{board:false,screen:null});
+            for (const role of ['manager','pupil']) assert.equal((await api(role,'status')).recording.archive,undefined);
+            assert.equal((await api('teacher','status',{sid:''})).recording.archive,undefined);
+            await api('pupil','record-source',filter,403);
+            await api('manager','record-source',filter,403);
+            await api('teacher','record-source',filter,403,'invalid');
+            await api('teacher','record-source',{...filter,epoch:'0'.repeat(24)},409);
+            await api('teacher','record-source',{...filter,sid:'PA_Old'},409);
+            assert.deepEqual((await api('teacher','record-source',filter)).archive,{board:true,screen:null});
+            assert.deepEqual((await api('teacher','record-source',{source:'screen',enabled:true,publisherSid:'PA_Pupil',track:'TR_Class'})).archive,
+                {board:true,screen:'TR_Class'});
+            await api('teacher','board-sync',{aim:[[6345,3255,0]]});
+            const request = body=>({method:'POST', headers:{...headers,Authorization:`Bearer ${'r'.repeat(48)}`},body:Buffer.from(JSON.stringify(body))});
+            const room=`test-${'a'.repeat(20)}-v4-c22-${epoch}`;
+            const command={action:'board',protocol:1,id:lesson,room,worker:'9'.repeat(32),board,ink:1,compact:true};
+            const recording=await reply('pupil','recording-api',request(command),200,'worker board');
+            assert.deepEqual(recording.json.archive,{board:true,screen:'TR_Class',screenOwner:{identity:'student-1',sid:'PA_Pupil'}});
+            assert.deepEqual(Object.keys(recording.json.board.laser),['points']);
+            assert.deepEqual(recording.json.board.laser.points[0].slice(0,2),[6345,3255]);
+            assert.equal(recording.json.board.navigate,undefined);
+            await reply('pupil','recording-api',request({...command,room:'old-room'}),409,'stale worker room');
+            await reply('pupil','recording-api',request({...command,action:'record-source',...filter}),400,'worker cannot select layout');
+
             await api('teacher','leave');
             assert.equal((await api('manager','board-sync')).board.navigate,true,'a verified teacher departure immediately restores control');
+            assert.deepEqual((await api('manager','record-source',{...filter,enabled:false})).archive,{board:false,screen:'TR_Class'});
         }
         await api('manager','set-access',{feature:'board',enabled:false});
         assert.equal((await api('pupil','board-sync')).board.write,false);

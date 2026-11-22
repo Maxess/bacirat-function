@@ -24,7 +24,7 @@ $db->exec("CREATE TABLE `$table` (bucket TEXT,item TEXT,payload TEXT,PRIMARY KEY
       ('bale','-206','گروه خارج‌شده','group','left'),('bale','111','خصوصی','private','member'),('bale','-208','کانال','channel','member'),
       ('rubika','g0KnownGroup','گروه روبیکا','private','member'),('telegram','-100321','کلاس تلگرام','supergroup','member')");
 $s = new ClassroomStore($db, $table);
-$cfg = ['record_lessons'=>true,'recording_secret'=>str_repeat('a',48),'api_key'=>str_repeat('k',16),'api_secret'=>str_repeat('s',40),'room_prefix'=>'test-' . str_repeat('0',20)];
+$cfg = ['record_lessons'=>true,'screen_share'=>true,'student_screen_share'=>true,'recording_secret'=>str_repeat('a',48),'api_key'=>str_repeat('k',16),'api_secret'=>str_repeat('s',40),'room_prefix'=>'test-' . str_repeat('0',20)];
 $teacher = ['role'=>'teacher','id'=>7,'identity'=>'teacher-7','office'=>null];
 $student = ['role'=>'student','id'=>12,'identity'=>'student-12'];
 $admin = cl_school_user($db, ['admin_id'=>2], '1405/1406');
@@ -145,6 +145,54 @@ $delta = $worker('board',$id,$t+6,['room'=>$live['room'],'board'=>1,'ink'=>0,'co
 ok($delta['view'] === $view && $delta['rev'] === 1 && !$delta['write'] && !isset($delta['navigate']) && !isset($delta['doc']),
     'worker receives the cropped viewport in the compact delta but cannot change it');
 deny(409, fn()=> $worker('board',$id,$t+6,['room'=>'other']));
+$scope = ['lesson'=>$id,'epoch'=>cl_epoch($live),'sid'=>'PA_staff'];
+$setBoard = ['source'=>'board','enabled'=>true] + $scope;
+deny(409, fn()=>cl_rec_set_source($s,$cfg,$live,$teacher,$setBoard,$t+6)); // .20 worker
+$capable = $worker('poll',$id,$t+6,['archiveLayout'=>true]);
+$defaultLayout = ['board'=>false,'screen'=>null];
+ok($capable['archive'] === $defaultLayout + ['screenOwner'=>null] && $capable['teacher'] === 'teacher-7', 'archive starts with only the primary source and the actual scheduled teacher');
+ok(cl_rec_status($s,$cfg,$live,$student)['recording'] === ['notice'=>'preparing'], 'layout metadata is not sent to pupils');
+deny(403, fn()=>cl_rec_set_source($s,$cfg,$live,$student,$setBoard,$t+6));
+deny(403, fn()=>cl_rec_set_source($s,$cfg,$live,$admin,$setBoard,$t+6));
+deny(409, fn()=>cl_rec_set_source($s,$cfg,$live,$teacher,array_replace($setBoard,['sid'=>'PA_wrong']),$t+6));
+deny(400, fn()=>cl_rec_set_source($s,$cfg,$live,$teacher,array_replace($setBoard,['enabled'=>1]),$t+6));
+ok(cl_rec_set_source($s,$cfg,$live,$teacher,$setBoard,$t+6)['archive'] === ['board'=>true,'screen'=>null], 'active presenter can include the board');
+$share = ['source'=>'screen','track'=>'TR_original','publisherSid'=>'PA_Pupil','enabled'=>true] + $scope;
+deny(409, fn()=>cl_rec_set_source($s,$cfg,$live,$teacher,$share,$t+6));
+$live['camera_codec'] = 'vp8';
+$live['seen']['student-12'] = 'PA_Pupil';
+$live['screen'] = ['identity'=>'student-12','sid'=>'PA_Pupil','until'=>$t+120];
+$s->put('lesson',$id,$live);
+deny(409, fn()=>cl_rec_set_source($s,$cfg,$live,$teacher,array_replace($share,['publisherSid'=>'PA_previous']),$t+6));
+deny(409, fn()=>cl_rec_set_source($s,$cfg,$live,$teacher,array_replace($share,['track'=>'PA_Pupil']),$t+6));
+ok(cl_rec_set_source($s,$cfg,$live,$teacher,$share,$t+6)['archive'] === ['board'=>true,'screen'=>'TR_original'], 'screen selection binds to the current publication');
+ok(cl_rec_set_source($s,$cfg,$live,$teacher,array_replace($share,['track'=>'TR_old','enabled'=>false]),$t+6)['archive']['screen'] === 'TR_original',
+    'a delayed unselect for a different track does not clear the current choice');
+$pointer = [[5400,1900,70],[6800,6000,0]];
+cl_board_read($s,$live,$teacher,$scope+['board'=>1,'aim'=>$pointer],null,$t+6);
+$recordRead = ['room'=>$live['room'],'board'=>1,'ink'=>0,'compact'=>true];
+$captured = $worker('board',$id,$t+6,$recordRead);
+$cue = $captured['board']['laser'];
+ok($captured['archive'] === ['board'=>true,'screen'=>'TR_original','screenOwner'=>['identity'=>'student-12','sid'=>'PA_Pupil']] && array_keys($cue) === ['points'] && count($cue['points']) === 2,
+    'recorder reads an anonymous trail and current source flags in the existing compact delta');
+ok($cue['points'][1][2] <= CL_LASER_TTL_MS && !isset($captured['board']['ops']), 'laser points expire and do not become ink');
+$activity = cl_activity($s,$id);
+$activity['laser']['rev']++;
+$s->put('activity',$id,$activity);
+ok(!isset($worker('board',$id,$t+6,$recordRead)['board']['laser']), 'recorder does not replay a trail from another board revision');
+$activity['laser']['rev']--;
+$activity['laser']['at'] -= 2;
+$s->put('activity',$id,$activity);
+ok(!isset($worker('board',$id,$t+6,$recordRead)['board']['laser']), 'expired laser is not replayed');
+ok(cl_rec_layout($cfg,$s->get('recording',$id),array_replace($live,['room'=>substr($live['room'],0,-24) . str_repeat('f',24)])) === $defaultLayout,
+    'both toggles reset on a new room transport');
+unset($live['screen']);
+$s->put('lesson',$id,$live);
+ok($worker('board',$id,$t+6,$recordRead)['archive']['screen'] === null, 'a revoked screen lease cannot keep priority');
+cl_board_read($s,$live,$teacher,$scope+['board'=>1,'aim'=>$pointer],null,$t+6);
+$worker('poll',$id,$t+6,['running'=>$live['room']]);
+$oldWorker = $worker('board',$id,$t+6,$recordRead);
+ok(!isset($oldWorker['archive']) && !array_key_exists('laser',$oldWorker['board']), 'older workers keep the previous wire shape');
 // The recorder is not a roster entry and doesn't need the teacher's tab.
 $live['pulses'][$admin['identity']] = ['sid'=>'PA_office','at'=>$t+6];
 $live['seen'][$admin['identity']] = $live['staff'][$admin['identity']] = 'PA_office';
@@ -171,7 +219,9 @@ $s->put('lesson',$id,$paused);
 ok($worker('poll',$id,$t+6)['command'] === 'hold', 'do not capture while the school waits for staff');
 $live['room'] = substr($staleRoom,0,-24) . str_repeat('c',24);
 $s->put('lesson',$id,$live);
-ok($worker('poll',$id,$t+6)['room'] === $live['room'], 'recording resumes on the same bell and a new room only');
+$resume = $worker('poll',$id,$t+6,['archiveLayout'=>true]);
+ok($resume['room'] === $live['room'] && $resume['teacher'] === 'teacher-7' && $resume['archive'] === $defaultLayout + ['screenOwner'=>null],
+    'resume uses the same teacher and fresh defaults on the new transport');
 deny(409, fn()=> $worker('board',$id,$t+6,['room'=>$staleRoom]));
 deny(409, fn()=> $worker('claim',$id,$t+7,['part'=>1,'total'=>2]));
 deny(409, fn()=>cl_rec_close_choice($s,$cfg,$live,$teacher,['recording'=>$id,'sendRecording'=>'true'],$t+7));

@@ -11,6 +11,7 @@ $ctx = ['pdo'=>$db,'store'=>$table,'csrf'=>'fixture-token','plugin_dir'=>'/class
     'config'=>['enabled'=>true,'site_origin'=>'https://school.example.test','signal_url'=>'wss://media.example.test',
         'api_key'=>str_repeat('k',16),'api_secret'=>str_repeat('s',48),'room_prefix'=>'test-' . str_repeat('a',20),
         'record_lessons'=>true,'recording_secret'=>str_repeat('r',48),
+        'screen_share'=>true,'student_screen_share'=>true,
         'friday_test'=>['date'=>'2026-11-20','id'=>str_repeat('e',32),'students'=>true]]];
 $GLOBALS['MTAG_PLUGIN_CONTEXT'] = $ctx;
 if (!isset($seed)) return;
@@ -39,12 +40,21 @@ if ($seed === 'open') {
 } else $lesson = cl_active($s,22);
 $epoch = cl_epoch($lesson);
 $peers = ['teacher-2'=>'PA_Deputy','admin-1'=>'PA_Manager','student-1'=>'PA_Pupil'];
-if ($seed === 'teacher') $peers['teacher-1'] = 'PA_Teacher';
+if (in_array($seed, ['teacher','record'], true)) $peers['teacher-1'] = 'PA_Teacher';
 foreach ($peers as $identity=>$sid) {
     $lesson = cl_touch($s,$lesson,['identity'=>$identity],['lesson'=>$lesson['id'],'epoch'=>$epoch,'sid'=>$sid],$now);
 }
 $lesson = cl_observe($lesson,$peers,array_diff_key($peers,['student-1'=>true]),$now,$now);
 $lesson['event_received'] = true;
 $lesson['last_attempt'] = $now; // Recent SFU sample: status doesn't need an external RPC.
+if ($seed === 'record') {
+    // A narrowly scoped active recorder for testing the authenticated rendering path, without a live worker.
+    $id = $lesson['id'];
+    $lesson['recorder'] = 'recorder-' . $id;
+    $lesson['camera_codec'] = 'vp8';
+    $lesson['screen'] = ['identity'=>'student-1','sid'=>'PA_Pupil','until'=>$now+60];
+    $s->put('recording',$id,['id'=>$id,'class'=>22,'worker'=>str_repeat('9',32),'state'=>'recording',
+        'layout_capable'=>true,'live'=>true,'begin'=>$now-6,'target'=>['title'=>'test','provider'=>'bale']]);
+}
 $s->put('lesson',$lesson['id'],$lesson);
 echo json_encode(['lesson'=>$lesson['id'],'epoch'=>$epoch,'teacher'=>$lesson['teacher']], JSON_THROW_ON_ERROR);

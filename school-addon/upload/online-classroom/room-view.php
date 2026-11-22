@@ -101,7 +101,7 @@ function cl_room_icon(string $name): string
             <a id="leave" class="icon-button leave-button" href="<?= cl_html(cl_site_href($panel)) ?>" aria-label="خروج از اتاق" title="خروج از اتاق و بازگشت به پنل"><?= cl_room_icon('exit') ?><span>خروج</span></a>
             <?php endif; ?>
         </div>
-        <?php if (!$staff): ?><p id="screen-hint" class="screen-hint" role="status" hidden></p><?php endif; ?>
+        <p id="screen-hint" class="screen-hint" role="status" hidden></p>
     </header>
     <span id="recording-status" class="sr-only" role="status"></span>
     <?php if ($staff): ?>
@@ -172,12 +172,16 @@ function cl_room_icon(string $name): string
             <video id="camera-preview-video" muted playsinline autoplay disablepictureinpicture></video>
         </dialog>
         <section class="screen-panel" id="screen-panel" aria-labelledby="screen-label" hidden>
-            <h2 id="screen-label"></h2>
+            <header class="screen-heading">
+                <h2 id="screen-label"></h2>
+                <?php if ($staff): ?><button type="button" class="subtle-button archive-source" id="record-screen-display" aria-label="اولویت صفحهٔ اشتراکی در ضبط" aria-pressed="false" title="با فعال‌کردن، صفحهٔ اشتراکی در فیلم جای دوربین دبیر را می‌گیرد" hidden>نمایش در ضبط</button><?php endif; ?>
+            </header>
             <video id="screen-video" muted playsinline autoplay controls disablepictureinpicture></video>
         </section>
         <section class="board-card" id="board" aria-label="تختهٔ کلاس">
             <div class="board-toolbar">
                 <div class="board-heading"><span class="board-signal" aria-hidden="true"><?= cl_room_icon('board') ?></span><h2>تختهٔ کلاس</h2></div>
+                <?php if ($staff): ?><button type="button" class="subtle-button archive-source" id="record-board-display" aria-label="نمایش تخته در ضبط" aria-pressed="false" title="با فعال‌کردن، تخته کنار تصویر اصلی فیلم می‌آید" hidden>نمایش در ضبط</button><?php endif; ?>
                 <div class="ink-tools" id="ink-tools" role="group" aria-label="ابزار نوشتن" hidden>
                     <button type="button" class="icon-button" id="pen" aria-pressed="true" title="قلم" aria-label="قلم"><?= cl_room_icon('pen') ?></button>
                     <button type="button" class="icon-button" id="eraser" aria-pressed="false" aria-label="<?= $staff ? 'پاک‌کن خط کامل' : 'پاک‌کن فقط خط‌های خودم' ?>" title="<?= $staff ? 'پاک‌کن خط کامل' : 'پاک‌کن فقط خط‌های خودم' ?>" <?= $staff ? '' : 'hidden' ?>><?= cl_room_icon('erase') ?></button>
@@ -249,7 +253,7 @@ function cl_room_icon(string $name): string
                 </div>
             </div>
             <div class="board-notices">
-                <?php if (!$staff): ?><p id="board-screen-hint" class="board-toast" role="status" hidden></p><?php endif; ?>
+                <p id="board-screen-hint" class="board-toast" role="status" hidden></p>
                 <p id="board-join-toast" class="board-toast join-toast" role="status" hidden></p>
                 <p id="board-chat-toast" class="board-toast" role="status" hidden></p>
             </div>

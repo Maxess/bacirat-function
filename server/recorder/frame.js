@@ -12,7 +12,6 @@
         const ctx = canvas.getContext('2d', {alpha:false});
         const {width,height} = canvas;
         const galleryY = height - footer - galleryHeight;
-        const presentation = {x:margin,y:top,w:width-2*margin,h:galleryY-top-gap};
         const tiles = {x:margin+12,y:galleryY+12,w:width-2*margin-178,h:galleryHeight-24};
         const background = ctx.createLinearGradient(0,0,width,height);
         background.addColorStop(0,'#17243b'); background.addColorStop(1,'#0a1325');
@@ -104,7 +103,27 @@
             draw(area);
             ctx.restore();
         }
-        function boardPane(rect,paper,ink,doc,hasInk,view) {
+        function drawLaser(laser,crop,dest) {
+            if (!laser?.length) return;
+            const now = performance.now(), samples = laser.filter(point => point[2] > now);
+            if (!samples.length) return;
+            const [left,top,right,bottom] = crop, [x,y,w,h] = dest;
+            const point = ([a,b]) => [x+(a-left)*w/(right-left),y+(b-top)*h/(bottom-top)];
+            ctx.save(); ctx.beginPath(); ctx.rect(x,y,w,h); ctx.clip();
+            ctx.strokeStyle = '#ff493e'; ctx.lineWidth = 5; ctx.lineCap = 'round';
+            for (let i=1; i<samples.length; i++) {
+                const a = samples[i-1];
+                ctx.globalAlpha = Math.min(1,(a[2]-now)/1200);
+                ctx.beginPath(); ctx.moveTo(...point(a)); ctx.lineTo(...point(samples[i])); ctx.stroke();
+            }
+            const head = samples.at(-1), [hx,hy] = point(head);
+            ctx.globalAlpha = Math.min(1,(head[2]-now)/500);
+            ctx.lineWidth = 2.5;
+            ctx.beginPath(); ctx.arc(hx,hy,9,0,Math.PI*2); ctx.stroke();
+            dot(hx,hy,'#ff342c');
+            ctx.restore();
+        }
+        function boardPane(rect,paper,ink,doc,hasInk,view,laser) {
             pane(rect,doc?.mime === 'application/pdf' ? 'سند کلاس · PDF' : 'تختهٔ کلاس',area => {
                 if (!doc && !hasInk) {
                     const x = area.x + area.w/2, y = area.y + area.h/2;
@@ -112,23 +131,25 @@
                     box(x-15,y-45,30,19,3,'#57c9bc');
                     line(x-10,y-39,20,'#19334a'); line(x-10,y-34,12,'#19334a');
                     label('تخته آمادهٔ نوشتن است',x,y+22,{size:20,weight:700,align:'center'});
-                    return;
+                    if (!laser?.length) return;
                 }
-                // A single source rectangle keeps the PDF and its ink aligned. Matte bars
-                // absorb aspect-ratio differences; nothing outside the teacher's crop leaks in.
-                const [l,t,r,b] = view?.crop ?? [0,0,10000,10000];
+                // The PDF, ink and ephemeral laser share one crop; no laser is baked into the ink.
+                const crop = view?.crop ?? [0,0,10000,10000], [l,t,r,b] = crop;
                 const w = paper.width/10000, h = paper.height/10000;
                 const src = [l*w,t*h,(r-l)*w,(b-t)*h];
                 const scale = Math.min(1,(view?.zoom ?? 100)/100);
                 const dest = fit(src[2],src[3],{x:area.x+area.w*(1-scale)/2,y:area.y+area.h*(1-scale)/2,w:area.w*scale,h:area.h*scale});
-                ctx.drawImage(paper,...src,...dest); ctx.drawImage(ink,...src,...dest);
+                if (doc || hasInk) {
+                    ctx.drawImage(paper,...src,...dest); ctx.drawImage(ink,...src,...dest);
+                }
+                drawLaser(laser,crop,dest);
             });
             if (view && view.zoom !== 100 && (doc || hasInk)) {
                 label(percent.format(view.zoom/100),rect.x+13,rect.y+19,{size:14,color:'#a5b7d1',align:'left'});
             }
         }
-        function screenPane(rect,video) {
-            pane(rect,'صفحهٔ مشترک',area => ctx.drawImage(video,...fit(video.videoWidth,video.videoHeight,area)));
+        function videoPane(rect,video,title) {
+            pane(rect,title,area => ctx.drawImage(video,...fit(video.videoWidth,video.videoHeight,area)));
         }
         function cameraGrid(n) {
             // Fit all published cameras, with no paging, favoring fewer rows at equal size.
@@ -148,10 +169,6 @@
             dot(right-24,galleryY+30,'#a99cf8');
             label('وب‌کم‌ها',right-38,galleryY+30,{size:17,weight:700});
             label('نمای کلاس',right-24,galleryY+58,{size:14,color:'#a5b7d1'});
-            if (!cameras.length) {
-                label('وب‌کمِ فعالی نیست',tiles.x+tiles.w/2,tiles.y+tiles.h/2,{color:'#a5b7d1',align:'center'});
-                return;
-            }
             const {cols,rows,w,h,spacing} = cameraGrid(cameras.length);
             const startY = tiles.y + Math.floor((tiles.h-rows*h-(rows-1)*spacing)/2);
             cameras.forEach(({role,video},i) => {
@@ -161,25 +178,31 @@
                 const y = startY+row*(h+spacing), radius = Math.min(10,h/4);
                 box(x,y,w,h,radius,'#0b1527',roles[role] ? '#56759e' : '#314563');
                 ctx.save(); ctx.beginPath(); ctx.roundRect(x,y,w,h,radius); ctx.clip();
-                if (video) ctx.drawImage(video,...fit(video.videoWidth,video.videoHeight,{x,y,w,h}));
-                else if (h >= 40) label('دوربین خاموش',x+w/2,y+h/2,{color:'#a5b7d1',size:h < 64 ? 11 : 14,align:'center'});
-                if (video && roles[role] && h >= 75) {
+                ctx.drawImage(video,...fit(video.videoWidth,video.videoHeight,{x,y,w,h}));
+                if (roles[role] && h >= 75) {
                     box(x+w-60,y+h-32,52,24,6,'#0b1527');
                     label(roles[role],x+w-34,y+h-20,{size:13,align:'center'});
                 }
                 ctx.restore();
             });
         }
-        return ({paper,ink,doc,hasInk,view,cameras,screen,heading}) => {
+        return ({paper,ink,doc,hasInk,view,laser,cameras=[],screen,teacher,archiveBoard,preferScreen,heading}) => {
+            const shared = screen && (preferScreen || !teacher);
+            const primary = shared ? screen : teacher;
+            const gallery = cameras.filter(({video}) => video && video !== primary);
+            const bottom = gallery.length ? galleryY-gap : height-footer;
+            const presentation = {x:margin,y:top,w:width-2*margin,h:bottom-top};
+            const drawBoard = rect => boardPane(rect,paper,ink,doc,hasInk,view,laser);
+            const drawVideo = rect => videoPane(rect,primary,shared ? 'صفحهٔ مشترک' : 'دوربین دبیر');
             ctx.fillStyle = background; ctx.fillRect(0,0,width,height);
             header(heading);
-            if (screen && (doc || hasInk)) {
+            if (!primary) drawBoard(presentation);
+            else if (archiveBoard) {
                 const w = (presentation.w-gap)/2;
-                screenPane({...presentation,w},screen);
-                boardPane({...presentation,x:presentation.x+w+gap,w},paper,ink,doc,hasInk,view);
-            } else if (screen) screenPane(presentation,screen);
-            else boardPane(presentation,paper,ink,doc,hasInk,view);
-            drawCameras(cameras);
+                drawVideo({...presentation,w});
+                drawBoard({...presentation,x:presentation.x+w+gap,w});
+            } else drawVideo(presentation);
+            if (gallery.length) drawCameras(gallery);
         };
     };
 })();

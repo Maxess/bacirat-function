@@ -19,11 +19,11 @@ REPLACED = ['includes/header.php', 'includes/management_hub.php', 'includes/stud
 RESTORED = ['other-settings.php', 'includes/footer.php']
 ADDED = ['includes/classroom-school-bots.php', 'school-classroom-settings.php']
 CALENDAR = ROOT / 'school-addon/upload/online-classroom/calendar.php'
-BUNDLE = 'baci-classroom-upgrade-v0.4.20.zip'
-UPDATE = 'baci-plugin-manager-update-v0.1.26.zip'
-CLASSROOM = 'school-classroom-plugin-v0.4.20.zip'
-RECORDER = 'baci-classroom-recorder-v0.4.20.zip'
-UPGRADER = 'upgrade-v0.4.20.sh'
+BUNDLE = 'baci-classroom-upgrade-v0.4.21.zip'
+UPDATE = 'baci-plugin-manager-update-v0.1.27.zip'
+CLASSROOM = 'school-classroom-plugin-v0.4.21.zip'
+RECORDER = 'baci-classroom-recorder-v0.4.21.zip'
+UPGRADER = 'upgrade-v0.4.21.sh'
 
 
 def check_patch(test, upstream, overlay, paths, patch, verify_pin=False):
@@ -45,7 +45,7 @@ def check_patch(test, upstream, overlay, paths, patch, verify_pin=False):
 
 class BaciOverlayTest(unittest.TestCase):
     def test_archives_ship_the_pinned_baci_overlay_and_no_watcher_or_bot_credentials(self):
-        with ZipFile(ROOT / 'artifacts/baci-plugin-manager-v0.1.26.zip') as site:
+        with ZipFile(ROOT / 'artifacts/baci-plugin-manager-v0.1.27.zip') as site:
             for path in REPLACED + RESTORED + ADDED + ['UPSTREAM.json']:
                 self.assertEqual(site.read(path), (BACI / path).read_bytes())
             self.assertEqual(site.read('includes/classroom-calendar.php'), CALENDAR.read_bytes())
@@ -84,6 +84,7 @@ class BaciOverlayTest(unittest.TestCase):
             self.assertIn('0.4.16', manifest['preserve_settings_from'])
             self.assertIn('0.4.18', manifest['preserve_settings_from'])
             self.assertIn('0.4.19', manifest['preserve_settings_from'])
+            self.assertIn('0.4.20', manifest['preserve_settings_from'])
             self.assertEqual(manifest['routes']['recording'], 'recording-api.php')
             presets = json.loads(plugin.read('video-presets.json'))
             fields_by_key = {field['key']: field for field in manifest['settings']}

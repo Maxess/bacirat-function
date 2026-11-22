@@ -17,7 +17,7 @@
             if (!loaded.some(face => face.family === family && face.status === 'loaded')) throw new Error('bundled Persian font unavailable');
         })));
     }
-    let heading;
+    let heading, assignedTeacher, archive;
     let room, audio, mix, stream, recorder, frameTimer, boardTimer, stopping, ended, roomScope, leaseUntil = 0;
     let running = false, failure = false, pending = 0, writes = Promise.resolve(), doc = null;
 
@@ -37,7 +37,7 @@
         const node = document.createElement(microphone ? 'audio' : 'video');
         node.autoplay = node.muted = true; node.playsInline = true; node.volume = 0;
         sinks.append(node);
-        const item = {id,source,track,pub,node};
+        const item = {id,sid:participant.sid,source,track,pub,node};
         tracks.set(key,item);
         try {
             track.attach(node);
@@ -68,37 +68,51 @@
         item.node.pause(); item.node.srcObject = null; item.node.remove();
     }
     function forget(participant) {
-        for (const [key,item] of tracks) if (item.id === participant.identity) detach(key);
-        cameras.delete(participant.identity);
+        const {identity,sid} = participant;
+        for (const [key,item] of tracks) if (item.id === identity && item.sid === sid) detach(key);
+        if (!cameras.get(identity)) cameras.delete(identity);
     }
     function videoOf(item) {
-        return item && !item.pub.isMuted && item.node.readyState >= 2 && item.node.videoWidth > 0 ? item.node : null;
+        const media = item?.track.mediaStreamTrack;
+        return media?.readyState === 'live' && !media.muted && !item.pub.isMuted && item.pub.isEnabled !== false
+            && item.node.readyState >= 2 && item.node.videoWidth > 0 && item.node.videoHeight > 0 ? item.node : null;
     }
     function paint() {
-        let screen = null;
+        const owner = archive?.screenOwner;
+        let screen = null, preferScreen = false;
         for (const item of tracks.values()) {
             if (item.gain) gainFor(item);
-            // The school allows one screen presenter per transport; skip non-playing/old publications.
-            if (!screen && item.source === lk.Track.Source.ScreenShare) screen = videoOf(item);
+            if (item.source !== lk.Track.Source.ScreenShare || preferScreen) continue;
+            // Older sites omit the lease metadata. On new sites, ignore revoked or replaced publishers
+            // even while a previously subscribed track is still waiting to be removed by signaling.
+            if (owner !== undefined && (owner?.identity !== item.id || owner.sid !== item.sid)) continue;
+            const video = videoOf(item);
+            if (!video) continue;
+            screen = video;
+            preferScreen = archive?.screen === item.pub.trackSid;
         }
+        const teacher = videoOf(cameras.get(assignedTeacher));
         const gallery = Array.from(cameras, ([id,item]) => ({role:id.split('-',1)[0],video:videoOf(item)}));
         const rank = {teacher:0,admin:1,student:2};
         gallery.sort((a,b) => rank[a.role] - rank[b.role]);
-        frame({paper,ink,doc,view:board.framing(),hasInk:board.position().ink > 0,cameras:gallery,screen,heading});
+        frame({paper,ink,doc,view:board.framing(),hasInk:board.position().ink > 0,laser:board.laser(),
+            cameras:gallery,screen,teacher,archiveBoard:archive?.board === true,preferScreen,heading});
     }
     async function updateBoard() {
         let delay = 850;
         try {
-            const pos = board.position();
+            const pos = board.position(), requestedAt = performance.now();
             const res = await fetch('/board', {method:'POST', cache:'no-store', redirect:'error', signal:AbortSignal.timeout(2400),
                 headers:{'Content-Type':'application/json'}, body:JSON.stringify({...pos,compact:true})});
             if (!res.ok || !running) return;
-            const {board: view} = await res.json();
+            const {board: view, archive: prefs} = await res.json();
             if (!view || !running) return;
-            board.sync(view,roomScope);
+            archive = prefs;
+            board.sync(view,roomScope,requestedAt);
             if ('doc' in view) doc = view.doc;
+            const freshLaser = (board.laser().at(-1)?.[2] ?? 0) - performance.now() > 1000;
             if (view.more) delay = 90;
-            else if (view.viewMoving) delay = 300;
+            else if (view.moving || view.viewMoving || freshLaser) delay = 280;
         } catch (_) { /* A stale fetch while closing does not keep the recorder alive. */ }
         finally { if (running) boardTimer = setTimeout(updateBoard, delay); }
     }
@@ -134,9 +148,9 @@
             await loadFonts();
             return true;
         },
-        async start({url,token,lesson,epoch,leaseMs,title}) {
+        async start({url,token,lesson,epoch,leaseMs,title,teacher,archive:prefs}) {
             leaseUntil = performance.now() + leaseMs;
-            heading = title;
+            heading = title; assignedTeacher = teacher; archive = prefs;
             // Render Web Audio without relying on a sound device on the VPS.
             audio = new AudioContext({sampleRate:48000,sinkId:{type:'none'}});
             await Promise.all([audio.resume(), loadFonts()]);

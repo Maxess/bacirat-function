@@ -21,6 +21,27 @@ function fakeMedia(identity, remote, unsupported) {
             this.remoteParticipants = new Map([[remote,person(remote)]]);
             this.canPlaybackAudio = true;
             const local = this.localParticipant;
+            stats.remoteScreen = (trackSid, sid=`PA_${remote}`) => {
+                const peer=this.remoteParticipants.get(remote), {ScreenShare}=source;
+                const previous=peer.getTrackPublication(ScreenShare);
+                if (previous) {
+                    previous.track.stop();
+                    peer.trackPublications.delete(ScreenShare);
+                    this.emit('TrackUnsubscribed',previous.track);
+                }
+                if (!trackSid) return;
+                peer.sid=sid;
+                peer.permissions={canPublish:true,canPublishSources:[3]};
+                const canvas=document.createElement('canvas'); canvas.width=640; canvas.height=360;
+                const ctx=canvas.getContext('2d');
+                const track=new LocalVideoTrack(canvas.captureStream(10).getVideoTracks()[0]);
+                track.source=ScreenShare;
+                const pub={trackSid,source:ScreenShare,kind:'video',track,isMuted:false,isDesired:true,
+                    setSubscribed(wanted){ this.isDesired=wanted; }};
+                peer.trackPublications.set(ScreenShare,pub);
+                this.emit('TrackSubscribed',track,pub,peer);
+                ctx.fillStyle='#164cfa'; ctx.fillRect(0,0,640,360);
+            };
             stats.permission = allow => {
                 const previous = local.permissions;
                 local.permissions = {canPublish:true,canPublishSources:allow?[1,2,3]:[1,2]};
@@ -28,7 +49,7 @@ function fakeMedia(identity, remote, unsupported) {
             };
             local.publishTrack = async (track,opts) => {
                 track.source=opts.source;
-                local.trackPublications.set(opts.source,{kind:'video',isMuted:false,track});
+                local.trackPublications.set(opts.source,{kind:'video',isMuted:false,track,trackSid:`TR_local_${stats.published.length + 1}`});
                 stats.published.push(opts);
                 this.emit('LocalTrackPublished');
             };
@@ -156,6 +177,114 @@ test('packaged pupil gets a labelled screen button by mic and camera only after 
     assert.equal(await hint.isVisible(),false);
     assert.deepEqual(requests.filter(r=>r.body.action==='screen-access').map(r=>r.body.enabled),[true,false]);
     assert.deepEqual(errors,[]);
+});
+
+test('only a recording presenter can compose the archive, apart from live sharing and unsupported-browser guidance', {skip, timeout:38000}, async t => {
+    const fixture=packaged(t), staff=fixture.render('teacher',true), admin=fixture.render('admin',true), pupil=fixture.render('student',true);
+    const pages={'/teacher':staff,'/unsupported-staff':staff,'/admin':admin,'/pupil':pupil};
+    const lesson='archive-lesson', epoch='archive-epoch', id='d'.repeat(32), requests=[];
+    const screen={identity:'student-1',sid:'PA_student-1'};
+    let presenter='teacher-1', activeScreen=null, session='off', archive={board:false,screen:null};
+    const {browser,origin}=await serveBrowser(t,async (req,res,url)=>{
+        const path=new URL(req.headers.referer || '/',url).pathname;
+        const identity=path==='/admin'?'admin-1':path==='/pupil'?'student-1':'teacher-1';
+        if (Object.hasOwn(pages,url.pathname)) return send(res,'text/html; charset=UTF-8',pages[url.pathname]);
+        if (url.pathname==='/fixture.js') return send(res,'text/javascript',
+            `(${fakeMedia})(${JSON.stringify(identity)},${JSON.stringify(identity==='student-1'?'teacher-1':'student-1')},${path==='/unsupported-staff'});`,
+            {'Cache-Control':'no-store'});
+        if (url.searchParams.get('route')==='api') {
+            let buf=''; for await (const chunk of req) buf+=chunk;
+            const input=JSON.parse(buf), result={ok:true};
+            requests.push({identity,input});
+            const admitted=input.lesson===lesson && input.epoch===epoch && input.sid===`PA_${identity}`;
+            const board={rev:1,cursor:0,write:identity!=='student-1',navigate:identity===presenter,owner:'c'.repeat(16),
+                ...(input.board===1?{}:{reset:true,doc:null,ops:[],docs:[],page:1})};
+            switch(input.action) {
+                case 'status':
+                    Object.assign(result,{phase:'live',lesson,epoch,ready:true,joinable:true,slot:11,admitted});
+                    if (admitted) Object.assign(result,{board,screen:activeScreen,screenEnabled:true,wakeMode:'system',
+                        quality:{screen:{width:640,height:360,frameRate:10,bitrate:180000}},
+                        recording: session==='off'?null:{id,notice:'live',...(session==='new' && identity===presenter?{archive}: {})}});
+                    break;
+                case 'board-sync':
+                    assert.ok(admitted); result.board=board; break;
+                case 'ticket':
+                    Object.assign(result,{lesson,epoch,url:'wss://fixture.invalid',token:'fixture'}); break;
+                case 'record-source':
+                    assert.ok(admitted && identity===presenter && session==='new');
+                    if (input.source==='board') archive.board=input.enabled;
+                    else {
+                        assert.equal(input.publisherSid,screen.sid);
+                        assert.match(input.track,/^TR_screen[12]$/);
+                        archive.screen=input.enabled?input.track:null;
+                    }
+                    result.archive=archive; break;
+                default: assert.fail(`unexpected fixture action ${input.action}`);
+            }
+            return send(res,'application/json',JSON.stringify(result));
+        }
+        if (!fixture.serve(url,res)) res.writeHead(404).end();
+    });
+    async function open(path, width=540) {
+        const page=await browser.newPage({viewport:{width,height:680},isMobile:width===320});
+        page.setDefaultTimeout(8500);
+        await page.goto(origin+path);
+        await page.locator('#classroom[data-live=yes]').waitFor();
+        return page;
+    }
+    const phone=await open('/unsupported-staff',320);
+    const share=phone.locator('#screen-toggle');
+    await share.waitFor();
+    assert.ok(await share.isDisabled());
+    assert.match(await phone.locator('#screen-hint').textContent(),/محدودیت از مرورگر است، نه اجازهٔ کلاس/);
+    assert.deepEqual(await phone.evaluate(()=>window.screenFixture.clicks),[]);
+    await phone.close();
+    const [teacher,deputy,student]=await Promise.all([open('/teacher'),open('/admin'),open('/pupil',320)]);
+    const btn=teacher.locator('#record-board-display'), shareBtn=teacher.locator('#record-screen-display');
+    assert.equal(await student.locator('.archive-source').count(),0);
+    assert.equal(await btn.isVisible(),false);
+    session='old';
+    await teacher.locator('#classroom[data-recording=yes]').waitFor();
+    assert.equal(await btn.isVisible(),false,'a protocol-v1 worker without layout support has no toggles');
+    session='new'; activeScreen=screen;
+    await btn.waitFor();
+    assert.equal((await btn.textContent()).trim(),'نمایش در ضبط');
+    assert.equal(await btn.getAttribute('aria-pressed'),'false');
+    assert.equal(await shareBtn.isVisible(),false,'the lease alone is not a published screen');
+    await teacher.evaluate(()=>window.screenFixture.remoteScreen('TR_screen1','PA_Former'));
+    assert.equal(await teacher.locator('#screen-panel').isVisible(),false);
+    await teacher.evaluate(()=>window.screenFixture.remoteScreen('TR_screen1'));
+    await shareBtn.waitFor();
+    assert.equal((await shareBtn.textContent()).trim(),'نمایش در ضبط');
+    const panel=teacher.locator('#screen-panel'), before=await panel.boundingBox();
+    await btn.click();
+    await teacher.locator('#record-board-display[aria-pressed=true]').waitFor();
+    await shareBtn.click();
+    await teacher.locator('#record-screen-display[aria-pressed=true]').waitFor();
+    assert.deepEqual(await panel.boundingBox(),before,'archive controls do not change the size or visibility of the live screen');
+    const layoutRequests=()=>requests.filter(r=>r.input.action==='record-source');
+    assert.deepEqual(layoutRequests().map(r=>r.input),[
+        {class:22,action:'record-source',lesson,epoch,sid:'PA_teacher-1',source:'board',enabled:true},
+        {class:22,action:'record-source',lesson,epoch,sid:'PA_teacher-1',source:'screen',enabled:true,track:'TR_screen1',publisherSid:screen.sid},
+    ]);
+    await teacher.evaluate(()=>window.screenFixture.remoteScreen(null));
+    await shareBtn.waitFor({state:'hidden'});
+    await teacher.evaluate(()=>window.screenFixture.remoteScreen('TR_screen2'));
+    await shareBtn.waitFor();
+    assert.equal(await shareBtn.getAttribute('aria-pressed'),'false','a replacement publication is not automatically promoted');
+    const replacementPanel=await panel.boundingBox();
+    await btn.click();
+    await teacher.locator('#record-board-display[aria-pressed=false]').waitFor();
+    assert.deepEqual(await panel.boundingBox(),replacementPanel);
+    assert.equal(await deputy.locator('.archive-source:visible').count(),0);
+    presenter='admin-1';
+    await deputy.locator('#record-board-display').waitFor();
+    await btn.waitFor({state:'hidden'});
+    assert.equal(await shareBtn.isVisible(),false);
+    assert.equal(await panel.isVisible(),true,'presenter handoff hides recorder controls, not the live screen');
+    session='off';
+    await deputy.locator('#record-board-display').waitFor({state:'hidden'});
+    assert.equal(layoutRequests().length,3);
 });
 
 test('packaged teacher and admin recording controls, pupil notice and explicit yes/no on close', {skip, timeout:38000}, async t => {
