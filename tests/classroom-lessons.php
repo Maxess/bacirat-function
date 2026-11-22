@@ -328,39 +328,77 @@ must(cl_board_read($s,$cueLesson,$student,[])['laser'] === null, 'a stale page c
 cl_board_read($s,$cueLesson,$teacher,$requestAim,microtime(true)-CL_LASER_TTL_MS/1000-.1);
 must(cl_board_read($s,$cueLesson,$student,[])['laser'] === null, 'a request held up by the server lock is not replayed');
 // A fixed-size live viewport snapshot travels alongside, not inside, the page/ink revision.
+$readBoardAt = static fn(array $lesson, array $actor, array $data) => cl_board_read($s,$lesson,$actor,$data,null,$t+9);
 $frame = ['zoom'=>250,'crop'=>[4200,3000,8200,9600]];
 $vp = $bind($cueLesson,'PA_Teacher') + ['board'=>1,'ink'=>2,'compact'=>true,'view'=>$frame];
-denied(403,fn()=>cl_board_read($s,$cueLesson,$student,$vp)); // Already has an ink grant.
-denied(403,fn()=>cl_board_read($s,$cueLesson,$manager,$vp));
-denied(403,fn()=>cl_board_read($s,$cueLesson,$other,$vp));
-denied(409,fn()=>cl_board_read($s,$cueLesson,$teacher,array_replace($vp,['sid'=>'PA_Stale'])));
-denied(409,fn()=>cl_board_read($s,$cueLesson,$teacher,array_replace($vp,['epoch'=>str_repeat('f',24)])));
+denied(403,fn()=>$readBoardAt($cueLesson,$student,$vp)); // Already has an ink grant.
+denied(403,fn()=>$readBoardAt($cueLesson,$manager,$vp));
+denied(403,fn()=>$readBoardAt($cueLesson,$other,$vp));
+denied(409,fn()=>$readBoardAt($cueLesson,$teacher,array_replace($vp,['sid'=>'PA_Stale'])));
+denied(409,fn()=>$readBoardAt($cueLesson,$teacher,array_replace($vp,['epoch'=>str_repeat('f',24)])));
 foreach ([null, 'frame', ['zoom'=>301,'crop'=>$frame['crop']], ['zoom'=>99,'crop'=>$frame['crop']],
     ['zoom'=>250,'crop'=>[3,9000,5500,5500]], ['zoom'=>250,'crop'=>[0,0,10000,10001]],
     ['zoom'=>250,'crop'=>[1,2,3,4]], ['zoom'=>'250','crop'=>$frame['crop']], ['zoom'=>250,'crop'=>[1.2,0,10000,9000]]] as $invalid) {
-    denied(400,fn()=>cl_board_read($s,$cueLesson,$teacher,array_replace($vp,['view'=>$invalid])));
+    denied(400,fn()=>$readBoardAt($cueLesson,$teacher,array_replace($vp,['view'=>$invalid])));
 }
-$updated = cl_board_read($s,$cueLesson,$teacher,$vp);
+$updated = $readBoardAt($cueLesson,$teacher,$vp);
 must($updated['navigate'] && $updated['view'] === $frame && $updated['cursor'] === 2 && $updated['rev'] === 1 && !isset($updated['ops']),
     'viewport update does not create an ink operation or page revision');
 $read = array_diff_key($vp,['view'=>true]);
-$pupilFrame = cl_board_read($s,$cueLesson,$student,$read);
+$pupilFrame = $readBoardAt($cueLesson,$student,$read);
 $recordFrame = cl_board_view($s,$cueLesson['id'],null,$read,cl_activity($s,$cueLesson['id']),$cueLesson);
 must($pupilFrame['view'] === $frame && $pupilFrame['write'] && !isset($pupilFrame['navigate'])
     && $recordFrame['view'] === $frame && !$recordFrame['write'] && !isset($recordFrame['navigate'],$recordFrame['owner']),
     'pupil and read-only recorder get the same frame without navigation permission');
-must(!isset(cl_board_read($s,$epochChanged,$student,$read)['view']), 'an old transport cannot leak its crop into a resumed session');
+must(!isset($readBoardAt($epochChanged,$student,$read)['view']), 'an old transport cannot leak its crop into a resumed session');
 $changed = cl_activity($s,$cueLesson['id']);
 $changed['view']['at'] -= 2;
 $changed['docs'][$sampleDoc = str_repeat('c',32)] = ['id'=>$sampleDoc,'pages'=>1];
 $s->put('activity',$cueLesson['id'],$changed);
 cl_board_action($s,$cueLesson,['board'=>1],'board-clear');
-must(cl_board_read($s,$cueLesson,$student,$read)['view'] === $frame,'clearing ink preserves the selected crop');
+must($readBoardAt($cueLesson,$student,$read)['view'] === $frame,'clearing ink preserves the selected crop');
 cl_board_action($s,$cueLesson,['board'=>2,'doc'=>$sampleDoc,'page'=>1],'board-page');
-$rebased = cl_board_read($s,$cueLesson,$teacher,$vp);
+$rebased = $readBoardAt($cueLesson,$teacher,$vp);
 must($rebased['rev'] === 3 && !isset($rebased['view']) && $rebased['doc']['id'] === $sampleDoc,'page change resets the crop and ignores stale viewport updates');
 cl_clear_activity($s,$cueLesson['id']);
 denied(403,fn()=>cl_set_access($s,$cfg,$active,$manager,['feature'=>'board','enabled'=>true],$t+9,$rpc));
+
+// In a manager-led room the tools must exist before any teacher joins, including a
+// Friday room with teacher=0. Prefer the confirmed opener, not SFU list order.
+$managerOnly = array_replace($active, ['id'=>str_repeat('e',32),'board_host'=>'admin-3',
+    'staff'=>['admin-1'=>'PA_Super','admin-3'=>'PA_Manager'],
+    'seen'=>['admin-1'=>'PA_Super','admin-3'=>'PA_Manager','student-1'=>'PA_Pupil'],
+    'pulses'=>['admin-1'=>['sid'=>'PA_Super','at'=>$t+9],'admin-3'=>['sid'=>'PA_Manager','at'=>$t+9],
+        'student-1'=>['sid'=>'PA_Pupil','at'=>$t+9]], 'access'=>[]]);
+$managerFrame = $bind($managerOnly,'PA_Manager') + ['board'=>1,'ink'=>0,'compact'=>true,'view'=>$frame];
+must(cl_board_presenter($managerOnly,$t+9) === 'admin-3' && cl_controls_board($managerOnly,$manager,$t+9),
+    'confirmed opener controls the board while the assigned teacher is absent');
+must(cl_activity_sync($s,$managerOnly,$manager,[], $t+9)['board']['navigate'] === true,
+    'full status restores the manager’s controls on the first admitted read');
+cl_require_board_control($managerOnly,$manager,$managerFrame,$t+9); // Also used before accepting an upload or page change.
+must($readBoardAt($managerOnly,$manager,$managerFrame)['view'] === $frame, 'manager can share a crop');
+$grant = ['feature'=>'board','enabled'=>true,'identity'=>'student-1'];
+$managerOnly['access'] = cl_set_access($s,$cfg,$managerOnly,$manager,$grant,$t+9,$rpc)['access'];
+must(cl_may_write($managerOnly,$student), 'presenter can grant a pupil pen and eraser');
+denied(403,fn()=>cl_require_board_control($managerOnly,$student,$managerFrame,$t+9));
+$presentTeacher = $managerOnly;
+$presentTeacher['staff']['teacher-1'] = $presentTeacher['seen']['teacher-1'] = 'PA_Teacher';
+$presentTeacher['pulses']['teacher-1'] = ['sid'=>'PA_Teacher','at'=>$t+9];
+must(cl_board_presenter($presentTeacher,$t+9) === 'teacher-1', 'assigned teacher takes priority immediately after verified entry');
+$follow = array_diff_key($managerFrame,['view'=>true]);
+$handoff = $readBoardAt($presentTeacher,$manager,$follow);
+must(!isset($handoff['navigate']) && $handoff['view'] === $frame, 'former presenter follows the same existing crop without writes');
+denied(403,fn()=>$readBoardAt($presentTeacher,$manager,$managerFrame));
+denied(403,fn()=>cl_set_access($s,$cfg,$presentTeacher,$manager,$grant,$t+9,$rpc));
+$presentTeacher['pulses']['teacher-1']['at'] -= CL_PULSE_TTL + 1;
+must(cl_controls_board($presentTeacher,$manager,$t+9), 'stale teacher presence cannot lock out the active manager');
+$presentTeacher['pulses']['admin-3']['sid'] = 'PA_Replacement';
+must(!cl_controls_board($presentTeacher,$manager,$t+9) && cl_board_presenter($presentTeacher,$t+9) === 'admin-1',
+    'older manager SID loses control and the next confirmed supervisor can lead');
+$managerOnly['access'] = cl_set_access($s,$cfg,$managerOnly,$manager,array_replace($grant,['enabled'=>false]),$t+9,$rpc)['access'];
+denied(403,fn()=>cl_ink_input($managerOnly,$student,$pupilInk));
+cl_clear_activity($s,$managerOnly['id']);
+$s->delete('lesson',$managerOnly['id']);
 denied(403,fn()=>cl_ink_input($active,$student,['strokes'=>[['tool'=>'erase-stroke','targets'=>['old-00000001']]]]));
 cl_set_access($s,$cfg,$active,$manager,['feature'=>'board','enabled'=>false],$t+9,$rpc);
 $active = cl_active($s,10);
@@ -817,13 +855,14 @@ must(!cl_active($s,20) && !isset($sfus[$parallel['room']]), 'revoking Friday als
 // Opt-in with pupils: same authenticated membership, real presence timing, ephemeral results.
 $withPupils = array_replace($trial, ['friday_test'=>['date'=>'2026-11-20','id'=>str_repeat('f',32),'students'=>true]]);
 $start = $fri+100;
-$pupilDemo = cl_open_lesson($s,$ctx,$withPupils,$first,$priorYear,['slot'=>CL_FRIDAY_SLOT],$start,$rpc);
+$pupilDemo = cl_open_lesson($s,$ctx,$withPupils,$first,$manager,['slot'=>CL_FRIDAY_SLOT],$start,$rpc);
 $room = $pupilDemo['room'];
 $wrongClass = cl_school_user($db,['student_id'=>2],$year);
 must($pupilDemo['roster'] === [] && cl_can_lesson($pupilDemo,$student) && !cl_can_lesson($pupilDemo,$wrongClass), 'opt-in only authorizes own class; do not copy the roster');
-$staffWire = ['teacher-4'=>'PA_PilotStaff'];
+must($pupilDemo['teacher'] === 0 && $pupilDemo['board_host'] === $manager['identity'], 'opening a Friday board does not create a teacher assignment');
+$staffWire = ['admin-3'=>'PA_PilotStaff'];
 $wire($room,$staffWire);
-$pulse(10,$priorYear,'PA_PilotStaff',$start+1);
+$pulse(10,$manager,'PA_PilotStaff',$start+1);
 $unconfirmed = cl_reconcile($s,$withPupils,$first,cl_active($s,10),$start+1,$rpc);
 denied(409,fn()=>cl_ticket($withPupils,$unconfirmed,$student,$bind($unconfirmed,'PA_Student'),$start+1));
 cl_event_apply($s,$withPupils,['event'=>'participant_joined','room'=>['name'=>$room]],$start+2,$rpc);
@@ -836,10 +875,19 @@ $practicing = cl_reconcile($s,$withPupils,$first,cl_active($s,10),$start+5,$rpc)
 must($practicing['seconds'] === [] && array_keys($practicing['roster']) === ['student-1'], 'only consecutive verified intervals count');
 $practicing = cl_reconcile($s,$withPupils,$first,cl_active($s,10),$start+8,$rpc);
 must($practicing['seconds'] === ['student-1'=>3] && !isset($practicing['first_seen']), 'same duration for pupil practice without an official arrival clock');
+$practiceBoard = $bind($practicing,'PA_PilotStaff') + ['board'=>1,'view'=>$frame];
+$livePractice = cl_check_live($withPupils,$practicing,$manager,$practiceBoard,$start+8);
+$pilotView = cl_board_read($s,$livePractice,$manager,$practiceBoard,null,$start+8);
+must($pilotView['navigate'] === true && $pilotView['view'] === $frame && !cl_wake_control($livePractice,$manager),
+    'the admitted Friday manager presents without gaining teacher-only wake control');
+$practicing['access'] = cl_set_access($s,$withPupils,$practicing,$manager,['feature'=>'board','enabled'=>true],$start+8,$rpc)['access'];
+must(cl_may_write($practicing,$student), 'the Friday manager can grant the whole class ink');
+$practicing['access'] = cl_set_access($s,$withPupils,$practicing,$manager,['feature'=>'board','enabled'=>false],$start+8,$rpc)['access'];
+must(!cl_may_write($practicing,$student), 'the same manager can revoke whole-class ink');
 cl_chat($s,cl_check_live($withPupils,$practicing,$student,$bind($practicing,'PA_Student'),$start+8),$student,'پیام تمرینی',$start+8);
-cl_event_apply($s,$withPupils,['event'=>'participant_left','room'=>['name'=>$room],'participant'=>['identity'=>'teacher-4','sid'=>'PA_PilotStaff']],$start+9,$rpc);
+cl_event_apply($s,$withPupils,['event'=>'participant_left','room'=>['name'=>$room],'participant'=>['identity'=>'admin-3','sid'=>'PA_PilotStaff']],$start+9,$rpc);
 $paused = cl_active($s,10);
-must($paused['phase']==='paused' && $paused['room'] === null && !isset($sfus[$room]) && $paused['seconds'] === ['student-1'=>3], 'last teacher leaves: pupil time freezes and transport closes');
+must($paused['phase']==='paused' && $paused['room'] === null && !isset($sfus[$room]) && $paused['seconds'] === ['student-1'=>3], 'last supervisor leaves: pupil time freezes and transport closes');
 denied(409,fn()=>cl_ticket($withPupils,$paused,$student,$bind($practicing,'PA_Student'),$start+10));
 $resumed = cl_open_lesson($s,$ctx,$withPupils,$first,$teacher,['slot'=>CL_FRIDAY_SLOT],$start+120,$rpc);
 must($resumed['id'] === $paused['id'] && $resumed['room'] !== $room && $resumed['seconds'] === ['student-1'=>3], 'practice resumes with the same timer after the uncounted wait');

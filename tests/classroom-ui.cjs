@@ -155,7 +155,7 @@ function fixture(staff, autoSlot = 0) {
                     const profilesRev=JSON.stringify(srv.profiles);
                     if (input.people) reply.seconds=srv.seconds;
                     if (input.profilesRev!==profilesRev) reply.profiles=srv.profiles;
-                    Object.assign(reply,{admitted:true,profilesRev,chat:srv.chat,board:{rev:1,moving:srv.moving,write:srv.write,laser:srv.laser,navigate:staff},
+                    Object.assign(reply,{admitted:true,profilesRev,chat:srv.chat,board:{rev:1,moving:srv.moving,write:srv.write,laser:srv.laser,navigate:staff && srv.navigate !== false},
                         cameraCodec:srv.cameraCodec,screen:srv.screen || null,
                         wakeMode:srv.wakeMode || 'live',wakeControl:staff && srv.wakeControl !== false});
                     const current = quality();
@@ -167,7 +167,7 @@ function fixture(staff, autoSlot = 0) {
                 }
                 if (srv.afterStatus) await srv.afterStatus();
             } else if (input.action==='board-sync') {
-                if (srv.phase==='live' && input.epoch===srv.epoch) reply.board={rev:1,moving:srv.moving,write:srv.write,laser:srv.laser};
+                if (srv.phase==='live' && input.epoch===srv.epoch) reply.board={rev:1,moving:srv.moving,write:srv.write,laser:srv.laser,navigate:staff && srv.navigate !== false};
                 else { status=409; reply={ok:false}; }
             } else if(input.action==='open'||input.action==='ticket') {
                 if (input.action === 'open' && srv.phase !== 'live') srv.phase = 'starting';
@@ -234,7 +234,7 @@ function fixture(staff, autoSlot = 0) {
         return pub;
     }
     function visibility(value) { srv.hidden=value; documentEvents.visibilitychange(); }
-    return {elements,srv,requests,boards,captures,cameraCaptures,crops,inputs,publications,subscriptions,visibility,remoteTrack,rawVideo,stream,wakeStates,chooseWake:mode=>wakeChoice(mode),time,status,change,controls,fixtureVideo,advance,aim(point){aim=point;boardConfig.aimSoon();},get cameraAttempts(){return cameraAttempts;},get room(){return lastRoom;}};
+    return {elements,srv,requests,boards,captures,cameraCaptures,crops,inputs,publications,subscriptions,visibility,remoteTrack,rawVideo,stream,wakeStates,boardSend:(...args)=>boardConfig.send(...args),chooseWake:mode=>wakeChoice(mode),time,status,change,controls,fixtureVideo,advance,aim(point){aim=point;boardConfig.aimSoon();},get cameraAttempts(){return cameraAttempts;},get room(){return lastRoom;}};
 }
 
 test('student auto-enters; pupil durations remain only in the optional roster, not the room or lobby',async()=>{
@@ -306,6 +306,33 @@ test('a moderator uses icon-only individual toggles and one menu for class permi
     await f.elements.close.click(); await f.time();
     assert.equal(f.requests.filter(r=>r.action==='open').length,1); assert.equal(f.elements['live-panel'].hidden,true);
     assert.equal(f.elements['access-menu'].hidden,true);
+});
+
+test('compact reads update the roster, class grants and page commands on a presenter handoff', async()=>{
+    const f=fixture(true);
+    f.srv.phase='live';
+    f.srv.navigate=false;
+    f.srv.access={board:{all:false,members:{'student-1':true}}};
+    await f.time(); await f.time();
+    const grant=f.elements['all-board-give'], cut=f.elements['all-board-cut'];
+    const pen=id=>f.controls(`student-${id}`).find(button=>button.dataset.feature==='board');
+    assert.ok(grant.hidden && pen(2).hidden);
+    assert.ok(!cut.disabled && !pen(1).hidden, 'non-presenting staff can still revoke');
+    const before=f.requests.length;
+    f.srv.navigate=true;
+    await f.time();
+    assert.deepEqual(f.requests.slice(before).map(r=>r.action), ['board-sync'], 'handoff is received before the next status');
+    assert.ok(!grant.hidden && !grant.disabled && !pen(2).hidden, 'class and individual grants follow the same authority');
+    await f.boardSend('board-page',{board:1,doc:null,page:1});
+    assert.equal(f.requests.at(-1).action,'board-page');
+    f.srv.navigate=false;
+    await f.time();
+    assert.equal(f.requests.at(-1).action,'board-sync');
+    assert.ok(grant.hidden && pen(2).hidden && !pen(1).hidden);
+    await assert.rejects(f.boardSend('board-page',{board:1,doc:null,page:1}));
+    await pen(1).click();
+    assert.deepEqual(f.requests.at(-1),{action:'set-access',class:22,lesson:f.srv.lesson,epoch:f.srv.epoch,sid:'PA_teacher-1',
+        feature:'board',enabled:false,identity:'student-1'});
 });
 
 test('microphone access failure is shown without exposing browser diagnostics',async()=>{

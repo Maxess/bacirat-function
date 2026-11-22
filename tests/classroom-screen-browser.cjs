@@ -2,6 +2,7 @@
 // the display picker returns a synthetic canvas track, never a real screen.
 const assert = require('node:assert/strict');
 const test = require('node:test');
+const {twoPageBoardPDF} = require('./fixtures/classroom-board-docs.cjs');
 const {packaged, serveBrowser, send, skip} = require('./fixtures/classroom-browser.cjs');
 
 function fakeMedia(identity, remote, unsupported) {
@@ -244,60 +245,68 @@ test('packaged teacher and admin recording controls, pupil notice and explicit y
     }
 });
 
-function twoPageBoardPDF() {
-    const page=(w,h,i)=>`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${w} ${h}] /Resources <<>> /Contents ${i} 0 R >>`;
-    const stream=s=>`<< /Length ${s.length} >>\nstream\n${s}\nendstream`;
-    const objects=['<< /Type /Catalog /Pages 2 0 R >>','<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>',
-        page(480,300,5),page(260,380,6),stream('1 1 0 rg 0 0 480 300 re f'),stream('0 1 1 rg 0 0 260 380 re f')];
-    let file='%PDF-1.4\n';
-    const offsets=objects.map((obj,i)=>{const offset=file.length; file+=`${i+1} 0 obj\n${obj}\nendobj\n`; return offset;});
-    return Buffer.from(`${file}xref\n0 7\n0000000000 65535 f \n${offsets.map(n=>`${String(n).padStart(10,'0')} 00000 n \n`).join('')}trailer\n<< /Size 7 /Root 1 0 R >>\nstartxref\n${file.length}\n%%EOF\n`);
-}
-
-test('teacher and mobile pupil share the actual page, crop and ink; only the teacher navigates', {skip,timeout:42000}, async t=>{
-    const fixture=packaged(t), html={teacher:fixture.render('teacher',true),student:fixture.render('student',true)};
-    const lesson='active-lesson', epoch='epoch', pdf=twoPageBoardPDF(), doc={id:'page-doc',name:'fixture.pdf',mime:'application/pdf',bytes:pdf.length,pages:2};
-    const members={'teacher-1':'PA_teacher-1','student-1':'PA_student-1'};
-    let rev=1, pageNumber=1, view, ink=[], granted=false;
+test('manager-led board restores real upload, zoom and grants; the arriving teacher takes over', {skip,timeout:50000}, async t=>{
+    const fixture=packaged(t), html=Object.fromEntries(['admin','teacher','student'].map(role=>[role,fixture.render(role,true)]));
+    const lesson='active-lesson', epoch='epoch', pdf=twoPageBoardPDF();
+    const members={'admin-1':'PA_admin-1','teacher-1':'PA_teacher-1','student-1':'PA_student-1'};
+    let rev=1, pageNumber=1, view, doc=null, ink=[], granted=false, presenter='admin';
+    const documents=new Map();
     const requests=[], files=[];
     const {browser,origin}=await serveBrowser(t,async (req,res,url)=>{
-        const role=new URL(req.headers.referer || '/',url).pathname==='/teacher'?'teacher':'student', teacher=role==='teacher';
+        const role=new URL(req.headers.referer || '/',url).pathname.slice(1), staff=role!=='student';
         const identity=`${role}-1`;
-        if (html[url.pathname.slice(1)]) return send(res,'text/html; charset=UTF-8',html[url.pathname.slice(1)]);
-        if (url.pathname==='/fixture.js') return send(res,'text/javascript',`(${fakeMedia})('${identity}','${teacher?'student':'teacher'}-1',false);`);
+        if (Object.hasOwn(html,url.pathname.slice(1))) return send(res,'text/html; charset=UTF-8',html[url.pathname.slice(1)]);
+        if (url.pathname==='/fixture.js') return send(res,'text/javascript',`(${fakeMedia})('${identity}','${staff?'student':'admin'}-1',false);`);
         if (url.searchParams.get('route')==='content') {
             assert.equal(url.searchParams.get('sid'),members[identity]);
             assert.equal(url.searchParams.get('doc'),doc.id);
-            files.push(identity);
-            return send(res,'application/pdf',pdf,{'Cache-Control':'no-store'});
+            files.push([identity,doc.mime]);
+            return send(res,doc.mime,documents.get(doc.id).bytes,{'Cache-Control':'no-store'});
         }
         if (url.searchParams.get('route')==='api') {
-            let buf=''; for await (const chunk of req) buf+=chunk;
-            const input=JSON.parse(buf), access=()=>({board:{all:granted,members:{}}});
+            const chunks=[]; for await (const chunk of req) chunks.push(chunk);
+            const buf=Buffer.concat(chunks), type=req.headers['content-type'];
+            let input, uploaded;
+            if (type.startsWith('multipart/form-data;')) {
+                const form=await new Response(buf,{headers:{'Content-Type':type}}).formData();
+                uploaded=form.get('file');
+                input={...Object.fromEntries(form),action:'upload',board:Number(form.get('board')),pages:Number(form.get('pages'))};
+                delete input.file;
+            } else input=JSON.parse(buf);
+            const access=()=>({board:{all:granted,members:{}}});
             requests.push({identity,input});
             const board=()=>{
-                const reset=input.board!==rev, write=granted||teacher;
-                return {rev,cursor:ink.length,write,owner:write?(teacher?'a':'b').repeat(16):undefined,
-                    navigate:teacher,view,viewMoving:!!input.view,ops:ink.slice(reset?0:input.ink),
-                    ...(reset?{reset,doc,page:pageNumber,docs:teacher?[doc]:[]}:{})};
+                const reset=input.board!==rev, write=granted||staff;
+                return {rev,cursor:ink.length,write,owner:write?(staff?'a':'b').repeat(16):undefined,
+                    navigate:role===presenter,view,viewMoving:!!input.view,ops:ink.slice(reset?0:input.ink),
+                    ...(reset?{reset,doc,page:pageNumber,docs:staff?[...documents.values()].map(d=>d.meta):[]}:{})};
             };
             let out;
             const admitted=input.sid===members[identity] && input.epoch===epoch && input.lesson===lesson;
+            if (input.action==='status' && admitted && role==='teacher') presenter='teacher';
             if (input.action==='status') out={phase:'live',ready:true,lesson,epoch,joinable:true,slot:11,wakeMode:'system',admitted,
                 ...(admitted?{members,access:access(),board:board()}: {})};
             else if (input.action==='ticket') out={lesson,epoch,url:'wss://fixture.invalid',token:'fixture'};
             else {
                 assert.ok(admitted);
                 if (input.action==='board-sync') {
-                    if (input.view) {assert.ok(teacher && input.board===rev); view=input.view;}
+                    if (input.view && role===presenter && input.board===rev) view=input.view;
                     out={board:board()};
+                } else if (input.action==='upload') {
+                    assert.ok(role===presenter && input.board===rev);
+                    const bytes=Buffer.from(await uploaded.arrayBuffer());
+                    assert.equal(input.pages,uploaded.type==='application/pdf'?2:1);
+                    if (uploaded.type==='application/pdf') assert.deepEqual(bytes,pdf);
+                    doc={id:`file-${rev}`,mime:uploaded.type,name:uploaded.name,bytes:bytes.length,pages:input.pages};
+                    documents.set(doc.id,{meta:doc,bytes});
+                    pageNumber=1; view=undefined; ink=[]; out={boardRev:++rev};
                 } else if (input.action==='board-page') {
-                    assert.ok(teacher && input.doc===doc.id && input.board===rev);
+                    assert.ok(role===presenter && input.doc===doc.id && input.board===rev);
                     pageNumber=input.page; view=undefined; ink=[]; out={boardRev:++rev};
                 } else if (input.action==='set-access') {
-                    assert.ok(teacher && input.feature==='board'); granted=input.enabled; out={access:access()};
+                    assert.ok(role===presenter && input.feature==='board'); granted=input.enabled; out={access:access()};
                 } else if (input.action==='board-ink') {
-                    assert.ok((teacher || granted) && input.board===rev);
+                    assert.ok((staff || granted) && input.board===rev);
                     ink.push(...input.strokes); out={ink:ink.length};
                 } else throw new Error(`unexpected request: ${input.action}`);
             }
@@ -305,17 +314,47 @@ test('teacher and mobile pupil share the actual page, crop and ink; only the tea
         }
         if (!fixture.serve(url,res)) res.writeHead(404).end();
     });
-    const teacher=await browser.newPage({viewport:{width:1080,height:790}}), pupil=await browser.newPage({viewport:{width:320,height:690}});
+    const manager=await browser.newPage({viewport:{width:860,height:760}}), pupil=await browser.newPage({viewport:{width:320,height:690}});
+    const teacher=await browser.newPage({viewport:{width:1080,height:790}});
     const errors=[];
-    for (const p of [teacher,pupil]) {p.setDefaultTimeout(6800); p.on('pageerror',e=>errors.push(e.message));}
+    for (const p of [manager,teacher,pupil]) {p.setDefaultTimeout(6800); p.on('pageerror',e=>errors.push(e.message));}
     const color=(p,name,rgb,at=[5000,5000])=>p.waitForFunction(({name,rgb,at})=>{
         const canvas=document.getElementById(name);
         const data=canvas.getContext('2d').getImageData(Math.floor(canvas.width*at[0]/10000),Math.floor(canvas.height*at[1]/10000),1,1).data;
         return rgb.every((v,i)=>data[i]===v);
     },{name,rgb,at});
-    await Promise.all([teacher.goto(`${origin}/teacher`),pupil.goto(`${origin}/student`)]);
-    await Promise.all([teacher,pupil].map(p=>color(p,'board-paper',[255,255,0])));
-    assert.deepEqual(files.slice().sort(),['student-1','teacher-1']);
+    await Promise.all([manager.goto(`${origin}/admin`),pupil.goto(`${origin}/student`)]);
+    await manager.locator('#toggle-files').click();
+    const image=await manager.evaluate(()=>{
+        const c=document.createElement('canvas'); c.width=8; c.height=8;
+        const ctx=c.getContext('2d'); ctx.fillStyle='#ea1766'; ctx.fillRect(0,0,8,8);
+        return c.toDataURL('image/png').split(',')[1];
+    });
+    const upload=async (buffer,name,mimeType)=>{
+        await manager.locator('#board-file').setInputFiles({buffer,name,mimeType});
+        await manager.locator('#board-upload button').click();
+    };
+    await upload(Buffer.from(image,'base64'),'image.png','image/png');
+    await Promise.all([manager,pupil].map(p=>color(p,'board-paper',[234,23,102])));
+    await upload(pdf,'fixture.pdf','application/pdf');
+    await Promise.all([manager,pupil].map(p=>color(p,'board-paper',[255,255,0])));
+    await manager.locator('#page-next').click(); await color(pupil,'board-paper',[0,255,255]);
+    await manager.locator('#page-prev').click(); await color(pupil,'board-paper',[255,255,0]);
+    await manager.locator('#board-zoom-in').click();
+    const waitZoom = expected => pupil.waitForFunction(expected=>document.getElementById('board-zoom-shared').textContent===expected,expected);
+    await waitZoom('۱۲۵٪');
+    await manager.locator('#board-zoom-out').click(); await waitZoom('۱۰۰٪');
+    await manager.locator('#toggle-access').click();
+    await manager.locator('#all-board-give').click(); await pupil.locator('#pen').waitFor();
+    assert.equal(await pupil.locator('#board-zoom-in,#page-next,#toggle-files').count(),0,'grant still only gives ink');
+    await manager.locator('#all-board-cut').click(); await pupil.locator('#pen').waitFor({state:'hidden'});
+
+    await teacher.goto(`${origin}/teacher`);
+    await color(teacher,'board-paper',[255,255,0]);
+    await manager.locator('#board-zoom-in').waitFor({state:'hidden'});
+    await manager.locator('#all-board-give').waitFor({state:'hidden'});
+    assert.deepEqual(files.filter(([,mime])=>mime==='application/pdf').map(([who])=>who).sort(),['admin-1','student-1','teacher-1']);
+    const received=files.length;
     assert.equal(await pupil.locator('#board-load-file').isVisible(),false);
     assert.equal(await pupil.locator('#pen').isVisible(),false);
     for (let i=0;i<3;i++) await teacher.locator('#board-zoom-in').click();
@@ -372,7 +411,7 @@ test('teacher and mobile pupil share the actual page, crop and ink; only the tea
     assert.equal(await pupil.locator('#board-page-label').textContent(),'۲');
     assert.equal(await pupil.locator('#board-zoom-shared').textContent(),'۱۰۰٪');
     assert.ok(close(await waitCrop(),[0,0,10000,10000]));
-    assert.equal(files.length,2,'zooming, erasing, page changes and resize do not reload the same PDF');
+    assert.equal(files.length,received,'zooming, erasing, page changes and resize do not reload the same PDF');
     const writes=requests.filter(({identity,input})=>identity==='student-1' && !['status','board-sync','ticket'].includes(input.action));
     assert.deepEqual(writes.map(({input})=>input.strokes[0].tool),['pen','erase-stroke']);
     assert.ok(!requests.some(({identity,input})=>identity==='student-1' && input.view));

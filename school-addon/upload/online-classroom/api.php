@@ -77,7 +77,7 @@ cl_json_reply(static function (): array {
                 $result += ['cameraCodec'=>cl_webcam_codec($cfg, $lesson), 'screen'=>cl_screen_state($cfg, $lesson),
                     'wakeMode'=>cl_wake_mode($lesson), 'wakeControl'=>cl_wake_control($lesson, $actor)]
                     + cl_status_people($lesson, $body) + cl_quality_status($s, $cfg, $class, $lesson, $actor, $body)
-                    + cl_activity_sync($s, $lesson, $actor, $body);
+                    + cl_activity_sync($s, $lesson, $actor, $body, $now);
                 if (cl_screen_enabled($cfg, $lesson)) {
                     if (cl_is_staff($actor) || cl_pupil_screen_enabled($cfg)) $result['screenEnabled'] = true;
                     if (cl_is_staff($actor) && cl_pupil_screen_enabled($cfg)) $result['pupilScreenEnabled'] = true;
@@ -118,7 +118,7 @@ cl_json_reply(static function (): array {
         $lesson = cl_check_live($cfg, $lesson, $actor, $body, $now);
         if ($action === 'board-sync') {
             // Drawing latency is independent of the slower presence/attendance poll.
-            return ['board'=>cl_board_read($s, $lesson, $actor, $body, $_SERVER['REQUEST_TIME_FLOAT'] ?? null)];
+            return ['board'=>cl_board_read($s, $lesson, $actor, $body, $_SERVER['REQUEST_TIME_FLOAT'] ?? null, $now)];
         }
         if ($action === 'chat') {
             cl_chat($s, $lesson, $actor, $body['text'] ?? null, $now);
@@ -132,7 +132,7 @@ cl_json_reply(static function (): array {
         if ($action === 'set-quality') return cl_set_quality($s, $cfg, $class, $lesson, $actor, $body, $now);
         if ($action === 'set-access') return cl_set_access($s, $cfg, $lesson, $actor, $body, $now, $rpc);
         if ($action === 'board-page' || ($action === 'upload' && $isUpload)) {
-            cl_board_teacher($lesson, $actor, $body);
+            cl_require_board_control($lesson, $actor, $body, $now);
             return $action === 'board-page' ? cl_board_action($s, $lesson, $body, $action) : cl_upload($s, $lesson, $body, $_FILES['file'] ?? []);
         }
         if ($action === 'board-clear') return cl_board_action($s, $lesson, $body, $action);

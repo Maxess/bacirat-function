@@ -25,7 +25,7 @@ $db->exec("CREATE TABLE `$table` (bucket TEXT,item TEXT,payload TEXT,PRIMARY KEY
       ('rubika','g0KnownGroup','گروه روبیکا','private','member'),('telegram','-100321','کلاس تلگرام','supergroup','member')");
 $s = new ClassroomStore($db, $table);
 $cfg = ['record_lessons'=>true,'recording_secret'=>str_repeat('a',48),'api_key'=>str_repeat('k',16),'api_secret'=>str_repeat('s',40),'room_prefix'=>'test-' . str_repeat('0',20)];
-$teacher = ['role'=>'teacher','id'=>7,'identity'=>'teacher-7'];
+$teacher = ['role'=>'teacher','id'=>7,'identity'=>'teacher-7','office'=>null];
 $student = ['role'=>'student','id'=>12,'identity'=>'student-12'];
 $admin = cl_school_user($db, ['admin_id'=>2], '1405/1406');
 $super = cl_school_user($db, ['admin_id'=>1], '1405/1406');
@@ -127,7 +127,7 @@ ok(!cl_rec_status($s,$cfg,$live,$deputy)['recording']['canSend'], 'unassigned de
 $board = $worker('board',$id,$t+6,['room'=>$live['room'],'board'=>0,'ink'=>0]);
 ok(isset($board['board']) && !isset($board['chat']) && $board['board']['write'] === false, 'recorder reads only current board');
 $view = ['zoom'=>200,'crop'=>[5000,0,10000,10000]];
-cl_board_read($s,$live,$teacher,['lesson'=>$id,'epoch'=>cl_epoch($live),'sid'=>'PA_staff','board'=>1,'view'=>$view]);
+cl_board_read($s,$live,$teacher,['lesson'=>$id,'epoch'=>cl_epoch($live),'sid'=>'PA_staff','board'=>1,'view'=>$view],null,$t+6);
 $delta = $worker('board',$id,$t+6,['room'=>$live['room'],'board'=>1,'ink'=>0,'compact'=>true,'view'=>CL_VIEW_FULL])['board'];
 ok($delta['view'] === $view && $delta['rev'] === 1 && !$delta['write'] && !isset($delta['navigate']) && !isset($delta['doc']),
     'worker receives the cropped viewport in the compact delta but cannot change it');
@@ -144,6 +144,14 @@ cl_event_apply($s,$cfg,['event'=>'participant_left','room'=>['name'=>$live['room
 $live = cl_active($s,15);
 ok($live['phase'] === 'live' && !isset($live['staff']['teacher-7'])
     && $worker('poll',$id,$t+7)['command'] === 'record', 'capture continues after teacher leaves if another authorized staff member keeps the class live');
+$stored = cl_activity($s,$id);
+$stored['view']['at'] -= 1; // Separate the two viewport writes without waiting in real time.
+$s->put('activity',$id,$stored);
+$adminView = ['zoom'=>150,'crop'=>[0,1000,6500,7900]];
+cl_board_read($s,$live,$admin,['lesson'=>$id,'epoch'=>cl_epoch($live),'sid'=>'PA_office','board'=>1,'view'=>$adminView],null,$t+7);
+$recorded = $worker('board',$id,$t+7,['room'=>$live['room'],'board'=>1,'ink'=>0,'compact'=>true])['board'];
+ok($recorded['view'] === $adminView && $recorded['cursor'] === 0 && !isset($recorded['navigate']),
+    'the same recorder protocol receives the manager’s crop without recording view changes as ink');
 $staleRoom = $live['room'];
 $paused = array_replace($live, ['phase'=>'paused','room'=>null]);
 $s->put('lesson',$id,$paused);

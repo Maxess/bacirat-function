@@ -97,6 +97,28 @@ function cl_entered(array $lesson, array $actor, mixed $sid, int $now): bool
         && ($lesson['pulses'][$id]['at'] ?? 0) >= $now - CL_PULSE_TTL;
 }
 
+/** One presenter per live transport. The timetable teacher has priority over the opener. */
+function cl_board_presenter(array $lesson, int $now): ?string
+{
+    if (($lesson['phase'] ?? null) !== 'live') return null;
+    $staff = $lesson['staff']; // Reconciled with eligible school accounts and the SFU, not supplied by the browser.
+    $present = static fn(string $who): bool => isset($staff[$who]) && cl_media_identity($who) && !cl_media_identity($who, true)
+        && cl_entered($lesson, ['identity'=>$who], $staff[$who], $now);
+    foreach (['teacher-' . ($lesson['teacher'] ?? 0), $lesson['board_host'] ?? ''] as $preferred) {
+        if ($present($preferred)) return $preferred;
+    }
+    // A host can leave while other authorized supervisors keep the room live. Stable
+    // ordering also covers old rooms without an opener, regardless of the SFU list order.
+    ksort($staff, SORT_STRING);
+    foreach ($staff as $who => $sid) if ($present($who)) return $who;
+    return null;
+}
+
+function cl_controls_board(array $lesson, array $actor, int $now): bool
+{
+    return cl_is_staff($actor) && cl_can_lesson($lesson, $actor) && cl_board_presenter($lesson, $now) === $actor['identity'];
+}
+
 function cl_check_live(array $cfg, ?array $lesson, array $actor, array $input, int $now): array
 {
     if (!$lesson || !cl_can_lesson($lesson, $actor) || cl_lesson_expired($cfg, $lesson, $now)
@@ -258,6 +280,7 @@ function cl_open_lesson(ClassroomStore $s, array $ctx, array $cfg, array $class,
     }
     $lesson['room'] = $cfg['room_prefix'] . '-v4-c' . $class['id'] . '-' . bin2hex(random_bytes(12));
     $lesson['phase'] = 'starting';
+    $lesson['board_host'] = $actor['identity'];
     $lesson['transport_at'] = $now;
     $lesson['seen'] = $lesson['staff'] = $lesson['pulses'] = [];
     $lesson['sample'] = 0;
@@ -480,9 +503,9 @@ function cl_set_access(ClassroomStore $s, array $cfg, array $lesson, array $acto
         || ($identity !== null && !cl_media_identity($identity, $feature === 'board'))) {
         throw new ClassroomError(400, 'نوع دسترسی یا شرکت‌کننده معتبر نیست.');
     }
-    // Staff can still withdraw a grant, but only this bell's teacher can grant pupil ink.
-    if ($feature === 'board' && $enabled && !cl_lesson_teacher($lesson, $actor)) {
-        throw new ClassroomError(403, 'اجازهٔ نوشتن روی تخته فقط با دبیر همین زنگ است.');
+    // The presenter can grant ink, not navigation. Supervisors can still withdraw an existing grant.
+    if ($feature === 'board' && $enabled && !cl_controls_board($lesson, $actor, $now)) {
+        throw new ClassroomError(403, 'دادن اجازهٔ نوشتن با ارائه‌دهندهٔ فعال تخته است.');
     }
     $sid = $identity === null ? null : ($lesson['seen'][$identity] ?? null);
     if ($identity !== null && !cl_entered($lesson, ['identity'=>$identity], $sid, $now)) {

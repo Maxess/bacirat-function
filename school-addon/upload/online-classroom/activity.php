@@ -51,7 +51,7 @@ function cl_layer(ClassroomStore $s, string $lesson, array $state): array
     return $s->get('layers:' . $lesson, $key) ?? ['key'=>substr(hash('sha256', $key), 0, 16), 'seq'=>0];
 }
 
-function cl_activity_sync(ClassroomStore $s, array $lesson, array $actor, array $input): array
+function cl_activity_sync(ClassroomStore $s, array $lesson, array $actor, array $input, ?int $at = null): array
 {
     $id = $lesson['id'];
     $state = cl_activity($s, $id);
@@ -66,17 +66,17 @@ function cl_activity_sync(ClassroomStore $s, array $lesson, array $actor, array 
     }
     unset($row);
     return ['chat'=>$chat, 'chatMore'=>($chat ? $chat[array_key_last($chat)]['n'] : $n) < $state['messages'],
-        'board'=>cl_board_view($s, $id, $actor, $input, $state, $lesson)];
+        'board'=>cl_board_view($s, $id, $actor, $input, $state, $lesson, $at)];
 }
 
 const CL_VIEW_FULL = ['zoom'=>100, 'crop'=>[0,0,10000,10000]];
 
-function cl_board_teacher(array $lesson, array $actor, array $body): void
+function cl_require_board_control(array $lesson, array $actor, array $body, int $now): void
 {
-    if (!cl_lesson_teacher($lesson, $actor)) throw new ClassroomError(403, 'فایل، صفحه و نمای تخته فقط در اختیار دبیر همین زنگ است.');
+    if (!cl_controls_board($lesson, $actor, $now)) throw new ClassroomError(403, 'فایل، صفحه و زوم در اختیار ارائه‌دهندهٔ فعال تخته است.');
     $sid = $body['sid'] ?? null;
     if (!cl_match_transport($lesson, $body) || !cl_sid($sid) || ($lesson['staff'][$actor['identity']] ?? null) !== $sid) {
-        throw new ClassroomError(409, 'اتصال دبیر عوض شده است؛ دوباره وارد کلاس شو.');
+        throw new ClassroomError(409, 'اتصال ارائه‌دهنده عوض شده است؛ دوباره وارد کلاس شو.');
     }
 }
 
@@ -93,7 +93,7 @@ function cl_view_input(mixed $value): array
 }
 
 // A null actor is the read-only recorder, with neither editing nor presenter cues.
-function cl_board_view(ClassroomStore $s, string $id, ?array $actor, array $input, array $state, ?array $lesson = null): array
+function cl_board_view(ClassroomStore $s, string $id, ?array $actor, array $input, array $state, ?array $lesson = null, ?int $at = null): array
 {
     $layer = cl_layer($s, $id, $state);
     $clock = $layer['clock'] ?? $layer['seq']; // Older rows are one tick each.
@@ -124,7 +124,7 @@ function cl_board_view(ClassroomStore $s, string $id, ?array $actor, array $inpu
     $doc = $state['doc'] === null ? null : $state['docs'][$state['doc']];
     $write = $actor && $lesson && cl_may_write($lesson, $actor);
     $frame = $state['view'] ?? null;
-    $shared = $actor && $lesson && cl_lesson_teacher($lesson, $actor) ? ['navigate'=>true] : [];
+    $shared = $actor && $lesson && cl_controls_board($lesson, $actor, $at ?? (int)$now) ? ['navigate'=>true] : [];
     if ($lesson && $frame && $frame['epoch'] === cl_epoch($lesson)) {
         if ($frame['value'] !== CL_VIEW_FULL) $shared['view'] = $frame['value'];
         if ($frame['at'] > $now - 1.2) $shared['viewMoving'] = true;
@@ -204,14 +204,15 @@ function cl_ink_input(array $lesson, array $actor, array $body): array
 }
 
 /** One bounded snapshot of the current sweep, not an append-only history. */
-function cl_board_read(ClassroomStore $s, array $lesson, array $actor, array $body, ?float $receivedAt = null): array
+function cl_board_read(ClassroomStore $s, array $lesson, array $actor, array $body, ?float $receivedAt = null, ?int $at = null): array
 {
     $id = $lesson['id'];
     $state = cl_activity($s, $id);
     $now = microtime(true);
+    $at ??= (int)$now;
     $changed = false;
     if (array_key_exists('view', $body)) {
-        cl_board_teacher($lesson, $actor, $body);
+        cl_require_board_control($lesson, $actor, $body, $at);
         $view = cl_view_input($body['view']);
         $prior = $state['view'] ?? null;
         $epoch = cl_epoch($lesson);
@@ -253,7 +254,7 @@ function cl_board_read(ClassroomStore $s, array $lesson, array $actor, array $bo
         }
     }
     if ($changed) $s->put('activity', $id, $state);
-    return cl_board_view($s, $id, $actor, $body, $state, $lesson);
+    return cl_board_view($s, $id, $actor, $body, $state, $lesson, $at);
 }
 
 function cl_board_action(ClassroomStore $s, array $lesson, array $input, string $action): array

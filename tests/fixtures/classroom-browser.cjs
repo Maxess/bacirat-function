@@ -5,7 +5,7 @@ const {mkdtempSync, readFileSync, rmSync} = require('node:fs');
 const {join, extname} = require('node:path');
 const {tmpdir} = require('node:os');
 const {MPM_TEST_BACI:site, MPM_TEST_CHROMIUM:chromium, MPM_TEST_PLAYWRIGHT:playwright, MPM_TEST_PHP:php='php',
-    MPM_TEST_CLASSROOM_ZIP:archive=join(__dirname,'../../artifacts/school-classroom-plugin-v0.4.18.zip')} = process.env;
+    MPM_TEST_CLASSROOM_ZIP:archive=join(__dirname,'../../artifacts/school-classroom-plugin-v0.4.19.zip')} = process.env;
 const mime = {'.css':'text/css','.js':'text/javascript','.mjs':'text/javascript','.woff2':'font/woff2','.pdf':'application/pdf',
     '.wasm':'application/wasm','.ttf':'font/ttf'};
 function send(res, type, bytes, headers={}) {

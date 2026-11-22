@@ -202,7 +202,7 @@ function cl_room_icon(string $name): string
                     <button type="button" id="board-zoom" class="zoom-value" dir="ltr" aria-label="بازنشانی بزرگ‌نمایی به ۱۰۰ درصد" title="بازنشانی بزرگ‌نمایی" hidden>۱۰۰٪</button>
                     <button type="button" id="board-zoom-in" class="icon-button" aria-label="بزرگ‌نمایی تخته" title="بزرگ‌نمایی" hidden><?= cl_room_icon('plus') ?></button>
                     <?php endif; ?>
-                    <bdi id="board-zoom-shared" class="board-zoom-shared" dir="ltr" title="بزرگ‌نماییِ نمای دبیر">۱۰۰٪</bdi>
+                    <bdi id="board-zoom-shared" class="board-zoom-shared" dir="ltr" title="بزرگ‌نماییِ نمای ارائه‌دهندهٔ تخته">۱۰۰٪</bdi>
                     <button type="button" id="board-expand" class="icon-button" aria-label="نمای بزرگ تخته" aria-pressed="false" title="نمای بزرگ تخته"><?= cl_room_icon('expand') . cl_room_icon('shrink') ?></button>
                     <?php if ($actor['role'] === 'teacher'): ?>
                     <details id="wake-control" class="wake-control" hidden>

@@ -815,7 +815,15 @@
 
     function receiveBoard(view, local, requestedAt) {
         if (!view) return;
+        // File/page commands and pupil permissions must use the same fresh authority
+        // as the board toolbar, including a handoff received between status polls.
+        const presenterChanged = staff && (view.navigate === true) !== (state.board?.navigate === true);
+        state.board = view;
         board.sync(view, local, requestedAt);
+        if (presenterChanged) {
+            renderAccessMenu(hasAccess());
+            renderPeople();
+        }
         inkRead = performance.now();
         // Keep the pointer visible while it fades, without continuing fast polling for an old snapshot.
         const freshLaser = (view.laser?.points?.at(-1)?.[2] ?? 0) - (inkRead - requestedAt) > 1200;
