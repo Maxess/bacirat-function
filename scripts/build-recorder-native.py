@@ -6,6 +6,8 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import tempfile
+from contextlib import ExitStack
 
 
 SOURCE = Path(__file__).resolve().parents[1] / 'server' / 'recorder' / 'native'
@@ -16,6 +18,7 @@ BINARY = 'baci-native-receiver'
 def main():
     cli = argparse.ArgumentParser(description=__doc__)
     cli.add_argument('output', type=Path, help='new/empty output directory, outside the source tree')
+    cli.add_argument('--module-proxy', type=Path, help='use a local Go module mirror with the unchanged go.sum')
     args = cli.parse_args()
     output = args.output.resolve()
     if output.is_relative_to(SOURCE) or (output.exists() and any(output.iterdir())):
@@ -25,6 +28,18 @@ def main():
                GOPROXY='https://proxy.golang.org', GOSUMDB='sum.golang.org', GOPRIVATE='',
                GONOPROXY='', GONOSUMDB='', GOINSECURE='')
 
+    with ExitStack() as cleanup:
+        if args.module_proxy:
+            # Start with an empty cache so every dependency used by the build is
+            # checked by Go against go.sum on download, even in offline builds.
+            if not args.module_proxy.is_dir():
+                cli.error('Local module mirror not found')
+            env['GOPROXY'] = args.module_proxy.resolve().as_uri()
+            env['GOMODCACHE'] = cleanup.enter_context(tempfile.TemporaryDirectory(prefix='baci-go-mod-'))
+        build(cli, output, env, offline=bool(args.module_proxy))
+
+
+def build(cli, output, env, *, offline):
     def go(*argv, read=False):
         return subprocess.run(['go', *argv], cwd=SOURCE, env=env, check=True,
                               text=True, stdout=subprocess.PIPE if read else None).stdout
@@ -39,7 +54,8 @@ def main():
     output.mkdir(parents=True, exist_ok=True)
     binary = output / BINARY
     go('build', '-mod=readonly', '-trimpath', '-buildvcs=false', '-ldflags=-s -w -buildid=', '-o', str(binary), '.')
-    go('mod', 'verify')
+    if not offline:  # May seek historic, unlinked .mod files from the public Go registry.
+        go('mod', 'verify')
     if any((SOURCE / name).read_bytes() != data for name,data in locks.items()):
         cli.error('Go lock files changed during the build; review them before publishing')
     if subprocess.check_output([binary, '--check'], timeout=5) != b'baci-rtp/2\n':
