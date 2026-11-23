@@ -294,7 +294,7 @@ class PriorityTest(unittest.IsolatedAsyncioTestCase):
                 finally:
                     canceled.set()
 
-            fake_api = types.SimpleNamespace(async_playwright=playwright)
+            fake_api = types.SimpleNamespace(async_playwright=playwright, TimeoutError=TimeoutError)
             fake_renderer = types.SimpleNamespace(check_replay=AsyncMock())
             service = PostProcess(spool,'/ffmpeg')
             async with await asyncio.start_unix_server(service.handle,path=endpoint,limit=512):

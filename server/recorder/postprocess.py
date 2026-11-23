@@ -10,7 +10,6 @@ import signal
 import socket
 import stat
 import struct
-import subprocess
 import time
 
 from archive import ArchiveRenderer, Budget, SpaceError
@@ -164,22 +163,20 @@ class PostProcess:
         self.busy = None
 
     async def self_test(self):
-        # Only a root maintenance probe runs this. No job, school RPC, or file output.
+        # Root-only probe: verify sandboxed playback and a synthetic MP4 in private /tmp.
+        # No school RPC, classroom data or spool files.
         from playwright.async_api import async_playwright
 
-        encoders = await asyncio.to_thread(subprocess.check_output,
-            [self.ffmpeg, '-hide_banner', '-encoders'], timeout=6, stderr=subprocess.DEVNULL)
-        if not all(tag in encoders for tag in (b' libx264 ', b' aac ')):
-            raise CaptureError('FFmpeg H.264/AAC encoders needed')
         async with async_playwright() as playwright:
             browser = await playwright.chromium.launch(**self.launch, timeout=7000)
             try:
                 await ArchiveRenderer(self.assets).check_replay(browser)
             finally:
                 await browser.close()
+        await movie.check_encoder(self.ffmpeg)
 
     async def render(self, job, lease):
-        from playwright.async_api import async_playwright
+        from playwright.async_api import TimeoutError as BrowserTimeout, async_playwright
 
         path = self.spool / job
         lease.check()
@@ -191,11 +188,16 @@ class PostProcess:
             renderer = ArchiveRenderer(self.assets)
             async with async_playwright() as playwright:
                 lease.check()
-                browser = await playwright.chromium.launch(**self.launch)
+                try:
+                    browser = await playwright.chromium.launch(**self.launch)
+                except BrowserTimeout:
+                    raise movie.RenderTimeout('browser-launch') from None
                 try:
                     lease.check()
-                    await renderer.check_replay(browser)
+                    await movie.bounded(renderer.check_replay(browser), 12, 'replay-check')
                     await movie.render(browser, renderer, self.ffmpeg, path, lease.guard, Budget(self.spool))
+                except BrowserTimeout:
+                    raise movie.RenderTimeout('replay-browser') from None
                 finally:
                     await browser.close()
 
@@ -215,10 +217,12 @@ class PostProcess:
                 answer = 'busy'
                 return
             self.busy = current
-            if start == {'probe':'self-test'} and uid == 0:
+            if uid == 0 and start in ({'probe':'self-test'}, {'probe':'self-test-mp4'}):
                 try:
                     await asyncio.wait_for(self.self_test(), 18)
-                    answer = RENDER_PROTOCOL + ' tested'
+                    # The renderer-only updater must distinguish this real encode
+                    # from the stock 0.4.23 check, which listed encoders only.
+                    answer = RENDER_PROTOCOL + (' tested mp4' if start['probe'] == 'self-test-mp4' else ' tested')
                 except Exception as error:
                     print(f'postprocess: startup self-test failed ({type(error).__name__})', flush=True)
                     answer = 'failed'
@@ -244,6 +248,9 @@ class PostProcess:
                 pass
             except SpaceError:
                 answer = 'space'
+            except movie.RenderTimeout as error:
+                print(f'postprocess: film failed (TimeoutError/{error})', flush=True)
+                answer = 'failed'
             except Exception as error:
                 print(f'postprocess: film failed ({type(error).__name__})', flush=True)
                 answer = 'failed'

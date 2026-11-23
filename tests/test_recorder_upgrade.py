@@ -15,6 +15,7 @@ import socket
 import ssl
 import stat
 import subprocess
+import sys
 import tempfile
 from threading import Thread
 import time
@@ -67,7 +68,8 @@ class ReleaseTest(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(rec.getinfo(up.BINARY).external_attr >> 16), 0o755)
             for name in ('board.js','pdf-resources.zip','livekit-client.umd.js'):
                 self.assertEqual(rec.read(name), site.read('assets/' + name))
-            for name in {'postprocess.py','native_capture.py','disk_writer.py','recording.py','README-fa.md'} | up.UNITS:
+            # Frozen renderer modules are compared via the ZIP digest above.
+            for name in {'native_capture.py','disk_writer.py','recording.py','README-fa.md'} | up.UNITS:
                 self.assertEqual(rec.read(name), (SOURCE / name).read_bytes())
             manifest = json.loads(site.read('plugin.json'))
             self.assertEqual(manifest['version'], '0.4.23')
@@ -78,6 +80,23 @@ class ReleaseTest(unittest.TestCase):
                 self.assertEqual(manager, (REPO / 'plugin-manager/plugins/school-plugins.php').read_bytes())
                 self.assertIn(f"'0.4.23' => '{digest(site.read('plugin.json'))}'".encode(), manager)
                 self.assertNotIn(up.BINARY, update.namelist())
+
+    def test_renderer_candidate_has_no_site_worker_or_unit_changes(self):
+        with tempfile.TemporaryDirectory() as tmp, ZipFile(PAYLOAD) as published:
+            subprocess.run([sys.executable, str(REPO / 'scripts/build-managed-school.py'),
+                '--renderer-candidate', '--output-dir', tmp], check=True, capture_output=True, timeout=15)
+            [path] = Path(tmp).iterdir()
+            self.assertIn('renderer-candidate', path.name)
+            self.assertNotEqual(digest(path.read_bytes()), up.PAYLOAD_SHA256)
+            with ZipFile(path) as candidate:
+                self.assertEqual(candidate.namelist(), published.namelist())
+                changed = {name for name in candidate.namelist() if candidate.read(name) != published.read(name)}
+                self.assertEqual(changed, {'movie.py', 'postprocess.py'})
+                for name in changed:
+                    self.assertEqual(candidate.read(name), (SOURCE / name).read_bytes())
+                # Preserve executable permissions on the unchanged native receiver.
+                for name in candidate.namelist():
+                    self.assertEqual(candidate.getinfo(name).external_attr, published.getinfo(name).external_attr)
 
     @unittest.skipUnless(platform.system()=='Linux' and platform.machine()=='x86_64', 'binary targets Linux amd64')
     def test_shipped_elf_starts_with_pinned_protocol(self):

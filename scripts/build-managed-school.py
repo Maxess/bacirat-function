@@ -23,6 +23,12 @@ RECORDER_BASE = 'baci-classroom-recorder-v0.4.21.zip'
 RECORDER_BASE_SHA = 'ca64a9057dfbb758502f5ca89850fb9256f4a4c30266a7f8dd09864d08612cfe'
 RECORDER_VERSION = '0.4.23'
 RECORDER_SRC = ROOT / 'server/recorder'
+FROZEN_RECORDER = ARTIFACTS / f'baci-classroom-recorder-v{RECORDER_VERSION}.zip'
+FROZEN_RECORDER_SHA = '663da68a85bdfac47ae2a0fbb48628d856f567e116bf367bdbd28ff935b490d1'
+RENDERER_FIX = ('movie.py', 'postprocess.py')
+RENDERER_REPAIR = f'baci-classroom-renderer-v{RECORDER_VERSION}-r1.zip'
+RENDERER_INSTALLER = f'repair-renderer-v{RECORDER_VERSION}-r1.py'
+MAINTENANCE_SHA = '2782b003fb54886777e2ea3e06b76d9587d1b3ef89bcc0e736e15283ca5782f6'
 # Keep the original 0.4.23 bundle byte-for-byte reproducible; the repo updater can get fixes.
 BUNDLED_UPGRADER_SHA = '49f08faf1e84df77c0c71a8030e6dbfbbeb198d800c097b3979ea3b5db6abb17'
 # Go 1.26.2, linux/amd64, same bytes as the verified GitHub Actions build.
@@ -157,6 +163,49 @@ def plugin_entries(pdf_archive):
     return files
 
 
+def frozen_recorder():
+    raw = FROZEN_RECORDER.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != FROZEN_RECORDER_SHA:
+        raise ValueError('Expected the unchanged published 0.4.23 Recorder ZIP')
+    return ZipFile(BytesIO(raw))
+
+
+def renderer_candidate(output_dir):
+    # Test bundle, deliberately not named/pinned as the production 0.4.23 payload.
+    with frozen_recorder() as base:
+        entries = {name: base.read(name) for name in base.namelist()}
+    entries.update({name: (RECORDER_SRC / name).read_bytes() for name in RENDERER_FIX})
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / f'baci-classroom-recorder-v{RECORDER_VERSION}-renderer-candidate.zip'
+    write_zip(path, entries)
+    print(f'{path}: {hashlib.sha256(path.read_bytes()).hexdigest()}')
+    return path
+
+
+def renderer_repair_entries():
+    with frozen_recorder() as base:
+        inventory = {name: hashlib.sha256(base.read(name)).hexdigest() for name in base.namelist()}
+    maintenance = (RECORDER_SRC / f'upgrade-v{RECORDER_VERSION}.py').read_bytes()
+    if hashlib.sha256(maintenance).hexdigest() != MAINTENANCE_SHA:
+        raise ValueError('Renderer repair requires the already-reviewed 0.4.23 maintenance guards')
+    return {'inventory.json': json.dumps(inventory, sort_keys=True, separators=(',', ':')).encode('ascii'),
+            'maintenance.py': maintenance} | {name: (RECORDER_SRC / name).read_bytes() for name in RENDERER_FIX}
+
+
+def renderer_repair(output_dir):
+    data = BytesIO()
+    write_zip(data, renderer_repair_entries())
+    digest = hashlib.sha256(data.getbuffer()).hexdigest()
+    installer = (RECORDER_SRC / RENDERER_INSTALLER).read_bytes()
+    if f"PATCH_SHA256 = '{digest}'\n".encode('ascii') not in installer:
+        raise ValueError('Renderer repair archive differs from the reviewed r1 installer pin')
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / RENDERER_REPAIR
+    path.write_bytes(data.getbuffer())
+    print(f'{path}: {digest}')
+    return path
+
+
 def recorder_release(output_dir, native_build):
     previous = (ARTIFACTS / RECORDER_BASE).read_bytes()
     if hashlib.sha256(previous).hexdigest() != RECORDER_BASE_SHA:
@@ -167,10 +216,13 @@ def recorder_release(output_dir, native_build):
     assets['board.js'] = (SRC / 'assets/board.js').read_bytes()
     files = {name: (RECORDER_SRC / name).read_bytes() for name in ('README-fa.md', 'requirements.txt',
              'capture.py', 'recording.py', 'transport.py', 'view.html', 'view.css', 'view.js', 'frame.js',
-             'archive.py', 'clock.py', 'disk_writer.py', 'movie.py', 'native_capture.py', 'postprocess.py', 'ingest.html', 'ingest.js', 'encoded.js', 'replay.js',
+             'archive.py', 'clock.py', 'disk_writer.py', 'native_capture.py', 'ingest.html', 'ingest.js', 'encoded.js', 'replay.js',
              'school-classroom-recorder.service', 'school-classroom-postprocess.service',
              'school-classroom-recorder.service.d/10-recorder-credential.conf',
              'school-classroom-recorder.service.d/60-native-recorder.conf', 'fonts/README.md')}
+    # The 0.4.23 release and updater checksums must not change with the renderer repair.
+    with frozen_recorder() as published:
+        files.update({name: published.read(name) for name in RENDERER_FIX})
     for name, digest in NATIVE.items():
         data = (native_build / name).read_bytes()
         if hashlib.sha256(data).hexdigest() != digest:
@@ -182,20 +234,36 @@ def recorder_release(output_dir, native_build):
             raise ValueError(f'Expected the reviewed Recorder font/license: {name}')
         files[name] = data
     output_dir.mkdir(parents=True, exist_ok=True)
-    path = output_dir / f'baci-classroom-recorder-v{RECORDER_VERSION}.zip'
-    write_zip(path, files | assets)
-    print(f'{path}: {hashlib.sha256(path.read_bytes()).hexdigest()}')
+    path = output_dir / FROZEN_RECORDER.name
+    data = BytesIO()
+    write_zip(data, files | assets)
+    digest = hashlib.sha256(data.getbuffer()).hexdigest()
+    if digest != FROZEN_RECORDER_SHA:
+        raise ValueError('Rebuilt Recorder is not byte-identical to the published 0.4.23 ZIP')
+    path.write_bytes(data.getbuffer())
+    print(f'{path}: {digest}')
     return path
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--output-dir', type=Path, default=ARTIFACTS)
-    parser.add_argument('--recorder-only', action='store_true', help='build the standalone VPS release, without changing the site packages')
+    parser.add_argument('--output-dir', type=Path)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--recorder-only', action='store_true', help='rebuild the unchanged standalone VPS release')
+    mode.add_argument('--renderer-candidate', action='store_true', help='build an offline test ZIP, not a production upgrade')
+    mode.add_argument('--renderer-repair', action='store_true', help='rebuild the pinned renderer-only r1 repair ZIP')
     parser.add_argument('--approve-reviewed-manifest', action='store_true', help='replace the trusted manifest pin after reviewing the payload')
     parser.add_argument('--pdf-archive', type=Path, help='use a local copy of the same pinned PDF.js npm archive')
-    parser.add_argument('--native-build', type=Path, required=True, help='output of scripts/build-recorder-native.py (Linux x86-64)')
+    parser.add_argument('--native-build', type=Path, help='output of scripts/build-recorder-native.py (Linux x86-64)')
     opts = parser.parse_args()
+    if opts.renderer_candidate or opts.renderer_repair:
+        if not opts.output_dir or opts.approve_reviewed_manifest or opts.pdf_archive or opts.native_build:
+            parser.error('renderer-only builds need an explicit --output-dir and no release build options')
+        (renderer_repair if opts.renderer_repair else renderer_candidate)(opts.output_dir)
+        return
+    if not opts.native_build:
+        parser.error('release builds require --native-build')
+    opts.output_dir = opts.output_dir or ARTIFACTS
     if opts.recorder_only:
         if opts.approve_reviewed_manifest or opts.pdf_archive:
             parser.error('site manifest and PDF build options do not apply to the standalone Recorder')
