@@ -2,6 +2,8 @@
 
 این دستور فقط برای **Recorder استاندارد، فعال و بدون کار** `0.4.21` یا `0.4.22`، روی VPS رسانهٔ `Linux x86-64` با systemd و cgroup v2 است. اگر VPS فقط LiveKit دارد و از ضبط استفاده نمی‌شود، این دستور را نزن. برای نصب اول، [راهنمای Recorder](../server/recorder/README-fa.md) را بخوان.
 
+اگر اسکریپت اول با `Unexpected file in the Recorder spool` متوقف شد، فایل‌های ضبط یا کش را حذف یا جابه‌جا نکن. روی نصب استاندارد، `.cache/fontconfig` ممکن است به‌طور عادی در پوشهٔ خصوصی Recorder ساخته شود؛ اسکریپت اصلاح‌شده فقط همین ساختار را با بررسی مالک، نوع و مجوزها می‌پذیرد. بررسی ضبط و رسید معلق و اتاق باز همچنان برقرار است. **ZIPها تغییر نکرده‌اند؛ اسکریپت را از دستور زیر بگیر، نه از نسخهٔ اولیهٔ بستهٔ یکجا.**
+
 ## قبل از اجرا
 
 1. زمان نگهداری بگذار و زنگ تازه باز نکن. از سایت، داده و تنظیمات بکاپ بگیر. بگذار تمام کارهای ضبط، ساخت، ارسال و رسید به پایان برسند.
@@ -10,7 +12,7 @@
 
 ## دستور روی VPS ضبط
 
-این دستور فقط دو فایل را از [کامیت ثابت انتشار](https://github.com/Maxess/bacirat-function/commit/43aeb10a1f46f369830c4c1d5139a03d10985ea0) می‌گیرد. به توکن GitHub، clone کامل یا Go روی VPS نیاز نیست. اگر بررسی اولیه موفق بود، فقط با وارد کردن `yes` ارتقا اعمال می‌شود.
+این دستور فقط دو فایل را از [کامیت ثابتِ اصلاح اسکریپت](https://github.com/Maxess/bacirat-function/commit/706321fceaca3e9135fd3000db27e514da733a6c) می‌گیرد. به توکن GitHub، clone کامل یا Go روی VPS نیاز نیست. اگر بررسی اولیه موفق بود، فقط با وارد کردن `yes` ارتقا اعمال می‌شود.
 
 ```sh
 (
@@ -19,7 +21,7 @@
   d=$(mktemp -d)
   trap 'rm -rf -- "$d"' EXIT
   cd "$d"
-  rev=43aeb10a1f46f369830c4c1d5139a03d10985ea0
+  rev=706321fceaca3e9135fd3000db27e514da733a6c
   base=https://api.github.com/repos/Maxess/bacirat-function/contents
   script=upgrade-v0.4.23.py
   zip=baci-classroom-recorder-v0.4.23.zip
@@ -30,7 +32,7 @@
   get "server/recorder/$script" "$script"
   get "artifacts/$zip" "$zip"
   sha256sum -c <<'SHA256'
-49f08faf1e84df77c0c71a8030e6dbfbbeb198d800c097b3979ea3b5db6abb17  upgrade-v0.4.23.py
+539b193a81c33a986bb93727dbe259d205a914d4bbe6c3e080083323af3269a5  upgrade-v0.4.23.py
 663da68a85bdfac47ae2a0fbb48628d856f567e116bf367bdbd28ff935b490d1  baci-classroom-recorder-v0.4.23.zip
 SHA256
   sudo python3 -I "$script" --check-only "$zip"
@@ -41,7 +43,7 @@ SHA256
 )
 ```
 
-اگر VPS دسترسی به GitHub ندارد، دو فایل همین نسخه را از ZIP یکجا منتقل کن و **همین دو هش** را روی VPS بررسی کن. بعد از تطابق، همان دو فرمان `sudo` را با مسیر فایل‌های محلی بزن. محاسبهٔ هش با فایلِ تغییرکرده جایگزین تطبیق با هش بالا نیست.
+اگر VPS دسترسی به GitHub ندارد، از یک دستگاه دیگر [اسکریپت اصلاح‌شده](https://github.com/Maxess/bacirat-function/blob/706321fceaca3e9135fd3000db27e514da733a6c/server/recorder/upgrade-v0.4.23.py?raw=true) و همان ZIP Recorder `0.4.23` را منتقل کن. **هر دو هش بالا** را روی VPS بررسی کن و فقط پس از تطابق، فرمان‌های `sudo` را با مسیر فایل‌های محلی بزن. اگر هنوز پیام `Unexpected Recorder spool entry` می‌بینی، فقط متن خطا را (بدون محتوای فایل یا کلیدها) گزارش کن و چیزی از فضای ضبط پاک نکن.
 
 ## بعد از اجرا
 
