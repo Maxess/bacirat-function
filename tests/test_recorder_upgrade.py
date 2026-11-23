@@ -1,18 +1,27 @@
 """Release bytes, guarded cutover and rollback on disposable VPS state."""
+import base64
 import contextlib
 import hashlib
+import hmac
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.util
 from io import BytesIO, StringIO
 import json
 import os
 from pathlib import Path
 import platform
+import shutil
+import socket
+import ssl
 import stat
 import subprocess
 import tempfile
+from threading import Thread
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+from urllib.parse import urlsplit
 from zipfile import ZipFile
 
 REPO = Path(__file__).resolve().parents[1]
@@ -76,6 +85,145 @@ class ReleaseTest(unittest.TestCase):
             binary = Path(rec.extract(up.BINARY, tmp))
             binary.chmod(0o755)
             self.assertEqual(subprocess.check_output([binary, '--check'], timeout=3), b'baci-rtp/2\n')
+
+
+@contextlib.contextmanager
+def http_fixture(payload, tls=None):
+    reply = SimpleNamespace(status=200, body=payload, declared_extra=0, mime='application/json', requests=[])
+
+    class Endpoint(BaseHTTPRequestHandler):
+        protocol_version = 'HTTP/1.1'
+
+        def log_message(self, *_):
+            pass
+
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers['Content-Length']))
+            reply.requests.append((self.command, self.path, self.headers.get('Authorization'),
+                                   self.headers.get_content_type(), json.loads(body)))
+            raw = reply.body if isinstance(reply.body, bytes) else json.dumps(reply.body).encode()
+            self.send_response(reply.status)
+            self.send_header('Content-Type', reply.mime)
+            self.send_header('Content-Length', str(len(raw) + reply.declared_extra))
+            self.send_header('Connection', 'close')
+            if reply.status == 302:
+                self.send_header('Location', 'https://another.test/must-not-follow')
+            self.end_headers()
+            with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+                self.wfile.write(raw)
+
+    with ThreadingHTTPServer(('127.0.0.1', 0), Endpoint) as server:
+        if tls is not None:
+            server.socket = tls.wrap_socket(server.socket, server_side=True)
+        reply.port = server.server_port
+        thread = Thread(target=server.serve_forever, kwargs={'poll_interval': .02}, daemon=True)
+        thread.start()
+        try:
+            yield reply
+        finally:
+            server.shutdown()
+            thread.join(timeout=2)
+
+
+@unittest.skipUnless(shutil.which('openssl'), 'requires OpenSSL to create a disposable TLS fixture')
+class NetworkGuardTest(unittest.TestCase):
+    # Only hostname resolution is redirected to the in-process listeners. Use the
+    # actual stdlib HTTP(S) connection, TLS verification and response parsing.
+    SITE = urlsplit('https://school.test/sample')
+    AUTH = 'z' * 32
+    ADMISSION = {'api_key':'k'*12, 'api_secret':'s'*32}
+    STATUS = {'ok':True,'release':'0.4.23','idle':True,'worker_ok':True,'native_ready':False}
+
+    @classmethod
+    def setUpClass(cls):
+        tmp = Path(cls.enterClassContext(tempfile.TemporaryDirectory()))
+        cls.cert = tmp / 'cert.pem'
+        key = tmp / 'key.pem'
+        subprocess.run(['openssl','req','-x509','-nodes','-days','1','-newkey','rsa:2048',
+                        '-subj','/CN=school.test','-addext','subjectAltName=DNS:school.test',
+                        '-out',str(cls.cert),'-keyout',str(key)], capture_output=True, check=True, timeout=12)
+        cls.tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        cls.tls.load_cert_chain(cls.cert, key)
+
+    @contextlib.contextmanager
+    def network(self):
+        with http_fixture(self.STATUS.copy(), self.tls) as site, http_fixture({}) as sfu:
+            resolve = socket.getaddrinfo
+            ports = {('school.test', 443):site.port, ('wrong-school.test', 443):site.port,
+                     ('127.0.0.1', 7880):sfu.port}
+
+            def resolve_fixture(host, port, *args, **kwargs):
+                return resolve('127.0.0.1', ports[(host, port)], *args, **kwargs)
+
+            with patch.dict(os.environ, {'SSL_CERT_FILE':str(self.cert)}), patch.object(socket, 'getaddrinfo', resolve_fixture):
+                yield site, sfu
+
+    def check(self):
+        return up.school_status(self.SITE, self.AUTH, WORKER)
+
+    def test_guard_contacts_both_endpoints_with_the_expected_read_only_requests(self):
+        with tempfile.TemporaryDirectory() as tmp, self.network() as (site, sfu):
+            spool = Path(tmp).resolve()
+            worker = spool / 'worker.json'
+            worker.write_text(json.dumps({'id':WORKER}))
+            worker.chmod(0o600)
+            with patch.object(up, 'SPOOL', spool):
+                self.assertEqual(up.guard((self.SITE,self.AUTH,self.ADMISSION), os.geteuid(), WORKER), self.STATUS)
+            self.assertEqual(site.requests, [('POST', '/sample/plugins/school-plugins.php?plugin=school-classroom&route=recording',
+                'Bearer ' + self.AUTH, 'application/json', {'action':'maintenance','id':None,'protocol':2,'worker':WORKER})])
+            [(method, route, auth, mime, data)] = sfu.requests
+            self.assertEqual((method, route, mime, data),
+                             ('POST','/twirp/livekit.RoomService/ListRooms','application/json',{}))
+            scheme, jwt = auth.split(' ', 1)
+            header, claims, signature = jwt.split('.')
+            decoded = json.loads(base64.urlsafe_b64decode(claims + '=' * (-len(claims) % 4)))
+            self.assertEqual(scheme, 'Bearer')
+            self.assertEqual(decoded['iss'], self.ADMISSION['api_key'])
+            self.assertEqual(decoded['video'], {'roomList':True})
+            self.assertGreater(decoded['exp'], time.time())
+            self.assertLessEqual(decoded['exp'] - decoded['nbf'], 35)
+            expected = hmac.digest(self.ADMISSION['api_secret'].encode(), f'{header}.{claims}'.encode(), 'sha256')
+            self.assertEqual(signature, base64.urlsafe_b64encode(expected).decode().rstrip('='))
+
+    def test_real_livekit_wire_response_accepts_only_the_room_list(self):
+        with self.network() as (_, sfu):
+            sfu.body = {'rooms':[{'name':'active-test-room'}]}
+            self.assertEqual(up.livekit_rooms(self.ADMISSION), sfu.body['rooms'])
+            for invalid in ({'rooms':None}, {'unexpected':[]}, b'[]'):
+                with self.subTest(invalid=invalid):
+                    sfu.body = invalid
+                    with self.assertRaisesRegex(up.Refused, 'Local LiveKit room list could not be verified'):
+                        up.livekit_rooms(self.ADMISSION)
+            sfu.status = 302
+            with self.assertRaisesRegex(up.Refused, 'Local LiveKit room list could not be verified'):
+                up.livekit_rooms(self.ADMISSION)
+
+    def test_school_response_fails_closed(self):
+        cases = {
+            'truncated': ('declared_extra', 1),
+            'oversize': ('body', json.dumps(self.STATUS).encode() + b' ' * 262144),
+            'redirect': ('status', 302),
+            'unauthorized': ('status', 403),
+            'not json': ('mime', 'text/html'),
+            'empty object': ('body', b'{}'),
+            'wrong release': ('body', self.STATUS | {'release':'0.4.22'}),
+            'non-boolean idle': ('body', self.STATUS | {'idle':1}),
+        }
+        with self.network() as (site, _):
+            for name, (field, invalid) in cases.items():
+                with self.subTest(name=name), patch.object(site, field, invalid):
+                    with self.assertRaisesRegex(up.Refused, 'Cannot verify the school queue'):
+                        self.check()
+            self.assertEqual(len(site.requests), len(cases))
+
+    def test_tls_verifies_trust_and_hostname_before_sending_authorization(self):
+        with self.network() as (site, _):
+            with patch.dict(os.environ, {'SSL_CERT_FILE':'/nonexistent-fixture-ca.pem'}):
+                with self.assertRaisesRegex(up.Refused, 'Cannot verify the school queue'):
+                    self.check()
+            with self.assertRaisesRegex(up.Refused, 'Cannot verify the school queue'):
+                up.school_status(urlsplit('https://wrong-school.test/sample'), self.AUTH, WORKER)
+            self.assertEqual(site.requests, [])
 
 
 class UpgradeTest(unittest.TestCase):

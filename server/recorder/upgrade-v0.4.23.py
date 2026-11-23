@@ -2,7 +2,7 @@
 """Guarded side-by-side update of an idle stock Baci Recorder 0.4.21 or 0.4.22."""
 import argparse
 import base64
-from contextlib import contextmanager, suppress
+from contextlib import closing, contextmanager, suppress
 import fcntl
 import hashlib
 import hmac
@@ -168,12 +168,14 @@ def read_config():
 
 def post(conn, route, auth, body):
     conn.request('POST', route, json.dumps(body).encode(), {'Authorization': 'Bearer ' + auth, 'Content-Type': 'application/json'})
-    response = conn.getresponse()  # Never follows redirects or consults an HTTP proxy.
-    if response.status != 200 or response.headers.get_content_type() != 'application/json':
-        raise ValueError('unexpected response')
-    data = response.read(262145)
-    if len(data) > 262144 or response.length not in (None, 0):
-        raise ValueError('invalid response size')
+    # HTTPResponse is a context manager; HTTPConnection and HTTPSConnection are not.
+    # The direct connection never follows redirects or consults an HTTP proxy.
+    with conn.getresponse() as response:
+        if response.status != 200 or response.headers.get_content_type() != 'application/json':
+            raise ValueError('unexpected response')
+        data = response.read(262145)
+        if len(data) > 262144 or response.length not in (None, 0):
+            raise ValueError('invalid response size')
     result = json.loads(data)
     if not isinstance(result, dict):
         raise ValueError('invalid JSON object')
@@ -188,7 +190,7 @@ def livekit_rooms(admission):
     unsigned = b64(b'{"alg":"HS256","typ":"JWT"}') + b'.' + b64(json.dumps(claims).encode())
     token = unsigned + b'.' + b64(hmac.digest(admission['api_secret'].encode(), unsigned, 'sha256'))
     try:
-        with http.client.HTTPConnection('127.0.0.1', 7880, timeout=3) as conn:
+        with closing(http.client.HTTPConnection('127.0.0.1', 7880, timeout=3)) as conn:
             result = post(conn, '/twirp/livekit.RoomService/ListRooms', token.decode(), {})
         rooms = result.get('rooms', [])
         if set(result) - {'rooms'} or not isinstance(rooms, list):
@@ -201,7 +203,7 @@ def livekit_rooms(admission):
 def school_status(site, secret, worker):
     try:
         route = site.path + '/plugins/school-plugins.php?plugin=school-classroom&route=recording'
-        with http.client.HTTPSConnection(site.hostname, timeout=6) as conn:
+        with closing(http.client.HTTPSConnection(site.hostname, timeout=6)) as conn:
             result = post(conn, route, secret, {'action':'maintenance','id':None,'protocol':2,'worker':worker})
         if result.get('ok') is not True or result.get('release') != VERSION or not all(
                 type(result.get(field)) is bool for field in ('idle','worker_ok','native_ready')):
