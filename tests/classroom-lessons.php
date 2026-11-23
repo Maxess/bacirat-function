@@ -207,6 +207,28 @@ $wire($r,$teacherWire+$studentWire+$managerWire);
 $sample(10,$t+9,$first);
 $active=cl_active($s,10);
 cl_check_live($cfg,$active,$student,$bind($active,'PA_Student'),$t+9);
+$modeCfg = array_replace($cfg, ['camera_share'=>true,'screen_share'=>true,'student_screen_share'=>true,'class_media_modes'=>[
+    10=>['year'=>'۱۴۰۵-۱۴۰۶','mode'=>'teacher-video'], 20=>['year'=>'1405/1406','mode'=>'audio'],
+]]);
+must(cl_class_media_mode($modeCfg,$first) === 'teacher-video' && cl_class_media_mode($modeCfg,$classes[20]) === 'audio'
+    && cl_class_media_mode($modeCfg,array_replace($first,['year'=>'1406/1407'])) === 'standard'
+    && cl_media_mode($active) === 'standard', 'class/year opt-in; an existing bell does not inherit a later settings change');
+$testPeers = [];
+foreach ($teacherWire + $studentWire as $identity=>$sid) $testPeers[$identity] = ['identity'=>$identity,'sid'=>$sid,
+    'permission'=>['canSubscribe'=>true,'canPublish'=>false], 'tracks'=>[]];
+foreach (['standard'=>[['CAMERA','MICROPHONE'],['CAMERA','MICROPHONE','SCREEN_SHARE']],
+    'teacher-video'=>[['CAMERA','MICROPHONE'],['MICROPHONE','SCREEN_SHARE']], 'audio'=>[['MICROPHONE'],['MICROPHONE']]] as $mode=>$expected) {
+    $testRoom = array_replace($active, ['media_mode'=>$mode, 'camera_codec'=>'vp8',
+        'screen'=>['identity'=>'student-1','sid'=>'PA_Student'], 'access'=>['mic'=>['all'=>true],'camera'=>['all'=>true]]]);
+    $granted = [];
+    must(cl_sync_media($modeCfg,$testRoom,$testPeers,static function ($method,$room,$payload) use (&$granted,$testPeers) {
+        $id = $payload['identity'];
+        $granted[$id] = $payload['permission']['canPublishSources'];
+        return array_replace($testPeers[$id],['permission'=>$payload['permission']]);
+    }), 'updated narrow SFU permissions are confirmed');
+    must(array_values($granted) === $expected, 'mode limits real publish grants without changing microphones or allowed screen');
+    if ($mode === 'audio') must(cl_screen_state($modeCfg,$testRoom) === null, 'no active screen in audio rooms');
+}
 $qualityCfg = $cfg + ['room_video_quality'=>true, 'camera_high_size'=>'360x360','camera_high_fps'=>'20',
     'screen_medium_size'=>'854x480','screen_medium_fps'=>'5','screen_high_size'=>'480x480','screen_high_fps'=>'21'];
 $defaultLevels = array_fill_keys(array_keys(CL_QUALITY_FIELDS), 'default');
@@ -503,6 +525,57 @@ must($rolledBack['ops']===$remainder['ops'] && $rolledBack['cursor']===$remainde
 $s->put('activity',$active['id'],$budget);
 $s->put($layerBucket,$budgetKey,$layer);
 cl_board_action($s,$active,['board'=>5],'board-clear');
+
+// Source wire: bounded idempotent app-ACKs, explicit stroke parts/end and history.
+(static function () use ($active, $s, $pen, $teacher, $student): void {
+    $wireLesson = array_replace($active, ['id'=>str_repeat('c',32)]);
+    $wireScope = static fn(array $actor) => ['wire'=>1,'board'=>1,'sid'=>$wireLesson['seen'][$actor['identity']]];
+    $ordered = static fn(array $actor, int $seq, array $strokes, array $override = []) => cl_board_action($s,$wireLesson,
+        cl_ink_input($wireLesson,$actor,$override+['seq'=>$seq,'strokes'=>$strokes]+$wireScope($actor)), 'board-ink');
+    $readWire = static fn(array $input, ?array $actor = null) => cl_board_view($s,$wireLesson['id'],$actor,
+        $input, cl_activity($s,$wireLesson['id']), $wireLesson);
+    $begin = $pen+['part'=>0,'points'=>[[1100,3100],[2200,4150]]];
+    $follow = $pen+['part'=>1,'points'=>[[2200,4150],[2400,5100]]];
+    $ended = ['tool'=>'pen-end','id'=>$pen['id'],'part'=>2];
+    $staffId = cl_ink_prefix($wireLesson['id'],$teacher['identity']).substr($pen['id'],16);
+    $pupilId = cl_ink_prefix($wireLesson['id'],$student['identity']).substr($pen['id'],16);
+    $first = $ordered($teacher,1,[$begin]);
+    must($first === ['ink'=>2,'seq'=>1], 'ordered start is committed before pointerup');
+    denied(409,fn()=>$ordered($teacher,3,[$follow]));
+    denied(409,fn()=>$ordered($teacher,2,[array_replace($follow,['part'=>2])]));
+    denied(409,fn()=>$ordered($teacher,2,[array_replace($follow,['points'=>[[2300,4150],[2400,5100]]])]));
+    denied(409,fn()=>$ordered($teacher,1,[array_replace($begin,['color'=>'#aa0000'])]));
+    $ordered($student,1,[array_replace($begin,['end'=>true,'points'=>[[1200,7700]]])]);
+    must($ordered($teacher,1,[$begin]) === $first, 'lost ACK replays the original receipt after another writer commits');
+    must($ordered($teacher,2,[$follow]) === ['ink'=>5,'seq'=>2], 'interleaving does not change stroke identity or anchor');
+    $endAck = $ordered($teacher,3,[$ended]);
+    must($endAck === $ordered($teacher,3,[$ended]) && $endAck === ['ink'=>5,'seq'=>3], 'reliable end is idempotent without adding geometry');
+    $checkpoint = $readWire(['checkpoint'=>true,'ink'=>5,'compact'=>true]+$wireScope($teacher), $teacher);
+    must($checkpoint['rev']===1 && $checkpoint['checkpoint'] && $checkpoint['head']===5 && $checkpoint['writeSeq']===3
+        && array_key_exists('doc',$checkpoint) && $checkpoint['ops']===[], 'periodic checkpoint carries state and receipt without resending ink');
+    $undo = ['tool'=>'undo','targets'=>[$staffId]];
+    $undoAck = $ordered($student,2,[$undo]);
+    must($undoAck === $ordered($student,2,[$undo]) && $undoAck === ['ink'=>6,'seq'=>2], 'lost undo ACK does not undo twice');
+    $delta = $readWire(['wire'=>1,'board'=>1,'ink'=>5,'compact'=>true]);
+    must($delta['ops'] === [['tool'=>'undo','targets'=>[$pupilId],'from'=>5,'seq'=>6]] && $delta['rev']===1,
+        'undo targets only a server-selected own stroke; peers keep the same page revision');
+    $old = $readWire(['board'=>1,'ink'=>5,'compact'=>true]);
+    must($old['reset'] && $old['rev']===2 && array_column($old['ops'],'id')===[$staffId,$staffId] && $old['cursor']===6,
+        'older readers receive a compatible materialized snapshot without new op types');
+    $ordered($student,3,[['tool'=>'redo']]);
+    $old = $readWire(['board'=>2,'ink'=>6,'compact'=>true]);
+    must($old['rev']===3 && $old['reset'] && array_column($old['ops'],'id')===[$staffId,$pupilId,$staffId],
+        'redo restores the original position, not a reordered redraw on top of other ink');
+    $wireReset = $readWire(['wire'=>1,'board'=>0,'ink'=>999,'compact'=>true]);
+    must($wireReset['reset'] && array_column($wireReset['ops'],'from')===[0,2,3,5,6]
+        && array_column($wireReset['ops'],'seq')===[2,3,5,6,7] && $wireReset['head']===7, 'snapshot is ordered from zero through head');
+    must($wireReset['ops'][2]['points']===$follow['points'], 'recovery preserves the exact ordered coordinates');
+    cl_board_action($s,$wireLesson,['wire'=>1,'board'=>1],'board-clear');
+    denied(409,fn()=>$ordered($student,3,[['tool'=>'redo']]));
+    must($readWire(['wire'=>1,'board'=>1])['head']===0, 'clear invalidates delayed writes and only current-page ink');
+    cl_clear_activity($s,$wireLesson['id']);
+    must(!$s->rows('board-writes:' . $wireLesson['id'],10), 'clearing the lesson removes associated writer receipts');
+})();
 
 $pulse(10,$student,'PA_Student',$t+11);
 $wire($r,$studentWire+$managerWire);

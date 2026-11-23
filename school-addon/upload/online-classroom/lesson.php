@@ -12,6 +12,11 @@ const CL_START_SECONDS = 32;
 const CL_MAX_LESSON_SECONDS = 7200;
 const CL_REPEAT_PREFIX = 'repeat-';
 
+function cl_board_wire(array $input): bool
+{
+    return in_array($input['wire'] ?? null, [1, '1'], true); // JSON and multipart, respectively.
+}
+
 function cl_room_class(array $cfg, string $room): int
 {
     return preg_match('/^' . preg_quote($cfg['room_prefix'], '/') . '-v[34]-c([1-9][0-9]{0,9})-[a-f0-9]{24}$/D', $room, $m) ? cl_id($m[1]) : 0;
@@ -119,6 +124,14 @@ function cl_controls_board(array $lesson, array $actor, int $now): bool
     return cl_is_staff($actor) && cl_can_lesson($lesson, $actor) && cl_board_presenter($lesson, $now) === $actor['identity'];
 }
 
+/** Only the current, confirmed presenter may publish board cues. Tickets remain listener-only. */
+function cl_board_data_owner(array $lesson, int $now): ?array
+{
+    $identity = cl_board_presenter($lesson, $now);
+    return $identity !== null && ($lesson['pulses'][$identity]['board_wire'] ?? false) === true
+        ? ['identity'=>$identity, 'sid'=>$lesson['staff'][$identity]] : null;
+}
+
 function cl_check_live(array $cfg, ?array $lesson, array $actor, array $input, int $now): array
 {
     if (!$lesson || !cl_can_lesson($lesson, $actor) || cl_lesson_expired($cfg, $lesson, $now)
@@ -140,7 +153,7 @@ function cl_touch(ClassroomStore $s, array $lesson, array $actor, array $input, 
                 unset($lesson['pulses'][$id], $lesson['staff'][$id], $lesson['seen'][$id]);
             }
             if ($lesson['phase'] === 'live' && !cl_has_staff($lesson, $now)) cl_pause($lesson);
-            else $lesson['pulses'][$id] = ['sid'=>$sid, 'at'=>$now];
+            else $lesson['pulses'][$id] = ['sid'=>$sid, 'at'=>$now] + (cl_board_wire($input) ? ['board_wire'=>true] : []);
             $s->put('lesson', $lesson['id'], $lesson);
         }
     }
@@ -272,6 +285,7 @@ function cl_open_lesson(ClassroomStore $s, array $ctx, array $cfg, array $class,
             'slot'=>$slot['id'],'period'=>$slot['period'],'subject'=>$slot['subject'],'teacher'=>$slot['teacher'],'teacher_name'=>$teacherName,
             'created'=>$now,'deadline'=>$window['end'] ?? min($now + CL_MAX_LESSON_SECONDS, cl_tehran_midnight($now)), 'bell'=>$window['label'] ?? null,
             'active_seconds'=>0,'started'=>null,'roster'=>$test ? [] : cl_roster($s->db, $class),'seconds'=>[], 'pulses'=>[], 'seen'=>[], 'staff'=>[], 'sample'=>0];
+        $lesson['media_mode'] = $test ? 'standard' : cl_class_media_mode($cfg, $class);
         if ($repeatOf !== null) $lesson['repeat_of'] = $repeatOf;
         if ($test) {
             $lesson['test'] = $test['id'];
@@ -484,7 +498,7 @@ function cl_reconcile(ClassroomStore $s, array $cfg, ?array $class, array $lesso
             }
             // Do not stop attendance because an individual device's media policy is still catching up.
             cl_refresh_screen($lesson, $cfg, $peers, $now);
-            $lesson['media_pending'] = !cl_sync_media($cfg, $lesson, $peers, $rpc);
+            $lesson['media_pending'] = !cl_sync_media($cfg, $lesson, $peers, $rpc, at:$now);
         }
     }
     if ($lesson['phase'] === 'paused') return cl_retire_transport($s, $cfg, $lesson, $now, $rpc);
@@ -511,7 +525,9 @@ function cl_set_access(ClassroomStore $s, array $cfg, array $lesson, array $acto
     if ($identity !== null && !cl_entered($lesson, ['identity'=>$identity], $sid, $now)) {
         throw new ClassroomError(409, 'ورود این شرکت‌کننده هنوز تأیید نشده است.');
     }
-    if ($feature === 'camera' && $enabled && cl_webcam_codec($cfg, $lesson) === null) {
+    if ($feature === 'camera' && $enabled && cl_webcam_codec($cfg, $lesson, $identity) === null) {
+        if (cl_media_mode($lesson) === 'audio') throw new ClassroomError(409, 'این کلاس فقط صوتی است.');
+        if ($identity !== null && cl_webcam_codec($cfg, $lesson) !== null) throw new ClassroomError(409, 'در این کلاس فقط دوربین دبیر همین زنگ مجاز است.');
         throw new ClassroomError(409, ($cfg['camera_share'] ?? false) === true
             ? 'سرور رسانهٔ این اتاق از تصویر دوربین پشتیبانی نمی‌کند.' : 'وبکم در تنظیمات افزونه فعال نیست.');
     }
@@ -534,7 +550,7 @@ function cl_set_access(ClassroomStore $s, array $cfg, array $lesson, array $acto
                 $peers = cl_live_media_peers(['participants'=>[$peer]]);
                 if (($peers[$identity]['sid'] ?? null) !== $sid) $peers = [];
             }
-            $verified = cl_sync_media($cfg, $lesson, $peers, $rpc);
+            $verified = cl_sync_media($cfg, $lesson, $peers, $rpc, at:$now);
         } catch (ClassroomError $error) { $verified = false; }
         if (!$verified) {
             $lesson['media_pending'] = true;
@@ -642,12 +658,12 @@ function cl_set_screen(ClassroomStore $s, array $cfg, array $lesson, array $acto
     $peers = cl_live_media_peers($rpc('ListParticipants', $room, ['room'=>$room]), $lesson['recorder'] ?? null);
     if ($enable) {
         if (($peers[$id]['sid'] ?? null) !== $sid) throw new ClassroomError(409, 'اتصال ارائه‌دهنده عوض شده است.');
-        if (!$owner && !cl_sync_media($cfg, $lesson, $peers, $rpc, true)) throw cl_media_bad_reply();
+        if (!$owner && !cl_sync_media($cfg, $lesson, $peers, $rpc, true, $now)) throw cl_media_bad_reply();
         $lesson['screen'] = $mine + ['until'=>$now + CL_SCREEN_LEASE];
         $s->put('lesson', $lesson['id'], $lesson);
-        $confirmed = cl_sync_media($cfg, $lesson, [$id=>$peers[$id]], $rpc, true);
+        $confirmed = cl_sync_media($cfg, $lesson, [$id=>$peers[$id]], $rpc, true, $now);
         if (!$confirmed) unset($lesson['screen']);
-    } else $confirmed = cl_sync_media($cfg, $lesson, $peers, $rpc, true);
+    } else $confirmed = cl_sync_media($cfg, $lesson, $peers, $rpc, true, $now);
     if (!$confirmed) $lesson['media_pending'] = true;
     $s->put('lesson', $lesson['id'], $lesson);
     if (!$confirmed) throw cl_media_bad_reply();
@@ -658,7 +674,7 @@ function cl_finish_lesson(ClassroomStore $s, array $cfg, array $lesson, int $now
 {
     $s->tx(static function () use ($s, $cfg, $lesson, $now) {
         $id = $lesson['id'];
-        cl_rec_finish($s, $cfg, $lesson);
+        cl_rec_finish($s, $cfg, $lesson, $now);
         $s->delete('active', (string)$lesson['class_id']);
         if (cl_is_friday_test($lesson) || $lesson['started'] === null) {
             $s->delete('lesson', $id);

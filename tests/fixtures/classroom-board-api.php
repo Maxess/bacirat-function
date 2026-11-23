@@ -54,7 +54,7 @@ if ($seed === 'record') {
     $lesson['camera_codec'] = 'vp8';
     $lesson['screen'] = ['identity'=>'student-1','sid'=>'PA_Pupil','until'=>$now+60];
     $s->put('recording',$id,['id'=>$id,'class'=>22,'worker'=>str_repeat('9',32),'state'=>'recording',
-        'layout_capable'=>true,'live'=>true,'begin'=>$now-6,'target'=>['title'=>'test','provider'=>'bale']]);
+        'protocol'=>CL_REC_PROTOCOL,'layout_capable'=>true,'live'=>true,'begin'=>$now-6,'target'=>['title'=>'test','provider'=>'bale']]);
 }
 $s->put('lesson',$lesson['id'],$lesson);
 echo json_encode(['lesson'=>$lesson['id'],'epoch'=>$epoch,'teacher'=>$lesson['teacher']], JSON_THROW_ON_ERROR);

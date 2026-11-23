@@ -55,6 +55,12 @@ try {
       INSERT INTO students VALUES(1,'آزمایشی','اول','۸ الف','1404/1405','active');
       INSERT INTO admins VALUES(1,'مدیر کل','super_admin','[]',1),(2,'مدیر','admin','[]',1),(3,'مدیر کلاس','admin','[\"manage_classes\"]',1);
       INSERT INTO settings VALUES('school_name','never change');");
+    $modes = mpm_media_modes($db,[22=>'teacher-video'],[]);
+    expect($modes === [22=>['year'=>'1404/1405','mode'=>'teacher-video']], 'opt-in media mode uses actual class ID and year');
+    expect(mpm_media_modes($db,[22=>'standard'],$modes) === [], 'standard removes a class override');
+    denied(fn()=>mpm_media_modes($db,[999=>'audio'],$modes));
+    denied(fn()=>mpm_media_modes($db,[22=>['audio']],$modes));
+    denied(fn()=>mpm_media_modes($db,[22=>'silent-unrecognized'],$modes));
     $normal = static fn() => array_map(static fn($n) => $db->query('SELECT * FROM ' . $n)->fetchAll(PDO::FETCH_ASSOC), ['classes','students','admins','settings']);
     $before = $normal();
     $site = mpm_initialize($db, mpm_origin(), $work . '/private');
@@ -557,6 +563,37 @@ try {
         && mpm_query($db,"SELECT payload FROM `$store` WHERE bucket='record-links' AND item=?",['1404/1405:22'])->fetchColumn() === $linkedGroup
         && mpm_query($db,"SELECT payload FROM `$store` WHERE bucket='recording' AND item=?",[$historicId])->fetchColumn() === $historicRecording,
         'new layout keeps recording configuration, encrypted key, assignments and history');
+    $deferred = __DIR__ . '/../artifacts/school-classroom-plugin-v0.4.22.zip';
+    expect(mpm_install($db,$dir,$deferred), 'install the deferred workflow over an idle 0.4.21');
+    $row = mpm_row($db,$slug);
+    expect($row['version'] === '0.4.22' && mpm_owned_row($db,$row)['settings'] === $recordingCipher
+        && mpm_check_store($db,$row) === $store && $row['owner'] === $oldRow['owner'],
+        'deferred mode is an in-place upgrade, with a default for installations that have no delay setting');
+    $recInput = $input + ['record_lessons'=>'yes','recording_secret'=>''];
+    foreach (['0','721','1.5','نامعتبر'] as $bad) denied(fn()=>submit($db,$site,'settings',['settings'=>$recInput + ['recording_delay_minutes'=>$bad]]));
+    expect(mpm_owned_row($db,$row)['settings'] === $recordingCipher, 'invalid delay cannot change saved settings');
+    submit($db,$site,'settings',['settings'=>$recInput + ['recording_delay_minutes'=>'135']]);
+    $actual = mpm_settings($db,$dir,$row);
+    expect($actual['recording_delay_minutes'] === 135 && $actual['recording_secret'] === $recordingKey && $actual['bell_hours'] === $hours,
+        'saving a per-school delay preserves media credentials and bell hours');
+    submit($db,$site,'enable');
+    $afterV22 = mpm_owned_row($db,$row)['settings'];
+    $busyId = str_repeat('2',32);
+    foreach (['record-pending'=>$busyId,'record-slot'=>'current','active'=>'22'] as $bucket=>$item) {
+        mpm_query($db,"INSERT INTO `$store` (bucket,item,payload) VALUES (?,?,?)",[$bucket,$item,json_encode(['id'=>$busyId])]);
+        denied(fn()=>submit($db,$site,'prepare-update'));
+        expect(mpm_row($db,$slug)['state'] === 'enabled' && mpm_query($db,"SELECT 1 FROM `$store` WHERE bucket=? AND item=?",[$bucket,$item])->fetchColumn() !== false,
+            'preparing an upgrade must never cancel a bell or pending recording');
+        mpm_query($db,"DELETE FROM `$store` WHERE bucket=? AND item=?",[$bucket,$item]);
+    }
+    submit($db,$site,'prepare-update');
+    expect(mpm_install($db,$dir,__DIR__ . '/../artifacts/school-classroom-plugin-v0.4.23.zip'), 'upgrade frozen .22 to the reviewed release');
+    $row = mpm_row($db,$slug);
+    expect($row['version'] === '0.4.23' && mpm_owned_row($db,$row)['settings'] === $afterV22 && mpm_settings($db,$dir,$row) === $actual
+        && mpm_check_store($db,$row) === $store && $row['owner'] === $oldRow['owner']
+        && mpm_query($db,"SELECT payload FROM `$store` WHERE bucket='record-links' AND item=?",['1404/1405:22'])->fetchColumn() === $linkedGroup
+        && mpm_query($db,"SELECT payload FROM `$store` WHERE bucket='recording' AND item=?",[$historicId])->fetchColumn() === $historicRecording,
+        'the new media modes are opt-in; prior delay, encrypted credentials, recordings and group/history data are unchanged');
     submit($db,$site,'enable');
     $_GET = ['view'=>'recordings','class'=>22];
     foreach ([['student_id'=>1],['admin_id'=>2],['admin_id'=>3]] as $unauthorized) {

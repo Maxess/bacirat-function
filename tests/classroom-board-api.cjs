@@ -8,7 +8,7 @@ const {join, resolve} = require('node:path');
 const test = require('node:test');
 const {twoPageBoardPDF} = require('./fixtures/classroom-board-docs.cjs');
 
-const {MPM_TEST_PHP_WASM:runtime, MPM_TEST_CLASSROOM_ZIP:archive=join(__dirname,'../artifacts/school-classroom-plugin-v0.4.21.zip')} = process.env;
+const {MPM_TEST_PHP_WASM:runtime, MPM_TEST_CLASSROOM_ZIP:archive=join(__dirname,'../artifacts/school-classroom-plugin-v0.4.23.zip')} = process.env;
 
 test('packaged API restores board controls for the admitted manager in normal and Friday lessons', {skip:!runtime,timeout:25000}, async t=>{
     const load = createRequire(resolve(runtime,'package.json'));
@@ -138,7 +138,8 @@ test('packaged API restores board controls for the admitted manager in normal an
             await api('teacher','board-sync',{aim:[[6345,3255,0]]});
             const request = body=>({method:'POST', headers:{...headers,Authorization:`Bearer ${'r'.repeat(48)}`},body:Buffer.from(JSON.stringify(body))});
             const room=`test-${'a'.repeat(20)}-v4-c22-${epoch}`;
-            const command={action:'board',protocol:1,id:lesson,room,worker:'9'.repeat(32),board,ink:1,compact:true};
+            const command={action:'board',protocol:2,id:lesson,room,worker:'9'.repeat(32),board,ink:1,compact:true};
+            await reply('pupil','recording-api',request({...command,protocol:1}),400,'old live encoding protocol cannot be enabled');
             const recording=await reply('pupil','recording-api',request(command),200,'worker board');
             assert.deepEqual(recording.json.archive,{board:true,screen:'TR_Class',screenOwner:{identity:'student-1',sid:'PA_Pupil'}});
             assert.deepEqual(Object.keys(recording.json.board.laser),['points']);
@@ -150,6 +151,22 @@ test('packaged API restores board controls for the admitted manager in normal an
             await api('teacher','leave');
             assert.equal((await api('manager','board-sync')).board.navigate,true,'a verified teacher departure immediately restores control');
             assert.deepEqual((await api('manager','record-source',{...filter,enabled:false})).archive,{board:false,screen:'TR_Class'});
+        }
+        if (entry('activity.php').includes(Buffer.from('function cl_board_writer('))) {
+            const v1={wire:1};
+            const start=(await api('manager','board-sync',{...v1,board:0})).board;
+            assert.equal(start.checkpoint,true); assert.equal(start.writeSeq,0);
+            const batch={...v1,seq:1,strokes:[{...strokes[0],part:0,end:true}]};
+            const ack=await api('manager','board-ink',batch);
+            assert.equal(ack.ink,start.head+1);
+            assert.deepEqual(await api('manager','board-ink',batch),ack);
+            await api('manager','board-ink',{...v1,seq:3,strokes:[{tool:'undo'}]},409);
+            await api('manager','board-ink',{...v1,seq:2,strokes:[{tool:'undo'}]});
+            const seek=(await api('pupil','board-sync',{...v1,ink:ack.ink})).board;
+            assert.equal(seek.rev,board); assert.equal(seek.ops[0].tool,'undo'); assert.equal(seek.ops[0].from,ack.ink);
+            const legacy=(await api('pupil','board-sync')).board;
+            assert.equal(legacy.rev,board+1); assert.ok(legacy.reset);
+            assert.ok(legacy.ops.every(op=>op.tool!=='undo'));
         }
         await api('manager','set-access',{feature:'board',enabled:false});
         assert.equal((await api('pupil','board-sync')).board.write,false);

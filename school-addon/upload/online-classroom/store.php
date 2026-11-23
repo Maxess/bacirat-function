@@ -42,7 +42,7 @@ final class ClassroomStore
     public function eraseInk(string $lesson): void
     {
         if (!preg_match('/^[a-f0-9]{32}$/D', $lesson)) throw new LogicException('Invalid lesson id');
-        cl_query($this->db, "DELETE FROM `$this->table` WHERE bucket LIKE ?", ['ink:' . $lesson . ':%']);
+        cl_query($this->db, "DELETE FROM `$this->table` WHERE bucket LIKE ? OR bucket LIKE ?", ['ink:' . $lesson . ':%', 'board-history:' . $lesson . ':%']);
     }
 
     public function tx(callable $work): mixed

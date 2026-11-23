@@ -35,7 +35,7 @@ function cl_media_permission(array $participant, string $identity): array
     $wire = $participant['permission'] ?? null;
     if (($participant['identity'] ?? null) !== $identity || !is_array($wire)) throw cl_media_bad_reply();
     // LiveKit Twirp defaults to original proto names, e.g. can_publish.
-    // No data, metadata, share-audio, or agent permissions. Video sources are explicitly listed.
+    // Data and track grants are independent; no metadata, share-audio or agent grants.
     $fields = [
         'canSubscribe' => 'can_subscribe', 'canPublish' => 'can_publish', 'canPublishData' => 'can_publish_data',
         'canUpdateMetadata' => 'can_update_metadata', 'hidden' => 'hidden', 'recorder' => 'recorder',
@@ -73,6 +73,24 @@ function cl_access_enabled(array $lesson, string $feature, ?string $identity = n
     return ($rule['all'] ?? false) === true;
 }
 
+/** Opt-in per class/year. A running bell keeps the mode it started with. */
+function cl_class_media_mode(array $cfg, array $class): string
+{
+    $entry = $cfg['class_media_modes'][$class['id']] ?? null;
+    return is_array($entry) && is_string($entry['year'] ?? null) && cl_year($entry['year']) === $class['year']
+        ? cl_media_mode(['media_mode'=>$entry['mode'] ?? null]) : 'standard';
+}
+
+function cl_media_mode(array $lesson): string
+{
+    return in_array($lesson['media_mode'] ?? null, ['audio','teacher-video'], true) ? $lesson['media_mode'] : 'standard';
+}
+
+function cl_camera_teacher(array $lesson): string
+{
+    return 'teacher-' . ($lesson['teacher'] ?? 0);
+}
+
 function cl_camera_codec(array $room): ?string
 {
     $codecs = $room['enabled_codecs'] ?? $room['enabledCodecs'] ?? [];
@@ -83,8 +101,10 @@ function cl_camera_codec(array $room): ?string
 }
 
 /** The codec advertised by the SFU is also used by screen share. Its presence alone does not enable webcams. */
-function cl_webcam_codec(array $cfg, array $lesson): ?string
+function cl_webcam_codec(array $cfg, array $lesson, ?string $identity = null): ?string
 {
+    $mode = cl_media_mode($lesson);
+    if ($mode === 'audio' || ($mode === 'teacher-video' && $identity !== null && $identity !== cl_camera_teacher($lesson))) return null;
     return ($cfg['camera_share'] ?? false) === true ? ($lesson['camera_codec'] ?? null) : null;
 }
 
@@ -130,7 +150,7 @@ function cl_media_matches(array $peer, string $identity, array $wanted): bool
 
 function cl_screen_enabled(array $cfg, array $lesson): bool
 {
-    return ($cfg['screen_share'] ?? false) === true && ($lesson['camera_codec'] ?? null) === 'vp8';
+    return cl_media_mode($lesson) !== 'audio' && ($cfg['screen_share'] ?? false) === true && ($lesson['camera_codec'] ?? null) === 'vp8';
 }
 
 function cl_pupil_screen_enabled(array $cfg): bool
@@ -145,24 +165,24 @@ function cl_screen_eligible(array $cfg, array $lesson, string $id, string $sid):
 }
 
 /** Apply the lesson policy to real SFU participants. Listener tickets never carry a reusable publish grant. */
-function cl_sync_media(array $cfg, array $lesson, array $peers, callable $rpc, bool $strict = false): bool
+function cl_sync_media(array $cfg, array $lesson, array $peers, callable $rpc, bool $strict = false, ?int $at = null): bool
 {
-    if (!isset($lesson['access']['mic']) && !isset($lesson['access']['camera']) && empty($lesson['screen_used'])) return true;
+    $dataOwner = cl_board_data_owner($lesson, $at ?? time());
     $room = $lesson['room'];
-    $camera = cl_webcam_codec($cfg, $lesson) !== null;
     $failed = false;
     $until = microtime(true) + 1.25; // Bound lock time; subsequent presence samples retry mismatches.
     foreach ($peers as $id=>$peer) {
         $sources = [];
         if (($lesson['seen'][$id] ?? null) === $peer['sid']) {
             foreach (CL_MEDIA_FEATURES as $feature=>$source) {
-                if (($feature !== 'camera' || $camera) && cl_access_enabled($lesson, $feature, $id)) $sources[] = $source;
+                if (($feature !== 'camera' || cl_webcam_codec($cfg, $lesson, $id) !== null) && cl_access_enabled($lesson, $feature, $id)) $sources[] = $source;
             }
             if (($lesson['screen']['identity'] ?? null) === $id && ($lesson['screen']['sid'] ?? null) === $peer['sid']
                 && cl_screen_eligible($cfg, $lesson, $id, $peer['sid'])) $sources[] = 'SCREEN_SHARE';
         }
         // Canonical order also makes a comparison independent of the SFU's enum order.
-        $permission = ['canSubscribe'=>true, 'canPublish'=>count($sources)>0, 'canPublishData'=>false,
+        $permission = ['canSubscribe'=>true, 'canPublish'=>count($sources)>0,
+            'canPublishData'=>$dataOwner === ['identity'=>$id, 'sid'=>$peer['sid']],
             'canPublishSources'=>array_values(array_intersect(CL_TRACK_SOURCES, $sources))];
         if (cl_media_matches($peer, $id, $permission)) continue;
         if (microtime(true) >= $until) return false;
@@ -171,7 +191,7 @@ function cl_sync_media(array $cfg, array $lesson, array $peers, callable $rpc, b
             if (($reply['sid'] ?? null) !== $peer['sid']) {
                 // UpdateParticipant addresses an identity, not a SID. A replacement racing this RPC
                 // must return to listeners until its own admission sample can apply the lesson policy.
-                if ($permission['canPublish']) {
+                if ($permission['canPublish'] || $permission['canPublishData']) {
                     $rpc('UpdateParticipant', $room, ['room'=>$room,'identity'=>$id,'permission'=>[
                         'canSubscribe'=>true,'canPublish'=>false,'canPublishData'=>false,'canPublishSources'=>[],
                     ]]);

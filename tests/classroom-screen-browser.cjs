@@ -300,7 +300,7 @@ test('packaged teacher and admin recording controls, pupil notice and explicit y
         if (url.searchParams.get('route')==='api') {
             let buf=''; for await (const chunk of req) buf+=chunk;
             const input=JSON.parse(buf), result={ok:true};
-            const controls=()=>recording ? {notice:'live', ...(staff?{id:rec,confirm:true,canSend:true,group:'گروه آزمایشی',messenger:'روبیکا'}:{})}
+            const controls=()=>recording ? {notice:'live', ...(staff?{id:rec,confirm:true,canSend:true,group:'گروه آزمایشی',messenger:'روبیکا',delayMinutes:165}:{})}
                 : staff ? {start:true}:null;
             if (input.action==='status') {
                 Object.assign(result,closed?{phase:'idle',ready:true}:{phase:'live',lesson,epoch,ready:true,joinable:true,slot:11,
@@ -356,9 +356,10 @@ test('packaged teacher and admin recording controls, pupil notice and explicit y
         assert.equal(await pupil.getByText('گروه آزمایشی').count(),0,'group is private to staff');
         await page.locator('#toggle-access').click();
         await page.getByRole('button',{name:'بستن کلاس برای همه'}).click();
-        const dialog=page.getByRole('dialog',{name:'آیا فیلم ضبط شده از کلاس در پیامرسان ارسال شود ؟'});
+        const dialog=page.getByRole('dialog',{name:'فیلم کلاس بعداً ساخته و در پیام‌رسان ارسال شود؟'});
         await dialog.waitFor();
         assert.match(await dialog.textContent(),/روبیکا — گروه آزمایشی/);
+        assert.match(await dialog.textContent(),/۱۶۵ دقیقه پس از پایان کلاس/);
         const before=decisions.length;
         await dialog.getByRole('button',{name:'انصراف از بستن کلاس'}).click();
         assert.equal(decisions.length,before,'cancel does not close, grant or send');

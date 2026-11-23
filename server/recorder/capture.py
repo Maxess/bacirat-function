@@ -56,11 +56,11 @@ class Renderer:
         self.pdf = ZipFile(Path(root) / 'pdf-resources.zip')
         self.static = {name: (kind, (Path(root) / filename).read_bytes()) for name, (filename, kind) in ASSETS.items()}
 
-    async def route(self, route, capture=None):
+    async def route(self, route, capture=None, signaling=True):
         req = route.request
         path = urlsplit(req.url)
         # The LiveKit SDK's fallback /validate may read only the loopback SFU.
-        if path.netloc == '127.0.0.1:7880' and path.scheme == 'http' and path.path in ('/rtc/validate', '/rtc/v1/validate'):
+        if signaling and path.netloc == '127.0.0.1:7880' and path.scheme == 'http' and path.path in ('/rtc/validate', '/rtc/v1/validate'):
             await route.continue_()
             return
         if f'{path.scheme}://{path.netloc}' != ORIGIN:
@@ -70,8 +70,8 @@ class Renderer:
         if req.method == 'GET' and not path.query and path.path in self.static:
             mime, raw = self.static[path.path]
             code, headers = 200, {'content-type': mime + '; charset=utf-8' if mime.startswith('text/') else mime}
-            if path.path == '/':
-                headers['content-security-policy'] = CSP
+            if mime == 'text/html':
+                headers['content-security-policy'] = CSP if signaling else CSP.replace(' ws://127.0.0.1:7880 http://127.0.0.1:7880', '')
         elif req.method == 'GET' and not path.query and (match := PDF_PATH.fullmatch(path.path)):
             name = match[1]
             try:
@@ -138,7 +138,7 @@ class Capture:
                 data = json.loads(req.post_data)
                 board, ink = data.get('board'), data.get('ink')
                 if all(type(n) is int and 0 <= n <= 2147483647 for n in (board, ink)):
-                    result = await asyncio.to_thread(self.school, 'board', self.job, room=self.room, board=board, ink=ink, compact=True)
+                    result = await asyncio.to_thread(self.school, 'board', self.job, room=self.room, board=board, ink=ink, compact=True, wire=1)
                     return 200, {'content-type': 'application/json'}, json.dumps(result).encode()
             if path.path == '/document' and req.method == 'GET' and len(path.query) < 256:
                 query = parse_qs(path.query, max_num_fields=4)

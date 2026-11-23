@@ -45,7 +45,8 @@ function fixture(staff, autoSlot = 0) {
     elements.classroom.dataset = { moderator:staff?'yes':'no',api:'/fixture',csrf:'session',class:'22',bellDate:date,content:'/content?class=22' };
     const requests=[], scheduled=new Map(), boards=[];
     let timerSeq=0, now=0, lastRoom, cameraAttempts=0, boardConfig, aim, wakeChoice;
-    const captures=[], cameraCaptures=[], crops=[], inputs=[], publications=[], subscriptions=[], wakeStates=[];
+    const captures=[], cameraCaptures=[], crops=[], inputs=[], publications=[], subscriptions=[], wakeStates=[], cuePackets=[], cues=[];
+    let lastBoard=null, fastLaserAt=-Infinity;
     const id=staff?'teacher-1':'student-1';
     const srv={phase:'idle',lesson:'lesson-11',epoch:'epoch-A',ready:true, staffCanJoin:false,seconds:{'student-1':9,'student-2':21},
         hidden:false, chat:[], moving:false, cameraCodec:'vp8',access:{},profiles:{'student-1':{name:'آزمایشی',photo:false},'student-2':{name:'دوم',photo:false}}, schedule:{date, timed:false, choices:autoSlot ? [choice(autoSlot,'ریاضی')] : [choice(11,'ریاضی'),choice(12,'علوم')], next:null}};
@@ -58,6 +59,8 @@ function fixture(staff, autoSlot = 0) {
         return {camera:profile(camera[choices[role+'Camera'] || 'low']),screen:profile(screen[choices[role+'Screen'] || 'low']),
             ...(staff && srv.qualityEnabled ? {levels:{...choices}} : {})};
     };
+    const boardReply = input => ({rev:srv.boardRev ?? 1,moving:srv.moving,write:srv.write,laser:srv.laser,navigate:staff && srv.navigate !== false,
+        ...(srv.presenter ? {presenter:srv.presenter} : {}),...(srv.checkpoint && (!input.board || input.checkpoint) ? {checkpoint:true} : {})});
     const person = (identity) => ({identity, name:identity, sid:`PA_${identity}`, permissions:listener, micCalls:[], isMicrophoneEnabled:false,
         isCameraEnabled:false, publications:new Map(), trackPublications:new Map(), getTrackPublication(source) { return this.publications.get(source); },
         async publishTrack(track, opts) {
@@ -71,6 +74,7 @@ function fixture(staff, autoSlot = 0) {
             assert.equal(track.stopped,true); this.publications.delete(track.source); if (track.source==='camera') this.isCameraEnabled=false;
             lastRoom.emit('LocalTrackUnpublished');
         },
+        async publishData(packet,opts) { cuePackets.push({packet:Buffer.from(packet),opts:{...opts}}); await srv.cuePending; },
         async setMicrophoneEnabled(value) {
             this.micCalls.push(value);
             if (this.error && value) throw this.error;
@@ -119,7 +123,7 @@ function fixture(staff, autoSlot = 0) {
     const lk={Room,LocalVideoTrack:class { constructor(raw) { const track=fixtureVideo(); track.mediaStreamTrack=raw;
         track.stop=()=>{ track.stopped=true; raw.stop(); }; return track; } },
         ConnectionState:{Connected:'connected'},Track:{Kind:{Audio:'audio',Video:'video'},Source:{Camera:'camera',Microphone:'microphone',ScreenShare:'screen_share'}},
-        DisconnectReason:{1:'CLIENT_INITIATED',2:'DUPLICATE_IDENTITY'},RoomEvent:new Proxy({}, {get:(_,key)=>key})};
+        DataPacket_Kind:{LOSSY:1,RELIABLE:0},DisconnectReason:{1:'CLIENT_INITIATED',2:'DUPLICATE_IDENTITY'},RoomEvent:new Proxy({}, {get:(_,key)=>key})};
     function change(identity, perm) {
         const p=identity===id?lastRoom.localParticipant:lastRoom.remoteParticipants.get(identity);
         const old=p.permissions; p.permissions=perm;
@@ -135,11 +139,12 @@ function fixture(staff, autoSlot = 0) {
                 return {getVideoTracks:()=>[raw],getTracks:()=>[raw]};
             }}},
             ClassroomAttention:choose=>{wakeChoice=choose;return {setLive(...args){wakeStates.push(args);},snapshot(){},expand(){}};},
-            ClassroomBoard:(_,config)=>{boardConfig=config;return {position:()=>({board:0,ink:0}),takeView:()=>({}),takeAim:()=>{
+            ClassroomBoard:(_,config)=>{boardConfig=config;return {position:()=>({board:lastBoard?.rev ?? 0,ink:0}),takeView:()=>({}),takeAim:()=>{
                 const value=aim; aim=null; return value ? {aim:value} : {};
-            },sync:(...p)=>boards.push(p),reset:()=>boards.push('reset')};}},
+            },sync:(...p)=>{lastBoard=p[0];boards.push(p);},reset:()=>{lastBoard=null;boards.push('reset');},
+            remoteCue:(...p)=>{cues.push(structuredClone(p)); if (p[0]==='l') fastLaserAt=now;},hasFastLaser:()=>now-fastLaserAt<430};}},
         document:{getElementById:id=>elements[id],baseURI:'https://school.fixture.test/',createElement,addEventListener(k,f){documentEvents[k]=f;},get hidden(){return srv.hidden;}},
-        performance:{now:()=>now},
+        performance:{now:()=>now}, TextEncoder, TextDecoder, Uint8Array,
         setTimeout(fn,ms){const t=++timerSeq; scheduled.set(t,{fn,at:now+ms});return t;}, clearTimeout:t=>scheduled.delete(t), AbortController, URL,
         async fetch(url,opt){
             assert.equal(url,'/fixture'); assert.equal(opt.headers['X-Classroom-CSRF'],'session');
@@ -155,8 +160,8 @@ function fixture(staff, autoSlot = 0) {
                     const profilesRev=JSON.stringify(srv.profiles);
                     if (input.people) reply.seconds=srv.seconds;
                     if (input.profilesRev!==profilesRev) reply.profiles=srv.profiles;
-                    Object.assign(reply,{admitted:true,profilesRev,chat:srv.chat,board:{rev:1,moving:srv.moving,write:srv.write,laser:srv.laser,navigate:staff && srv.navigate !== false},
-                        cameraCodec:srv.cameraCodec,screen:srv.screen || null,
+                    Object.assign(reply,{admitted:true,profilesRev,chat:srv.chat,board:boardReply(input),
+                        cameraCodec:srv.cameraCodec,screen:srv.screen || null,mediaMode:srv.mediaMode,cameraTeacher:'teacher-1',
                         wakeMode:srv.wakeMode || 'live',wakeControl:staff && srv.wakeControl !== false});
                     const current = quality();
                     reply.qualityRev=JSON.stringify(current);
@@ -167,7 +172,7 @@ function fixture(staff, autoSlot = 0) {
                 }
                 if (srv.afterStatus) await srv.afterStatus();
             } else if (input.action==='board-sync') {
-                if (srv.phase==='live' && input.epoch===srv.epoch) reply.board={rev:1,moving:srv.moving,write:srv.write,laser:srv.laser,navigate:staff && srv.navigate !== false};
+                if (srv.phase==='live' && input.epoch===srv.epoch) reply.board=boardReply(input);
                 else { status=409; reply={ok:false}; }
             } else if(input.action==='open'||input.action==='ticket') {
                 if (input.action === 'open' && srv.phase !== 'live') srv.phase = 'starting';
@@ -227,14 +232,14 @@ function fixture(staff, autoSlot = 0) {
         const pub = {kind,source,trackSid,isDesired:false,setSubscribed(value){
             subscriptions.push([trackSid,value]); this.isDesired=value;
             this.track=value ? track : null;
-            lastRoom.emit(value?'TrackSubscribed':'TrackUnsubscribed',track);
+            lastRoom.emit(value?'TrackSubscribed':'TrackUnsubscribed',track,this,person);
         }};
         person.publications.set(source,pub); person.trackPublications.set(trackSid,pub);
         lastRoom.emit('TrackPublished',pub,person);
         return pub;
     }
     function visibility(value) { srv.hidden=value; documentEvents.visibilitychange(); }
-    return {elements,srv,requests,boards,captures,cameraCaptures,crops,inputs,publications,subscriptions,visibility,remoteTrack,rawVideo,stream,wakeStates,boardSend:(...args)=>boardConfig.send(...args),chooseWake:mode=>wakeChoice(mode),time,status,change,controls,fixtureVideo,advance,aim(point){aim=point;boardConfig.aimSoon();},get cameraAttempts(){return cameraAttempts;},get room(){return lastRoom;}};
+    return {elements,srv,requests,boards,captures,cameraCaptures,crops,inputs,publications,subscriptions,visibility,remoteTrack,rawVideo,stream,wakeStates,cuePackets,cues,publishCue:(...p)=>boardConfig.publishCue(...p),boardSend:(...args)=>boardConfig.send(...args),chooseWake:mode=>wakeChoice(mode),time,status,change,controls,fixtureVideo,advance,aim(point){aim=point;boardConfig.aimSoon();},get cameraAttempts(){return cameraAttempts;},get room(){return lastRoom;}};
 }
 
 test('student auto-enters; pupil durations remain only in the optional roster, not the room or lobby',async()=>{
@@ -825,6 +830,9 @@ test('the pilot screen needs two explicit actions, never asks for system audio, 
     const f=fixture(true); f.srv.phase='live'; await f.time(); await f.time();
     assert.equal(f.room.options.publishDefaults.audioPreset.maxBitrate,12000);
     assert.equal(f.room.options.publishDefaults.dtx,true);
+    assert.equal(f.room.options.publishDefaults.red,false);
+    assert.equal(f.room.options.dynacast,true);
+    assert.deepEqual(Object.entries(f.room.options.audioCaptureDefaults),Object.entries({channelCount:1,echoCancellation:true,noiseSuppression:true,autoGainControl:true}));
     assert.equal(f.room.options.publishDefaults.forceStereo,false);
     const button=f.elements['screen-toggle']; assert.equal(button.hidden,true);
     f.srv.screenEnabled=true; f.srv.cameraCodec=null; await f.status(); assert.equal(button.hidden,false);
@@ -993,4 +1001,100 @@ test('a lingering laser cue does not keep the quick board poll active',async()=>
     await f.time(); // Normal read sees the new point.
     before=f.requests.length; await f.advance(440);
     assert.ok(f.requests.slice(before).some(r=>r.action==='board-sync'),'fresh movement uses the existing fast channel');
+});
+
+
+test('opt-in room mode receives only the assigned teacher webcam or no video; speech grants still apply', async()=>{
+    const f=fixture(false); f.srv.phase='live'; f.srv.mediaMode='teacher-video'; await f.time(); await f.time();
+    const teacher=f.room.remoteParticipants.get('teacher-1'), pupil=f.room.remoteParticipants.get('student-2');
+    f.change(teacher.identity,{canPublish:true,canPublishSources:[1,2,3]});
+    f.change(pupil.identity,camera);
+    const sound={kind:'audio',source:'microphone',attach:()=>new Element('audio'),detach(){return []}};
+    const staffMic=f.remoteTrack(teacher,'microphone',sound,'audio'), pupilMic=f.remoteTrack(pupil,'microphone',sound,'audio');
+    const staffCam=f.remoteTrack(teacher,'camera',f.fixtureVideo()), pupilCam=f.remoteTrack(pupil,'camera',f.fixtureVideo());
+    f.srv.screen={identity:teacher.identity,sid:teacher.sid}; await f.status();
+    const screen=f.remoteTrack(teacher,'screen_share',f.fixtureVideo('screen_share'));
+    assert.equal(f.room.connectOptions.autoSubscribe,false);
+    assert.equal(pupilMic.isDesired,false); assert.equal(pupilCam.isDesired,false);
+    assert.equal(staffMic.isDesired,true); assert.equal(staffCam.isDesired,true); assert.equal(screen.isDesired,true);
+    f.change(pupil.identity,{canPublish:true,canPublishSources:[1,2]}); assert.equal(pupilMic.isDesired,true);
+    f.srv.mediaMode='audio'; await f.status();
+    assert.equal(pupilCam.isDesired,false); assert.equal(staffCam.isDesired,false); assert.equal(screen.isDesired,false);
+    assert.equal(pupilMic.isDesired,true); assert.equal(staffMic.isDesired,true);
+    assert.ok(f.boards.some(Array.isArray));
+});
+
+test('the presenter uses bounded lossy packets only for current-page cues, never a queued retry',async()=>{
+    const f=fixture(true); f.srv.phase='live'; f.srv.presenter={identity:'teacher-1',sid:'PA_teacher-1'};
+    await f.time(); await f.time();
+    const points=Array.from({length:20},(_,i)=>[10000,10000,1800-i*80]);
+    f.publishCue('l',1,points);
+    assert.equal(f.cuePackets.length,0,'a server presenter alone lacks the SFU grant');
+    f.change('teacher-1',{...listener,canPublishData:true});
+    let unblock; f.srv.cuePending=new Promise(resolve=>{unblock=resolve;});
+    f.publishCue('l',1,points);
+    assert.equal(f.cuePackets.length,1);
+    const {packet,opts}=f.cuePackets[0];
+    assert.deepEqual(opts,{reliable:false,topic:'baci.board.cue.v1'});
+    assert.ok(packet.length<=512);
+    assert.deepEqual(JSON.parse(packet),[f.srv.epoch,'PA_teacher-1',1,1,'l',points]);
+    await f.advance(160); f.publishCue('c',1,[[2,3,0]]);
+    assert.equal(f.cuePackets.length,1,'no queue while the lossy call is pending');
+    unblock(); await new Promise(resolve=>setImmediate(resolve));
+    f.publishCue('c',1,[[2,3,0]]); assert.equal(f.cuePackets.length,2);
+    await f.advance(100); f.change('teacher-1',listener);
+    f.publishCue('l',1,points); assert.equal(f.cuePackets.length,2);
+    assert.ok(!f.requests.some(r=>r.action==='board-ink'),'cues cannot change durable ink');
+});
+
+test('cue gaps heal with the next trail, while reordered, oversized, off-page and non-presenter packets do nothing',async()=>{
+    const f=fixture(false); f.srv.phase='live'; f.srv.presenter={identity:'teacher-1',sid:'PA_teacher-1'};
+    await f.time(); await f.time();
+    const presenter=f.room.remoteParticipants.get('teacher-1'), pupil=f.room.remoteParticipants.get('student-2');
+    f.change(presenter.identity,{...listener,canPublishData:true});
+    f.change(pupil.identity,{...listener,canPublishData:true}); // Even a surprising SFU grant is not authority.
+    const topic='baci.board.cue.v1';
+    function rx(seq,mode='l',p=presenter,{rev=1,sid=p.sid,epoch=f.srv.epoch,pts=[[seq,2,0]],kind=1,channel=topic}={}) {
+        f.room.emit('DataReceived',new TextEncoder().encode(JSON.stringify([epoch,sid,rev,seq,mode,pts])),p,kind,channel);
+    }
+    const before=f.requests.length;
+    rx(1); rx(3,'l',presenter,{pts:[[2,2,50],[3,2,0]]}); rx(2); rx(3);
+    rx(4,'c',pupil); rx(4,'c',presenter,{sid:'PA_Previous'}); rx(4,'c',presenter,{epoch:'old'});
+    rx(4,'l',presenter,{pts:[[1,2,0],[4,5,51]]}); rx(4,'c',presenter,{kind:0}); rx(4,'c',presenter,{channel:'other'});
+    f.room.emit('DataReceived',new Uint8Array(513),presenter,1,topic);
+    rx(4,'c');
+    assert.deepEqual(f.cues,[['l',[[1,2,0]],'teacher-1'],['l',[[2,2,50],[3,2,0]],'teacher-1'],['c',[[4,2,0]],'teacher-1']]);
+    assert.equal(f.requests.length,before,'ephemeral frames do not trigger an HTTP write or read');
+    f.srv.boardRev=2; await f.status(); rx(5,'l'); rx(6,'l',presenter,{rev:2});
+    assert.equal(f.cues.length,4);
+    f.srv.presenter=null; await f.status(); rx(7,'l',presenter,{rev:2});
+    assert.equal(f.cues.length,4,'handoff revokes the old sender even before its SFU grant disappears');
+});
+
+test('periodic board checkpoints ride existing sync/status while deltas continue through the same cursor', async()=>{
+    const f=fixture(false); f.srv.phase='live'; f.srv.checkpoint=true;
+    await f.time(); await f.time();
+    await f.advance(11900);
+    assert.ok(!f.requests.some(r=>r.checkpoint));
+    await f.advance(1600);
+    const req=f.requests.find(r=>r.checkpoint===true);
+    assert.ok(req); assert.equal(req.wire,1); assert.equal(req.board,1); assert.equal(req.ink,0);
+});
+
+test('a fresh live laser suppresses the duplicate fast HTTPS read, but fallback resumes after loss',async()=>{
+    const f=fixture(false); f.srv.phase='live'; f.srv.presenter={identity:'teacher-1',sid:'PA_teacher-1'};
+    await f.time(); await f.time();
+    const person=f.room.remoteParticipants.get('teacher-1');
+    f.change(person.identity,{...listener,canPublishData:true});
+    f.room.emit('DataReceived',new TextEncoder().encode(JSON.stringify([f.srv.epoch,person.sid,1,1,'l',[[45,70,0]]])),
+        person,1,'baci.board.cue.v1');
+    f.srv.laser={by:person.identity,points:[[45,70,1800]]};
+    f.visibility(false); await f.status();
+    let before=f.requests.length;
+    await f.advance(500);
+    assert.equal(f.requests.length,before,'do not wake the fast HTTP reader for the mirrored trail');
+    f.visibility(false); await f.status();
+    before=f.requests.length;
+    await f.advance(500);
+    assert.ok(f.requests.slice(before).some(r=>r.action==='board-sync'),'no more fast datagrams, use the existing HTTPS readers');
 });

@@ -15,7 +15,7 @@ $db->exec("CREATE TABLE `$table` (bucket TEXT,item TEXT,payload TEXT,PRIMARY KEY
     CREATE TABLE settings (key_name TEXT PRIMARY KEY,key_value TEXT);
     INSERT INTO settings VALUES ('current_academic_year','1405/1406'), ('school_name','مدرسهٔ پژوهش');
     CREATE TABLE classes (id INT PRIMARY KEY,name TEXT,academic_year TEXT);
-    INSERT INTO classes VALUES (15,'هفتم ۱','1405/1406'),(16,'هفتم ۲','1405/1406'),(17,'هفتم ۳','1404/1405');
+    INSERT INTO classes VALUES (15,'هفتم ۱','1405/1406'),(16,'هفتم ۲','1405/1406'),(17,'هفتم ۳','1404/1405'),(18,'هفتم ۴','1405/1406'),(19,'هفتم ۵','1405/1406');
     CREATE TABLE admins (id INT PRIMARY KEY,name TEXT,role TEXT,permissions TEXT,status INT);
     INSERT INTO admins VALUES (1,'مدیر کل','super_admin','[]',1),(2,'مدیر کلاس','admin','[\"manage_classes\"]',1),
       (3,'مدیر بدون مجوز','admin','[]',1),(4,'مدیر غیرفعال','super_admin','[]',0);
@@ -49,7 +49,7 @@ $request = static function (string $url, array $params) use (&$checks, &$member)
 };
 $rpc = static function (string $method): array { ok($method === 'DeleteRoom', 'worker can only finalize known expired/closing rooms'); return []; };
 $worker = static fn(string $action, ?string $id, int $at, array $extra = []) => cl_rec_worker($s, $cfg,
-    ['action'=>$action,'protocol'=>1,'worker'=>str_repeat('a',32),'id'=>$id,'available'=>true] + $extra, $at, $rpc, $request);
+    ['action'=>$action,'protocol'=>2,'worker'=>str_repeat('a',32),'id'=>$id,'available'=>true] + $extra, $at, $rpc, $request);
 $lesson = static function (int $stamp, int $number = 1, int $classId = 15) use ($s, $cfg, $class): array {
     $id = str_pad(dechex($number), 32, '0', STR_PAD_LEFT);
     $room = $cfg['room_prefix'] . '-v4-c' . $classId . '-' . str_pad(dechex($number), 24, '0', STR_PAD_LEFT);
@@ -88,6 +88,13 @@ cl_rec_set_link($s,$cfg,$other,'rubika:g0KnownGroup',$request);
 ok(cl_rec_link($s,$other)['title'] === 'گروه معتبر', 'Rubika getChat verifies inventory candidate even with missing update type');
 ok(cl_rec_link($s,$class)['chat'] === '-201' && cl_rec_link($s, array_replace($class,['year'=>'1404/1405'])) === null, 'scoped by real class and year');
 
+$status = $worker('maintenance',null,$t);
+ok($status === ['release'=>CL_REC_RELEASE,'idle'=>true,'worker_ok'=>true,'native_ready'=>false]
+    && $s->get('record-worker','heartbeat') === null, 'maintenance probe is read-only');
+$s->put('record-pending', str_repeat('3',32), ['id'=>str_repeat('3',32)]);
+ok($worker('maintenance',null,$t)['idle'] === false, 'maintenance is blocked even by a pending index without local media');
+$s->delete('record-pending', str_repeat('3',32));
+
 $live = $lesson($t);
 $id = $live['id'];
 foreach ([$teacher,$super,$admin] as $operator) {
@@ -99,7 +106,13 @@ $disabled = array_replace($cfg, ['record_lessons'=>false]);
 ok(cl_rec_status($s,$disabled,$live,$admin) === ['recording'=>null], 'an admin does not bypass the opt-in');
 deny(403, fn()=>cl_rec_start($s,$disabled,$class,$live,$admin,$t));
 deny(503, fn()=>cl_rec_start($s,$cfg,$class,$live,$admin,$t));
-ok($worker('poll',null,$t)['command'] === 'idle', 'signed worker heartbeat');
+deny(400, fn()=>cl_rec_worker($s,$cfg,['action'=>'poll','protocol'=>1,'worker'=>str_repeat('a',32)],$t,$rpc));
+deny(503, fn()=>cl_rec_start($s,$cfg,$class,$live,$admin,$t));
+ok(!$worker('maintenance',null,$t)['idle'], 'an open bell blocks maintenance even without a recording');
+$worker('plan',null,$t,['native_release'=>CL_REC_RELEASE]);
+ok($worker('maintenance',null,$t)['native_ready'] && !$worker('maintenance',null,$t+19)['native_ready'], 'only the fresh native heartbeat confirms site readiness');
+ok($worker('plan',null,$t)['capture'] === [], 'signed deferred worker heartbeat');
+deny(409, fn()=>cl_rec_worker($s,$cfg,['action'=>'plan','protocol'=>2,'worker'=>str_repeat('b',32)],$t,$rpc));
 foreach ([$student,$deputy] as $unauthorized) {
     ok(cl_rec_status($s,$cfg,$live,$unauthorized) === ['recording'=>null], 'students and unassigned deputies cannot see the start control');
     deny(403, fn()=>cl_rec_start($s,$cfg,$class,$live,$unauthorized,$t));
@@ -112,7 +125,7 @@ ok(cl_live_media_peers(['participants'=>[$peer]],$identity) === [], 'hidden reco
 deny(502, fn()=>cl_live_media_peers(['participants'=>[$peer]]));
 $peer['permission']['can_publish'] = true;
 deny(502, fn()=>cl_live_media_peers(['participants'=>[$peer]],$identity));
-$hold = $worker('poll',null,$t+4);
+$hold = $worker('poll',$id,$t+4);
 ok($hold['command'] === 'hold' && !isset($hold['title']), 'notice before capturing A/V');
 $job = $worker('poll',$id,$t+5);
 $title = ['school'=>'مدرسهٔ پژوهش','subject'=>'ریاضی'];
@@ -122,7 +135,7 @@ ok($worker('poll',$id,$t+5)['title'] === $title, 'video title is pinned from rec
 $legacy = $s->get('recording',$id);
 unset($legacy['title']);
 $s->put('recording',$id,$legacy);
-ok($worker('poll',$id,$t+5)['title'] === array_replace($title,['school'=>'نام تازه']), 'active jobs from older releases can still be captured');
+ok($worker('poll',$id,$t+5)['title'] === array_replace($title,['school'=>'نام تازه']), 'job without cached title has a bounded title fallback');
 $s->put('recording',$id,$legacy + ['title'=>$title]);
 ok(cl_rec_title($s, ['subject'=>"\u{202E}فیزیک\n" . str_repeat('X',150)])['subject'] === 'فیزیک ' . str_repeat('X',94),
     'worker receives bounded, single-line subject text with no directional overrides');
@@ -134,7 +147,7 @@ ok($renewal['command'] === 'record' && !isset($renewal['title']) && !isset($rene
 ok(cl_rec_status($s,$cfg,$live,$student) === ['recording'=>['notice'=>'live']], 'students only see recording indicator, not destination or control');
 foreach ([$teacher,$admin] as $operator) {
     $controls = cl_rec_status($s,$cfg,$live,$operator)['recording'];
-    ok($controls['confirm'] && $controls['canSend'] && !isset($controls['start']), 'both authorized closers can approve sending, but cannot start a second capture');
+    ok($controls['confirm'] && $controls['canSend'] && !isset($controls['start']) && $controls['delayMinutes'] === 180, 'both authorized closers can approve sending, but cannot start a second capture');
 }
 ok(!cl_rec_status($s,$cfg,$live,$deputy)['recording']['canSend'], 'unassigned deputy cannot approve sending');
 $board = $worker('board',$id,$t+6,['room'=>$live['room'],'board'=>0,'ink'=>0]);
@@ -147,10 +160,10 @@ ok($delta['view'] === $view && $delta['rev'] === 1 && !$delta['write'] && !isset
 deny(409, fn()=> $worker('board',$id,$t+6,['room'=>'other']));
 $scope = ['lesson'=>$id,'epoch'=>cl_epoch($live),'sid'=>'PA_staff'];
 $setBoard = ['source'=>'board','enabled'=>true] + $scope;
-deny(409, fn()=>cl_rec_set_source($s,$cfg,$live,$teacher,$setBoard,$t+6)); // .20 worker
 $capable = $worker('poll',$id,$t+6,['archiveLayout'=>true]);
 $defaultLayout = ['board'=>false,'screen'=>null];
-ok($capable['archive'] === $defaultLayout + ['screenOwner'=>null] && $capable['teacher'] === 'teacher-7', 'archive starts with only the primary source and the actual scheduled teacher');
+ok($capable['archive'] === $defaultLayout + ['screenOwner'=>null] && $capable['teacher'] === 'teacher-7'
+    && $capable['mediaMode'] === 'standard', 'archive starts with only the primary source and the actual scheduled teacher');
 ok(cl_rec_status($s,$cfg,$live,$student)['recording'] === ['notice'=>'preparing'], 'layout metadata is not sent to pupils');
 deny(403, fn()=>cl_rec_set_source($s,$cfg,$live,$student,$setBoard,$t+6));
 deny(403, fn()=>cl_rec_set_source($s,$cfg,$live,$admin,$setBoard,$t+6));
@@ -191,8 +204,7 @@ $s->put('lesson',$id,$live);
 ok($worker('board',$id,$t+6,$recordRead)['archive']['screen'] === null, 'a revoked screen lease cannot keep priority');
 cl_board_read($s,$live,$teacher,$scope+['board'=>1,'aim'=>$pointer],null,$t+6);
 $worker('poll',$id,$t+6,['running'=>$live['room']]);
-$oldWorker = $worker('board',$id,$t+6,$recordRead);
-ok(!isset($oldWorker['archive']) && !array_key_exists('laser',$oldWorker['board']), 'older workers keep the previous wire shape');
+ok(isset($worker('board',$id,$t+6,$recordRead)['archive']), 'deferred worker always carries board and layout state');
 // The recorder is not a roster entry and doesn't need the teacher's tab.
 $live['pulses'][$admin['identity']] = ['sid'=>'PA_office','at'=>$t+6];
 $live['seen'][$admin['identity']] = $live['staff'][$admin['identity']] = 'PA_office';
@@ -230,10 +242,23 @@ deny(403, fn()=>cl_rec_close_choice($s,$cfg,$live,$deputy,['recording'=>$id,'sen
 deny(409, fn()=>cl_rec_close_choice($s,$cfg,$live,$admin,[],$t+7));
 deny(502, fn()=>$close($live,$admin,true,$t+7,fn()=>throw new ClassroomError(502,'simulated close timeout')));
 deny(409, fn()=> $worker('claim',$id,$t+8,['part'=>1,'total'=>2]));
-ok($worker('poll',$id,$t+11)['command'] === 'deliver' && $s->get('lesson',$id)['phase'] === 'finished', 'worker retries close and queues only after commit');
-$permit = $worker('claim',$id,$t+12,['part'=>1,'total'=>2]);
+ok($worker('poll',$id,$t+11)['command'] === 'hold' && $s->get('lesson',$id)['phase'] === 'finished', 'worker retries close and queues only after commit');
+$eligible = $t+11+10800;
+$closed = $s->get('recording',$id);
+ok($closed['closed_at'] === $t+11 && $closed['not_before'] === $eligible && $closed['not_before'] < $live['deadline']+10800,
+    'three full hours start at actual successful closure, not consent, the schedule or capture start');
+deny(409, fn()=> $worker('rendered',$id,$eligible-1,['total'=>2]));
+ok($worker('plan',null,$eligible-1)['work'] === null && $worker('poll',$id,$eligible-1)['command'] === 'hold', 'no render at 2h59m59s');
+$unrecorded = $lesson($eligible-10, 80, 16);
+ok($worker('plan',null,$eligible)['work'] === null && $worker('poll',$id,$eligible)['command'] === 'hold', 'an open unrecorded bell has priority');
+deny(409, fn()=> $worker('rendered',$id,$eligible,['total'=>2]));
+cl_close_lesson($s,$cfg,$unrecorded,$eligible+1,$rpc);
+ok($worker('plan',null,$eligible+1)['work'] === $id && $worker('poll',$id,$eligible+1)['command'] === 'render', 'eligible after the next bell ends');
+deny(409, fn()=> $worker('claim',$id,$eligible+1,['part'=>1,'total'=>2]));
+ok($worker('rendered',$id,$eligible+1,['total'=>2])['command'] === 'deliver', 'worker commits finalized film before upload');
+$permit = $worker('claim',$id,$eligible+2,['part'=>1,'total'=>2]);
 ok($permit['command'] === 'send' && $permit['chat'] === '-201', 'exact approved group and first part');
-deny(409, fn()=> $worker('claim',$id,$t+13,['part'=>1,'total'=>2]));
+deny(409, fn()=> $worker('claim',$id,$eligible+3,['part'=>1,'total'=>2]));
 // Date-dependent lock bounds use the worker clock; rebind at current wall time only for this lock assertion.
 $stored = $s->get('recording',$id);
 $locked = $stored;
@@ -242,39 +267,75 @@ $s->put('recording',$id,$locked);
 deny(409, fn()=>cl_rec_set_link($s,$cfg,$class,'bale:-202',$request));
 $s->put('recording',$id,$stored);
 $receipt = ['part'=>1,'attempt'=>$permit['attempt'],'result'=>'accepted','message'=>'123'];
-$worker('result',$id,$t+14,$receipt);
-$worker('result',$id,$t+15,$receipt);
-ok($worker('poll',$id,$t+16)['sent'] === 1, 'receipt replay is idempotent');
-$part2 = $worker('claim',$id,$t+17,['part'=>2,'total'=>2]);
-$worker('result',$id,$t+18,['part'=>2,'attempt'=>$part2['attempt'],'result'=>'accepted','message'=>'124']);
-ok($worker('poll',$id,$t+19)['command'] === 'purge' && !$s->get('record-slot','current'), 'all parts confirmed then purge');
-$worker('cleaned',$id,$t+20);
-ok($s->get('recording',$id)['cleaned'] === $t+20, 'cleanup receipt');
+$worker('result',$id,$eligible+4,$receipt);
+$worker('result',$id,$eligible+5,$receipt);
+ok($worker('poll',$id,$eligible+6)['sent'] === 1, 'receipt replay is idempotent');
+$part2 = $worker('claim',$id,$eligible+7,['part'=>2,'total'=>2]);
+$worker('result',$id,$eligible+8,['part'=>2,'attempt'=>$part2['attempt'],'result'=>'accepted','message'=>'124']);
+ok($worker('poll',$id,$eligible+9)['command'] === 'purge' && !$s->get('record-pending',$id), 'all parts confirmed then purge and release queue item');
+$worker('cleaned',$id,$eligible+10);
+ok($s->get('recording',$id)['cleaned'] === $eligible+10 && $s->get('recording',$id)['receipts'] === [1=>'123',2=>'124'], 'keep both delivery receipts after cleanup');
 
 foreach (['no','expiry','changed','left','uncertain'] as $i=>$scenario) {
     $now = $t + 30 * ($i + 1);
     $live = $lesson($now, $i+2);
     $id = $live['id'];
-    $worker('poll',null,$now);
+    $worker('plan',null,$now);
     cl_rec_start($s,$cfg,$class,$live,$teacher,$now);
     $live = cl_active($s,15);
     ok($worker('poll',$id,$now+5)['command'] === 'record', 'new bell has its own recording');
-    if ($scenario === 'no') ok($close($live,$admin,false,$now+6) === 'discarded', 'no by authorized closer');
+    if ($scenario === 'no') {
+        ok($close($live,$admin,false,$now+6) === 'discarded', 'no by authorized closer');
+        ok($worker('poll',$id,$now+10806)['command'] === 'purge' && !$s->get('record-pending',$id), 'no means never render, even after the delay');
+    }
     elseif ($scenario === 'expiry') ok($worker('poll',$id,$live['deadline']+1)['command'] === 'purge', 'expired without a decision');
     else {
         ok($close($live,$teacher,true,$now+6) === 'queued', 'positive decision binds to original link');
         if ($scenario === 'changed') cl_rec_set_link($s,$cfg,$class,'bale:-202',$request);
         if ($scenario === 'left') $db->exec("UPDATE bot_chats SET status='left' WHERE chat_id='-201'");
-        $claim = $worker('claim',$id,$now+7,['part'=>1,'total'=>1]);
+        $ready = $now+6+10800;
         if ($scenario === 'uncertain') {
+            $worker('rendered',$id,$ready,['total'=>1]);
+            $claim = $worker('claim',$id,$ready+1,['part'=>1,'total'=>1]);
             ok($claim['command'] === 'send', 'claim valid');
-            ok($worker('poll',$id,$now+250)['command'] === 'retain', 'lost response never re-sent');
-            deny(409, fn()=>$worker('claim',$id,$now+251,['part'=>1,'total'=>1]));
+            ok($worker('poll',$id,$ready+250)['command'] === 'retain', 'lost response never re-sent');
+            deny(409, fn()=>$worker('claim',$id,$ready+251,['part'=>1,'total'=>1]));
             ok($worker('poll',$id,$live['deadline']+CL_REC_RETENTION+1)['command'] === 'purge', 'bounded retention');
-        } else ok($claim === ['command'=>'purge'], 'changed mapping or bot removal does not reroute');
+        } else ok($worker('poll',$id,$ready)['command'] === 'purge', 'changed mapping or bot removal prevents making and rerouting');
     }
     $db->exec("UPDATE bot_chats SET status='member' WHERE chat_id='-201'");
     cl_rec_set_link($s,$cfg,$class,'bale:-201',$request);
     deny(409, fn()=> $worker('claim',$id,$now+260,['part'=>1,'total'=>1]));
 }
+// Simultaneous rooms and a new period can record while older jobs await their delay.
+$now = $t + 900;
+$classes = cl_classes($db, '1405/1406');
+foreach ([18,19] as $cid) cl_rec_set_link($s,$cfg,$classes[$cid],'bale:-201',$request);
+$rooms = [];
+$worker('plan',null,$now);
+foreach ([15,16,18,19] as $i=>$cid) $rooms[$cid] = $lesson($now,100+$i,$cid);
+foreach ([15,16,18] as $cid) cl_rec_start($s,$cfg,$classes[$cid],$rooms[$cid],$teacher,$now);
+deny(409, fn()=>cl_rec_start($s,$cfg,$classes[19],$rooms[19],$teacher,$now));
+$ids = array_map(static fn($cid) => $rooms[$cid]['id'], [15,16,18]);
+ok($worker('plan',null,$now+5)['capture'] === $ids, 'three independent capture leases');
+foreach ($ids as $index=>$item) ok($worker('poll',$item,$now+5)['room'] === $rooms[[15,16,18][$index]]['room'], 'room-scoped capture');
+$custom = array_replace($cfg,['recording_delay_minutes'=>90]);
+$first = cl_active($s,15);
+$first['recording_consent'] = cl_rec_close_choice($s,$custom,$first,$teacher,['recording'=>$first['id'],'sendRecording'=>true],$now+9) === 'queued';
+cl_close_lesson($s,$custom,$first,$now+9,$rpc);
+cl_rec_start($s,$cfg,$classes[19],$rooms[19],$teacher,$now+9);
+ok(count($worker('plan',null,$now+10)['capture']) === 3 && $s->get('recording',$first['id'])['not_before'] === $now+9+5400,
+    'approved bell frees source slot immediately, custom delay is pinned at close');
+$second = cl_active($s,19);
+$second['recording_consent'] = true;
+cl_close_lesson($s,$custom,$second,$now+15,$rpc);
+foreach ([16,18] as $cid) $close(cl_active($s,$cid),$teacher,false,$now+17);
+$queue = $worker('plan',null,$now+5500);
+ok($queue['work'] === $first['id'] && $queue['capture'] === [], 'oldest eligible closure renders first');
+ok($worker('poll',$second['id'],$now+5414)['command'] === 'hold', 'delay is evaluated per individual end time');
+$next = $lesson($now+5520, 123, 15);
+ok($worker('plan',null,$now+5520)['work'] === null, 'a following period preempts an eligible job');
+cl_rec_start($s,$cfg,$class,$next,$teacher,$now+5520);
+ok($worker('plan',null,$now+5525)['capture'] === [$next['id']], 'back-to-back same class has its own recording');
+ok(cl_rec_delay(['recording_delay_minutes'=>0]) === 180 && cl_rec_delay(['recording_delay_minutes'=>720]) === 720, 'safe default and configured delay bounds');
 echo "classroom recording checks passed\n";

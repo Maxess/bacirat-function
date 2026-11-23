@@ -75,6 +75,7 @@ cl_json_reply(static function (): array {
             $result += cl_rec_status($s, $cfg, $lesson, $actor, $allowed && cl_controls_board($lesson, $actor, $now));
             if ($allowed) {
                 $result += ['cameraCodec'=>cl_webcam_codec($cfg, $lesson), 'screen'=>cl_screen_state($cfg, $lesson),
+                    'mediaMode'=>cl_media_mode($lesson), 'cameraTeacher'=>cl_camera_teacher($lesson),
                     'wakeMode'=>cl_wake_mode($lesson), 'wakeControl'=>cl_wake_control($lesson, $actor)]
                     + cl_status_people($lesson, $body) + cl_quality_status($s, $cfg, $class, $lesson, $actor, $body)
                     + cl_activity_sync($s, $lesson, $actor, $body, $now);

@@ -57,7 +57,7 @@ function fixture({staff=true,navigate=staff,reducedMotion=false}={}) {
         explain: e=>e.message,
     });
     function sync(ops=[], extras={}, scope={lesson:'L',epoch:'E',sid:'PA_staff'}, requestedAt) {
-        board.sync({rev:1,reset:false,doc:null,page:1,docs:[],cursor:0,ops,navigate,...extras}, scope, requestedAt);
+        return board.sync({rev:1,reset:false,doc:null,page:1,docs:[],cursor:0,ops,navigate,...extras}, scope, requestedAt);
     }
     async function flush() {
         const next = [...timers.entries()].sort((a,b)=>a[1].at-b[1].at)[0];
@@ -395,4 +395,67 @@ test('only the assigned teacher publishes viewport deltas, retrying the newest g
     assert.equal(manager.el('board-zoom-in').hidden,true);
     assert.deepEqual(structuredClone(manager.board.takeView()),{});
     await manager.flush(); assert.deepEqual(manager.calls,[]);
+});
+
+test('ordered pen survives a lost ACK without skipping or re-encoding a point; pen-up commits', async()=>{
+    const f=fixture(); f.sync([],{head:0,write:true,writeSeq:0,reset:true});
+    let rejected=false;
+    f.delay(call=>{
+        if (!rejected) { rejected=true; return Promise.reject(new Error('ACK lost after commit')); }
+        return Promise.resolve({seq:call.seq,ink:call.seq*100});
+    });
+    f.draw('pointerdown',100,150);
+    f.draw('pointermove',120,154);
+    await f.flush();
+    for (let i=1;i<=170;i++) f.draw('pointermove',120+2*i,154+i%5);
+    f.draw('pointerup',470,155);
+    await f.flush(); await f.flush();
+    assert.deepEqual(f.calls.map(b=>b.seq),[1,1,2]);
+    assert.deepEqual(f.calls[0],f.calls[1]);
+    const ops=[f.calls[1].strokes[0],...f.calls[2].strokes];
+    assert.deepEqual(ops.map(op=>op.part),[0,1,2]);
+    assert.ok(ops.every(op=>op.id===ops[0].id && op.points.length<=96));
+    assert.ok(ops.slice(1).every((op,i)=>JSON.stringify(op.points[0])===JSON.stringify(ops[i].points.at(-1))));
+    assert.equal(ops.at(-1).end,true);
+    assert.deepEqual(ops.at(-1).points.at(-1),[4700,3100]);
+    assert.equal(ops.reduce((n,op)=>n+op.points.length,0)-2,173,'not sampled down or replaced after packet loss');
+
+    const close=fixture(); close.sync([],{head:0,write:true,writeSeq:0,reset:true});
+    close.delay(call=>Promise.resolve({seq:call.seq,ink:1}));
+    close.draw('pointerdown',200,200); await close.flush(); close.draw('pointerup',200,200); await close.flush();
+    assert.deepEqual(close.calls[1].strokes,[{tool:'pen-end',id:close.calls[0].strokes[0].id,part:1}]);
+});
+
+test('gap, stale zoom and duplicate deltas cannot paint; snapshot replays untampered ink and ordered history',()=>{
+    const f=fixture({staff:false});
+    const a='a'.repeat(32), b='b'.repeat(32);
+    const first={...drawOp(a,[[1000,2800],[1200,3300]]),from:0,seq:2};
+    const second={...drawOp(b,[[2500,4400],[3000,4500]],'#25875b'),from:2,seq:4};
+    const view={zoom:125,crop:[0,0,8000,8000]};
+    f.sync([first],{head:2,cursor:2,view,viewSeq:2,reset:true});
+    const before=structuredClone(f.display);
+    assert.equal(f.sync([second],{head:4,cursor:4,viewSeq:1}),false,'stale zoom is rejected, even with valid ink');
+    assert.deepEqual({...f.board.position()},{board:0,ink:0});
+    assert.deepEqual(f.display,before);
+    assert.equal(f.sync([second],{head:4,cursor:4,view,viewSeq:2,reset:true}),false,'snapshot is missing its first section');
+    f.sync([first,second],{head:4,cursor:4,view,viewSeq:2,reset:true});
+    assert.equal(f.display.paths.length,2);
+    f.sync([{tool:'undo',targets:[a],from:4,seq:5}],{head:5,cursor:5,view,viewSeq:2});
+    assert.deepEqual(f.display.strokes,[['source-over',second.color]]);
+    f.sync([{tool:'redo',targets:[a],from:5,seq:6}],{head:6,cursor:6,view,viewSeq:2});
+    const restored=structuredClone(f.display);
+    assert.equal(restored.paths.length,2);
+    assert.equal(f.sync([{...second,from:5,seq:6}],{head:6,cursor:6,view,viewSeq:2}),false);
+    assert.deepEqual(f.display,restored,'reordered or duplicated ink never mutates the canvas');
+});
+
+test('an ambiguous pen batch fences page changes; an old retry never lands on the new page', async()=>{
+    const f=fixture(); f.sync([],{head:0,write:true,writeSeq:0,reset:true});
+    f.delay(()=>Promise.reject(new Error('timeout')));
+    f.draw('pointerdown',120,120); f.draw('pointerup',130,140); await f.flush();
+    await f.el('board-clear').fire('click');
+    assert.deepEqual(f.calls.map(call=>call.action),['board-ink']);
+    f.sync([],{rev:2,head:0,write:true,writeSeq:0,reset:true});
+    await f.flush(); assert.equal(f.calls.length,1);
+    assert.ok(f.notices.some(message=>message.includes('قبلی')));
 });

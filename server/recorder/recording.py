@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""Baci's single-slot recording pilot. Runs on the dedicated LiveKit VPS, not the web host."""
+"""Baci's classroom archive worker. Runs on the dedicated LiveKit VPS, not the web host."""
 import argparse
 import asyncio
+from contextlib import suppress
+import errno
 import fcntl
 import json
 import os
@@ -15,10 +17,13 @@ import subprocess
 import sys
 import time
 
+from archive import ArchiveRenderer, Budget, MIB, ROOM, SourceCapture, SpaceError, StoragePressure
+from postprocess import WorkRevoked, film_lock, renderer_ready, request_render
+import movie
 from capture import CLIP, Capture, CaptureError, HEX, Renderer, check_clip, clips, lease_ms
 from transport import ProtocolError, School, send_video
 
-VERSION = '0.4.21'
+VERSION = '0.4.23'
 TTL = 26 * 3600  # Hard local maximum, even if PHP/DB remains unavailable.
 SPACE_LIMIT = 1800 * 1024 * 1024
 ROOT = Path(__file__).resolve().parent
@@ -49,35 +54,12 @@ def read_obj(path):
         return json.loads(fp.read(8192))
 
 
-class Runner:
-    def __init__(self, school, root, browser, renderer, ffmpeg):
-        self.school, self.root, self.browser, self.renderer, self.ffmpeg = school, root, browser, renderer, ffmpeg
-        self.job = self.capture = None
-        self.faulted = set()
-        self.swept = self.connect_failures = 0
+class SpoolJob:
+    def __init__(self, school, root, job=None):
+        self.school, self.root, self.job = school, root, job
 
     async def rpc(self, action, **data):
         return await asyncio.to_thread(self.school, action, self.job, **data)
-
-    def dirs(self):
-        return sorted(p for p in self.root.iterdir() if HEX.fullmatch(p.name) and p.is_dir() and not p.is_symlink())
-
-    def sweep(self):
-        if time.monotonic() - self.swept < 30:
-            return
-        self.swept = time.monotonic()
-        now = time.time()
-        for path in self.dirs():
-            if self.capture and path.name == self.capture.job:
-                continue
-            end = read_obj(path / 'meta.json') or {}
-            if min(end.get('expires', now + TTL), end.get('created', path.stat().st_ctime) + TTL) <= now:
-                # Leave only the acknowledgment marker. While the site is down this still
-                # removes the private video on schedule; metadata is removed separately.
-                if not (path / '.cleaned').exists():
-                    self.erase_media(path)
-                elif now - (path / '.cleaned').stat().st_mtime > TTL:
-                    shutil.rmtree(path)
 
     def room_dir(self, expires):
         path = self.root / self.job
@@ -88,18 +70,11 @@ class Runner:
             atomic(path / 'meta.json', {'created': int(time.time()), 'expires': expires})
         return path
 
-    async def stop(self, verify=True):
-        if self.capture:
-            cap, self.capture = self.capture, None
-            try:
-                await cap.stop(verify)
-            except Exception:
-                self.faulted.add(cap.job)
-                raise CaptureError('capture not finalized') from None
-
     @staticmethod
     def erase_media(path, keep_receipt=False):
-        keep = {'meta.json', 'receipt.json'} if keep_receipt else {'meta.json'}
+        keep = {'meta.json', '.film.lock'}
+        if keep_receipt:
+            keep.add('receipt.json')
         for file in path.iterdir():
             if file.name not in keep:
                 if file.is_dir() and not file.is_symlink():
@@ -136,32 +111,47 @@ class Runner:
                 file.unlink(missing_ok=True)
             sync_dir(parts[0].parent)
 
+    @classmethod
+    def purge_media(cls, path, keep_receipt=False):
+        if path.is_dir() and not path.is_symlink():
+            with film_lock(path):
+                if not (path / '.cleaned').exists():
+                    cls.erase_media(path, keep_receipt=keep_receipt)
+
+    @staticmethod
+    def purge_dir(path):
+        if path.is_dir() and not path.is_symlink():
+            with film_lock(path):
+                shutil.rmtree(path)
+
     async def reap(self, path):
-        if path.is_dir() and not path.is_symlink() and not (path / '.cleaned').exists():
-            self.erase_media(path)
+        await asyncio.to_thread(self.purge_media, path)
         try:
             await self.rpc('cleaned')
         except ProtocolError as exc:
             if exc.status not in (404, 410):
                 raise
-        if path.is_dir() and not path.is_symlink():
-            shutil.rmtree(path)
-        self.faulted.discard(self.job)
+        await asyncio.to_thread(self.purge_dir, path)
         self.job = None
-        self.connect_failures = 0
 
-    async def receipt(self, path):
+    def receipt_files(self, path):
         reply = read_obj(path)
         if not reply:
-            return
+            return None
         complete = reply.pop('complete', False) is True
         if reply['result'] == 'accepted':
             # Delete each confirmed part *before* waiting on PHP. On restart, replay
             # the durable receipt, never the upload. Final acceptance removes all media.
             if complete:
-                self.erase_media(path.parent, keep_receipt=True)
-            else:
+                self.purge_media(path.parent, keep_receipt=True)
+            elif not (path.parent / '.cleaned').exists():
                 self.remove_sent(self.delivery_parts(path.parent), reply['part'])
+        return reply
+
+    async def receipt(self, path):
+        reply = await asyncio.to_thread(self.receipt_files, path)
+        if not reply:
+            return
         try:
             await self.rpc('result', **reply)
         except ProtocolError as error:
@@ -169,7 +159,81 @@ class Runner:
                 raise
             # The server will not replay this in-flight part. A subsequent poll
             # determines whether it was already settled or is now uncertain.
-        path.unlink(missing_ok=True)
+        await asyncio.to_thread(path.unlink, missing_ok=True)
+
+    def delivery_request(self, path, sent):
+        parts = self.delivery_parts(path)
+        self.remove_sent(parts, sent)  # Also handles any confirmed parts from the previous release.
+        part = sent + 1
+        if part > len(parts):
+            raise CaptureError('recording parts unavailable')
+        return check_clip(parts[sent]), part, len(parts)
+
+    async def send_part(self, path, reply, guard=None, allowed=None):
+        file, part, total = await asyncio.to_thread(self.delivery_request, path, reply['sent'])
+        if guard:
+            await guard()
+        permit = await self.rpc('claim', part=part, total=total)
+        if permit.get('command') != 'send':
+            return 1
+        if not HEX.fullmatch(permit.get('attempt', '')):
+            raise ProtocolError()
+        # Once a permit has been issued, any crash before recording a receipt leaves
+        # the attempt uncertain. Never call a provider a second time for that permit.
+        def deliver():
+            if allowed:
+                try:
+                    if allowed() <= time.monotonic():
+                        return 'retry', ''  # No provider request was attempted.
+                except WorkRevoked:
+                    return 'retry', ''
+            return send_video(permit, file)
+
+        result, message = await asyncio.to_thread(deliver)
+        await asyncio.to_thread(atomic, path / 'receipt.json',
+            {'attempt': permit['attempt'], 'part': part, 'result': result, 'message': message,
+             'complete': result == 'accepted' and part == total})
+        await self.receipt(path / 'receipt.json')
+        return 0
+
+
+class Runner(SpoolJob):
+    """Reference protocol-1 pipeline retained for the published film regressions, not used by service()."""
+    def __init__(self, school, root, browser, renderer, ffmpeg):
+        super().__init__(school, root)
+        self.browser, self.renderer, self.ffmpeg = browser, renderer, ffmpeg
+        self.capture = None
+        self.faulted = set()
+        self.swept = self.connect_failures = 0
+
+    def dirs(self):
+        return sorted(p for p in self.root.iterdir() if HEX.fullmatch(p.name) and p.is_dir() and not p.is_symlink())
+
+    def sweep(self):
+        if time.monotonic() - self.swept < 30:
+            return
+        self.swept = time.monotonic()
+        now = time.time()
+        for path in self.dirs():
+            if self.capture and path.name == self.capture.job:
+                continue
+            end = read_obj(path / 'meta.json') or {}
+            if min(end.get('expires', now + TTL), end.get('created', path.stat().st_ctime) + TTL) <= now:
+                # Leave only the acknowledgment marker. While the site is down this still
+                # removes the private video on schedule; metadata is removed separately.
+                if not (path / '.cleaned').exists():
+                    self.erase_media(path)
+                elif now - (path / '.cleaned').stat().st_mtime > TTL:
+                    shutil.rmtree(path)
+
+    async def stop(self, verify=True):
+        if self.capture:
+            cap, self.capture = self.capture, None
+            try:
+                await cap.stop(verify)
+            except Exception:
+                self.faulted.add(cap.job)
+                raise CaptureError('capture not finalized') from None
 
     async def tick(self):
         self.sweep()
@@ -196,6 +260,8 @@ class Runner:
         if self.capture and (op != 'record' or self.capture.room != reply.get('room')):
             await self.stop()
         if op == 'purge':
+            self.faulted.discard(self.job)
+            self.connect_failures = 0
             await self.reap(path)
         elif op == 'retain':
             if path.exists():
@@ -228,25 +294,7 @@ class Runner:
                     if self.connect_failures >= 3:
                         raise CaptureError('media connection failed')
         elif op == 'deliver':
-            parts = self.delivery_parts(path)
-            sent = reply['sent']
-            self.remove_sent(parts, sent)  # Also handles any confirmed parts from the previous release.
-            part = sent + 1
-            if part > len(parts):
-                raise CaptureError('recording parts unavailable')
-            file = check_clip(parts[sent])
-            permit = await self.rpc('claim', part=part, total=len(parts))
-            if permit.get('command') != 'send':
-                return 1
-            if not HEX.fullmatch(permit.get('attempt', '')):
-                raise ProtocolError()
-            # Once a permit has been issued, any crash before recording a receipt leaves
-            # the attempt uncertain. Never call a provider a second time for that permit.
-            result, message = await asyncio.to_thread(send_video, permit, file)
-            atomic(path / 'receipt.json', {'attempt': permit['attempt'], 'part': part, 'result': result, 'message': message,
-                                           'complete': result == 'accepted' and part == len(parts)})
-            await self.receipt(path / 'receipt.json')
-            return 0
+            return await self.send_part(path, reply)
         elif op != 'hold':
             raise ProtocolError()
         return 1.4 if op in ('record', 'deliver') else 2
@@ -286,9 +334,304 @@ class Runner:
         await self.stop()
 
 
-async def service(args, config):
-    from playwright.async_api import async_playwright
+class DeferredRunner:
+    """A control loop, up to three independently leased sources, and one finishing task.
 
+    A slow upload/PDF/rpc cannot delay another room's lease. Nothing can render on
+    cached consent alone: the short plan lease is checked before each output frame.
+    """
+    def __init__(self, school, root, browser, renderer, ffmpeg, *, native=None, post_socket=None):
+        self.school, self.root, self.browser, self.renderer, self.ffmpeg = school, root, browser, renderer, ffmpeg
+        self.native, self.post_socket = native, post_socket
+        self.budget = Budget(root)
+        self.captures, self.wanted, self.pending, self.due = {}, set(), set(), set()
+        self.control = SpoolJob(school, root)
+        self.work = self.finish_task = self.repair = self.repairing = None
+        self.scan_task = None
+        self.available, self.on_disk, self.receipts, self.unsettled = False, set(), set(), set()
+        self.sampled = -float('inf')
+        self.permit, self.until = None, 0
+        self.stopping = False
+
+    def dirs(self):
+        return {p.name for p in self.root.iterdir() if HEX.fullmatch(p.name) and not p.is_symlink() and p.is_dir()}
+
+    def local(self, job):
+        # Callers only use checked ids under the private service directory.
+        return self.root / job, SpoolJob(self.school, self.root, job)
+
+    @staticmethod
+    def expiry(path):
+        info = path.lstat()
+        if not stat.S_ISDIR(info.st_mode):
+            raise CaptureError('recording path is not private')
+        created = info.st_ctime
+        try:
+            meta = read_obj(path / 'meta.json') or {}
+            return min(meta.get('expires', created + TTL), meta.get('created', created) + TTL)
+        except (TypeError, ValueError, AttributeError):
+            return time.time()
+
+    def sweep(self, busy=None):
+        # FS expiry also runs when the site's plan endpoint is offline. A small receipt
+        # may outlive the private inputs; expired inputs can never be rendered/resumed.
+        if busy is None:
+            busy = set(self.captures) | {self.work, self.repairing}
+        now = time.time()
+        for job in self.dirs() - busy:
+            path = self.root / job
+            with suppress(FileNotFoundError, BlockingIOError):
+                if self.expiry(path) <= now:
+                    marker = path / '.cleaned'
+                    if not marker.exists():
+                        SpoolJob.purge_media(path, keep_receipt=True)
+                    elif now - marker.stat().st_mtime > TTL:
+                        SpoolJob.purge_dir(path)
+
+    def inspect_storage(self, busy):
+        self.sweep(busy)
+        paths = self.dirs()
+        receipts = {job for job in paths if (self.root / job / 'receipt.json').is_file()}
+        unsettled = {job for job in paths if not (self.root / job / '.retained').exists()
+                     or (self.root / job / '.cleaned').exists()}
+        return self.budget.room(4 * MIB), paths, receipts, unsettled
+
+    @staticmethod
+    def reason(error):
+        full = isinstance(error, (SpaceError, StoragePressure)) or (isinstance(error, OSError) and error.errno in (errno.ENOSPC, errno.EDQUOT))
+        return 'space' if full else 'capture'
+
+    async def report_fault(self, site, error):
+        with suppress(ProtocolError):
+            await site.rpc('fault', reason=self.reason(error))
+
+    async def fail(self, job, error):
+        path, site = self.local(job)
+        reason = self.reason(error)
+
+        def remember():
+            if path.is_symlink() or (path / 'receipt.json').is_file():
+                return False  # Preserve known provider outcomes, including unlink failures.
+            path.mkdir(mode=0o700, exist_ok=True)
+            atomic(path / '.fault.json', {'reason':reason})
+            return True
+
+        print(f'recorder: archive stopped ({reason})', flush=True)
+        try:
+            if not await asyncio.to_thread(remember):
+                return
+        except OSError:
+            pass  # Disk full: still notify the worker API; won't seal partial media.
+        await self.report_fault(site, error)
+
+    async def capture(self, job):
+        path, site = self.local(job)
+        cap, failures = None, 0
+        try:
+            if await asyncio.to_thread(lambda: path.is_symlink() or (path / '.capturing').exists() or (path / '.cleaned').exists()):
+                raise CaptureError('interrupted or expired source capture')
+            while not self.stopping and job in self.wanted:
+                if not cap and (fault := await asyncio.to_thread(read_obj, path / '.fault.json')):
+                    with suppress(ProtocolError):
+                        await site.rpc('fault', reason=fault.get('reason'))
+                    await asyncio.sleep(2)
+                    continue
+                if cap and not (await cap.status())['running']:
+                    closing, cap = cap, None
+                    await closing.stop(True)
+                try:
+                    reply = await site.rpc('poll', running=cap.room if cap else None)
+                except ProtocolError:
+                    await asyncio.sleep(2)  # The receiver's lease is independent of TLS.
+                    continue
+                op, room = reply.get('command'), reply.get('room')
+                if cap and (op != 'record' or cap.room != room):
+                    closing, cap = cap, None
+                    await closing.stop(op != 'purge')
+                if op == 'purge' or op == 'retain' or (op == 'hold' and reply.get('state') != 'recording'):
+                    return
+                if op == 'hold':
+                    await asyncio.sleep(1.4)
+                    continue
+                if op != 'record' or reply.get('id') != job or not isinstance(room, str) or not ROOM.fullmatch(room):
+                    raise ProtocolError()
+                lease = reply.get('lease')
+                if type(lease) is not int or lease_ms(lease) < 1000:
+                    await asyncio.sleep(.5)
+                    continue
+                if cap:
+                    await cap.renew(lease)
+                elif job in self.wanted and not self.stopping:
+                    if not await asyncio.to_thread(self.budget.room, MIB):
+                        raise SpaceError('no room in source spool')
+                    if not isinstance(reply.get('token'), str):
+                        raise ProtocolError()
+                    directory = await asyncio.to_thread(site.room_dir, reply['expires'])
+                    if self.native:
+                        from native_capture import NativeCapture
+                        cap = NativeCapture(self.native, self.school, directory, room, self.budget,
+                            notify=lambda fault: self.report_fault(site, fault))
+                    else:
+                        cap = SourceCapture(self.browser, self.renderer, self.school, directory, room, self.budget)
+                    if await cap.start(reply):
+                        failures = 0
+                    else:
+                        closing, cap = cap, None
+                        await closing.stop(False)
+                        failures += 1
+                        if failures >= 3:
+                            raise CaptureError('media connection unavailable')
+                await asyncio.sleep(1.25)
+            if cap:
+                closing, cap = cap, None
+                await closing.stop(job in self.pending)
+        except Exception as error:
+            if cap:
+                with suppress(Exception):
+                    await cap.stop(False)
+            await self.fail(job, error)
+
+    def authorized(self, job, expires):
+        if self.stopping or job in self.due or job not in self.pending or time.time() >= expires:
+            raise WorkRevoked()
+        return self.until if self.permit == job else 0
+
+    async def eligible(self, job, expires):
+        while self.authorized(job, expires) <= time.monotonic():
+            await asyncio.sleep(.20)
+
+    async def offline(self, job, expires):
+        await request_render(self.post_socket, job, lambda: self.authorized(job, expires))
+
+    async def finish(self, job):
+        path, site = self.local(job)
+        try:
+            expires = await asyncio.to_thread(self.expiry, path)
+            wait = lambda: self.eligible(job, expires)
+            await wait()
+            if fault := await asyncio.to_thread(read_obj, path / '.fault.json'):
+                await site.rpc('fault', reason=fault.get('reason'))
+                return
+            if await asyncio.to_thread((path / 'receipt.json').is_file):
+                await site.receipt(path / 'receipt.json')
+                return  # Re-poll after committing; never send using a stale `sent` cursor.
+            reply = await site.rpc('poll')
+            if reply.get('command') == 'render':
+                if not await asyncio.to_thread((path / 'delivery.json').is_file):
+                    if self.native:
+                        await self.offline(job, expires)
+                    else:
+                        await movie.render(self.browser, self.renderer, self.ffmpeg, path, wait, self.budget)
+                # Commit a durable part index before any credentials or delivery attempt.
+                parts = await asyncio.to_thread(site.delivery_parts, path)
+                await wait()
+                if (await site.rpc('rendered', total=len(parts))).get('command') != 'deliver':
+                    return
+            elif reply.get('command') != 'deliver':
+                return
+            if not await asyncio.to_thread((path / 'delivery.json').is_file):
+                raise CaptureError('committed film index disappeared')
+            await wait()
+            await site.send_part(path, reply, guard=wait, allowed=lambda: self.authorized(job, expires))
+        except (WorkRevoked, ProtocolError):
+            pass
+        except Exception as error:
+            await self.fail(job, error)
+
+    async def maintain(self, jobs):
+        for job in jobs:
+            if job in self.captures or job == self.work or self.stopping:
+                continue
+            self.repairing = job
+            try:
+                path, site = self.local(job)
+                await site.receipt(path / 'receipt.json')
+                result = await site.rpc('poll')
+                if result.get('command') == 'purge':
+                    await site.reap(path)
+                elif result.get('command') == 'retain':
+                    await asyncio.to_thread((path / '.retained').touch, mode=0o600)
+            except (ProtocolError, OSError, ValueError, CaptureError, KeyError):
+                pass  # Durable receipts and cleanup markers are retried at the next plan.
+            finally:
+                self.repairing = None
+
+    @staticmethod
+    def ids(reply, name, limit=24):
+        values = reply.get(name)
+        if not isinstance(values, list) or len(values) > limit or any(not isinstance(v, str) or not HEX.fullmatch(v) for v in values):
+            raise ProtocolError()
+        return set(values)
+
+    async def tick(self):
+        for job, task in list(self.captures.items()):
+            if task.done():
+                del self.captures[job]
+                task.result()
+        if self.finish_task and self.finish_task.done():
+            task, self.finish_task, self.work = self.finish_task, None, None
+            task.result()
+        if self.repair and self.repair.done():
+            task, self.repair = self.repair, None
+            task.result()
+        if self.scan_task and self.scan_task.done():
+            task, self.scan_task = self.scan_task, None
+            try:
+                self.available, self.on_disk, self.receipts, self.unsettled = task.result()
+                self.sampled = time.monotonic()
+            except OSError:
+                self.available = False
+        if self.scan_task is None:
+            busy = set(self.captures) | {self.work, self.repairing}
+            self.scan_task = asyncio.create_task(asyncio.to_thread(self.inspect_storage, busy))
+        available = self.available and time.monotonic() - self.sampled < 5
+        if self.native:
+            available = available and await renderer_ready(self.post_socket)
+        reply = await self.control.rpc('plan', available=available, current=self.work,
+                                       **({'native_release': VERSION} if self.native else {}))
+        wanted, pending, due = self.ids(reply, 'capture', 3), self.ids(reply, 'pending'), self.ids(reply, 'settle')
+        work, lease = reply.get('work'), reply.get('lease')
+        if (not wanted <= pending or not due <= pending or type(lease) is not int
+                or (work is not None and (not isinstance(work, str) or work not in pending or work in wanted or work in due))):
+            raise ProtocolError()
+        self.wanted, self.pending, self.due = wanted, pending, due
+        self.permit = work
+        self.until = time.monotonic() + min(6, max(0, lease - time.time()))
+        for job in sorted(wanted - self.captures.keys())[:max(0, 3 - len(self.captures))]:
+            self.captures[job] = asyncio.create_task(self.capture(job))
+        if work and not self.finish_task and work not in self.captures and work != self.repairing and time.monotonic() < self.until:
+            self.work = work
+            self.finish_task = asyncio.create_task(self.finish(work))
+        if not self.repair:
+            terminal = (self.on_disk - pending) & self.unsettled
+            jobs = sorted(self.receipts) + sorted((due | terminal) - self.receipts)
+            if jobs:
+                self.repair = asyncio.create_task(self.maintain(jobs))
+
+    async def run(self, stopped):
+        noted = False
+        try:
+            while not stopped.is_set():
+                if self.browser is not None and not self.browser.is_connected():
+                    raise RuntimeError('archive browser disconnected')
+                try:
+                    await self.tick()
+                    noted = False
+                except ProtocolError:
+                    self.permit, self.until = None, 0
+                    if not noted:
+                        print('recorder: school plan not confirmed', flush=True)
+                        noted = True
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(stopped.wait(), 2 if noted else 1.25)
+        finally:
+            self.stopping = True
+            self.permit, self.until = None, 0
+            await asyncio.gather(*self.captures.values(), *(task for task in (self.finish_task,self.repair,self.scan_task) if task),
+                                 return_exceptions=True)
+
+
+async def service(args, config):
     root = args.spool
     root.mkdir(mode=0o700, exist_ok=True, parents=False)
     info = root.lstat()
@@ -303,21 +646,32 @@ async def service(args, config):
         if not HEX.fullmatch(worker['id']):
             raise ValueError('worker identity invalid')
         school = School(config['site'], config['secret'], worker['id'])
-        runner = Runner(school, root, None, None, args.ffmpeg)
-        runner.sweep()  # Expire old private media even if Chromium or FFmpeg is no longer installed.
-        encoders = subprocess.check_output([args.ffmpeg, '-hide_banner', '-encoders'], timeout=8, stderr=subprocess.DEVNULL)
-        if b' libx264 ' not in encoders or b' aac ' not in encoders:
-            raise ValueError('FFmpeg H.264/AAC encoders needed')
-        renderer = Renderer(ROOT)
+        native = args.native_receiver
+        runner = DeferredRunner(school, root, None, None, args.ffmpeg, native=native, post_socket=args.postprocess_socket)
+        # The first control tick starts bounded, off-loop expiry/storage sampling.
         stopped = asyncio.Event()
         for signum in (signal.SIGTERM, signal.SIGINT):
             asyncio.get_running_loop().add_signal_handler(signum, stopped.set)
+        if native is not None:
+            from native_capture import PROTOCOL
+            if not native.is_absolute() or not native.is_file() or subprocess.check_output(
+                    [native, '--check'], timeout=2, stderr=subprocess.DEVNULL, env={}) != PROTOCOL:
+                raise ValueError('compatible native receiver required')
+            print(f'recorder: native live capture available ({VERSION}); film renderer starts only off peak', flush=True)
+            await runner.run(stopped)
+            return
+        from playwright.async_api import async_playwright
+
+        encoders = subprocess.check_output([args.ffmpeg, '-hide_banner', '-encoders'], timeout=8, stderr=subprocess.DEVNULL)
+        if b' libx264 ' not in encoders or b' aac ' not in encoders:
+            raise ValueError('FFmpeg H.264/AAC encoders needed')
+        renderer = ArchiveRenderer(ROOT)
         async with async_playwright() as playwright:
             browser = await playwright.chromium.launch(headless=True, chromium_sandbox=True,
                 args=['--autoplay-policy=no-user-gesture-required'])
             await renderer.check(browser)
             runner.browser, runner.renderer = browser, renderer
-            print(f'recorder: compositor and encoder available ({VERSION})', flush=True)
+            print(f'recorder: deferred capture and encoder available ({VERSION})', flush=True)
             await runner.run(stopped)
 
 
@@ -326,7 +680,11 @@ def main():
     parser.add_argument('config', type=Path)
     parser.add_argument('--spool', type=Path, default=Path('/var/lib/school-classroom-recorder'))
     parser.add_argument('--ffmpeg', default='/usr/bin/ffmpeg')
+    parser.add_argument('--native-receiver', type=Path, help='absolute path to the verified native receiver')
+    parser.add_argument('--postprocess-socket', type=Path, help='private Unix socket of the separate finishing service')
     args = parser.parse_args()
+    if bool(args.native_receiver) != bool(args.postprocess_socket) or (args.postprocess_socket and not args.postprocess_socket.is_absolute()):
+        parser.error('native capture and the private absolute post-process socket must be supplied together')
     os.umask(0o077)
     try:
         if os.geteuid() == 0 or args.config.lstat().st_mode & 0o077:

@@ -1,0 +1,5 @@
+663da68a85bdfac47ae2a0fbb48628d856f567e116bf367bdbd28ff935b490d1  baci-classroom-recorder-v0.4.23.zip
+a077ee6862a18ed43c5c1573acfa3f81d596041b30324042f4698beed0090d6a  baci-classroom-upgrade-v0.4.23.zip
+78a9ddb591c41fa57c663dafedc6ba6fe7474739fcce009c789037120d41b1a0  baci-plugin-manager-update-v0.1.29.zip
+db09418e148fbec9ca58906ba46e5ee93587a26a63b462a4953d01e7fc63b92b  baci-plugin-manager-v0.1.29.zip
+84f74c91b70f45922596d36bfd920645696e08227b1ad158b496e65ae001d1d1  school-classroom-plugin-v0.4.23.zip

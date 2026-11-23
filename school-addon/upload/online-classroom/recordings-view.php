@@ -47,7 +47,7 @@ try {
 header("Content-Security-Policy: default-src 'self'; style-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'");
 $current = $selected ? cl_rec_link($s, $selected) : null;
 $known = $current && cl_rec_bot($current['provider']) && cl_rec_inventory($s->db, $current['provider'], $current['chat']);
-$labels = ['recording'=>'در حال آماده‌سازی یا ضبط','queued'=>'در صف ارسال','delivered'=>'ارسال همهٔ بخش‌ها تأیید شد',
+$labels = ['recording'=>'در حال آماده‌سازی یا ضبط','queued'=>'در انتظار ساخت','delivered'=>'ارسال همهٔ بخش‌ها تأیید شد',
     'discarded'=>'ارسال نشد','failed'=>'ارسال ناموفق','uncertain'=>'نتیجهٔ ارسال نامشخص؛ تکرار خودکار نمی‌شود'];
 ?>
 <!doctype html>
@@ -61,6 +61,7 @@ $labels = ['recording'=>'در حال آماده‌سازی یا ضبط','queued'
     <section class="card">
         <h2>گروه هر کلاس · سال <?= cl_html(cl_persian_digits($year)) ?></h2>
         <p role="status">سرویس ضبط: <?= cl_rec_health($s, $cfg, time()) ? 'آماده' : (cl_rec_enabled($cfg) ? 'متصل نیست' : 'خاموش') ?></p>
+        <p>ساخت فیلم از <?= cl_html(cl_persian_digits((string)cl_rec_delay($cfg))) ?> دقیقه پس از پایان واقعی همان زنگ مجاز است. اگر کلاس دیگری باز باشد، ساخت و شروع ارسال منتظر می‌مانند.</p>
         <?php if ($notice): ?><p role="status"><?= cl_html($notice) ?></p><?php endif; ?>
         <p>برای هر کلاس یک گروه انتخاب کن. مدیر بودن ربات شرط نیست، اما برای ارسال باید اجازهٔ انتشار ویدیو داشته باشد. اگر گروه در فهرست نیست، در همان گروه ربات را خطاب کن یا گروه را از «گفتگوهای ربات» در پنل پیام‌رسان ثبت کن.</p>
         <?php if (!$selected): ?><p>برای سال جاری کلاس قابل تخصیص پیدا نشد.</p><?php else: ?>
@@ -98,9 +99,12 @@ $labels = ['recording'=>'در حال آماده‌سازی یا ضبط','queued'
         ?>
         <?php if (!$jobs): ?><p>هنوز ضبطی ثبت نشده است.</p><?php else: ?><ul>
         <?php foreach ($jobs as $job): ?>
-            <li><?= cl_html(cl_display_day(cl_day($job['begin'])->format('Y-m-d')) . '، ' . cl_tehran_clock($job['begin']) . ' · ' . $labels[$job['state']]) ?>
+            <li><?= cl_html(cl_display_day(cl_day($job['begin'])->format('Y-m-d')) . '، ' . cl_tehran_clock($job['begin']) . ' · ' . (isset($job['rendered_at']) && $job['state'] === 'queued' ? 'ساخته شد؛ در صف ارسال' : $labels[$job['state']])) ?>
+                <?= $job['state'] === 'queued' && isset($job['not_before']) && !isset($job['rendered_at'])
+                    ? ' · زودترین شروع ساخت: ' . cl_html(cl_display_day(cl_day($job['not_before'])->format('Y-m-d')) . '، ' . cl_tehran_clock($job['not_before'])) : '' ?>
                 <?= $job['total'] ? ' (' . cl_persian_digits($job['sent'] . '/' . $job['total']) . ')' : '' ?>
                 <?= ($job['reason'] ?? '') === 'destination' ? ' · گروه یا دسترسی ربات تأیید نشد' : '' ?>
+                <?= ($job['reason'] ?? '') === 'space' ? ' · سقف فضای موقت' : '' ?>
                 <?= ($job['reason'] ?? '') === 'capture' ? ' · ضبط کامل نشد' : '' ?>
                 <?= isset($job['cleaned']) ? ' · فایل موقت VPS پاک شد' : '' ?></li>
         <?php endforeach; ?></ul><?php endif; ?>

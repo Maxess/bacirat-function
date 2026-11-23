@@ -13,7 +13,8 @@
         let zoomLevel = 1, framing = fullView, viewFrame;
         let data = null, transport = null, cursor = 0, ops = [], stroke = null, pointer = null;
         let pending = [], sent = [], writing = null, writeTimer, generation = 0, targetRev = 0;
-        const removed = new Set(), bounds = new WeakMap();
+        let serial = 0, retry = null, resnapshot = false, rebaseWrites = false;
+        const removed = new Set(), undone = new Set(), bounds = new WeakMap();
         const packetSize = 96, eraseSize = 32, batchSize = 6, queueLimit = 48, writeDelay = 175;
         const tip = el('eraser-tip');
         let tool = 'pen', busy = false, renderVersion = 0, documentVersion = 0, docsKey = '';
@@ -24,7 +25,8 @@
         const laserTtl = 1900, laserLimit = 20, laserSampleMs = 48; // Wire limits match activity.php.
         const laserTrail = side => ({dot:el(`board-laser-${side}`), layer:el(`board-laser-${side}-trail`), samples:[], lines:[]});
         const localLaser = laserTrail('local'), remoteLaser = laserTrail('remote');
-        let aimPending = null, laserFrame;
+        let aimPending = null, laserFrame, fastLaser = null, cursorTimer;
+        const remoteCursor = el('board-remote-cursor');
         let library, pdfSession, rendering, imageLoad, imageFile;
         const pdfChunk = 16 * 1024, pdfBatch = 16; // Multi-range cap matches content.php.
         const staff = root.dataset.moderator === 'yes';
@@ -304,12 +306,15 @@
         const samePoint = (a, b) => a[0] === b[0] && a[1] === b[1];
         const last = list => list[list.length - 1];
         const drafts = () => [...sent.flatMap(entry => entry.ops), ...pending];
+        const hiddenStroke = id => removed.has(id) || undone.has(id);
+        const ordered = () => Number.isSafeInteger(data?.head);
+        const ambiguous = error => !error.status || error.status === 408 || error.status === 429 || error.status >= 500;
         function collectRemoved(hidden, list) {
             for (const op of list) if (op.tool === 'erase-stroke') for (const id of op.targets) hidden.add(id);
             return hidden;
         }
         function paintVisible(op, hidden) {
-            if (op.tool !== 'erase-stroke' && !hidden.has(op.id)) paint(op);
+            if ((op.tool === 'pen' || op.tool === 'erase') && !hidden.has(op.id) && !undone.has(op.id)) paint(op);
         }
         function redraw() {
             stopPlayback();
@@ -335,7 +340,7 @@
             labels.clear(); writers.replaceChildren();
         }
         function writer(op, point) {
-            if (!op.live || !op.author || op.author === options.identity() || !point || removed.has(op.id)) return;
+            if (!op.live || !op.author || op.author === options.identity() || !point || hiddenStroke(op.id)) return;
             const name = options.authorName(op.author);
             if (!name) return;
             let cue = labels.get(op.author);
@@ -373,7 +378,7 @@
                 const parts = [];
                 let length = 0;
                 for (const op of rows) {
-                    if (removed.has(op.id)) continue;
+                    if (hiddenStroke(op.id)) continue;
                     if (op.points.length === 1) {
                         parts.push({op, from:length, to:length+4});
                         length += 4;
@@ -431,6 +436,10 @@
         function receive(incoming) {
             collectRemoved(removed, incoming);
             for (const op of incoming) {
+                if (op.tool === 'undo' || op.tool === 'redo') {
+                    for (const id of op.targets) op.tool === 'undo' ? undone.add(id) : undone.delete(id);
+                    continue;
+                }
                 const tail = last(ops);
                 if (op.tool === 'pen' && tail?.tool === 'pen' && tail.id === op.id && op.id && tail.color === op.color && tail.size === op.size
                     && samePoint(last(tail.points), op.points[0]) && tail.points.length + op.points.length - 1 <= packetSize) {
@@ -486,12 +495,35 @@
                 if (local || remote) animateLaser();
             });
         }
+        function clearRemoteCues() {
+            fastLaser = null;
+            clearTrail(remoteLaser);
+            clearTimeout(cursorTimer);
+            if (remoteCursor) remoteCursor.hidden = true;
+        }
         function clearPointers() {
             aimPending = null;
             cancelAnimationFrame(laserFrame); laserFrame = undefined;
-            clearTrail(localLaser); clearTrail(remoteLaser);
+            clearTrail(localLaser); clearRemoteCues();
+        }
+        function hasFastLaser(by) {
+            return fastLaser && (!by || fastLaser.by === by) && performance.now()-fastLaser.at < 430;
+        }
+        function remoteCue(kind, points, by) {
+            if (!data || resnapshot || document.hidden) return;
+            const now = performance.now();
+            if (kind === 'l') {
+                fastLaser = {by,at:now};
+                remoteLaser.samples = points.map(([x,y,age]) => [x,y,now+laserTtl-age]);
+                animateLaser();
+            } else if (remoteCursor) {
+                locate(remoteCursor, points[0]); remoteCursor.hidden = false;
+                clearTimeout(cursorTimer);
+                cursorTimer = setTimeout(() => { remoteCursor.hidden = true; }, 440);
+            }
         }
         function showRemoteLaser(aim, requestedAt) {
+            if (hasFastLaser(aim?.by)) return;
             if (!aim?.points?.length || (!options.rasterOnly && (aim.by === options.identity() || document.hidden))) {
                 clearTrail(remoteLaser); return;
             }
@@ -502,7 +534,13 @@
             if (!remoteLaser.samples.length) clearTrail(remoteLaser);
             else if (!options.rasterOnly) animateLaser(); // The archive paints and fades its own clipped canvas overlay.
         }
-        function pointerEnd() {
+        function pointerEnd(commit = true) {
+            if (commit && ordered() && stroke?.style) {
+                const {id} = stroke.style, tail = last(pending);
+                if (tail?.tool === 'pen' && tail.id === id) tail.end = true;
+                else pending.push({tool:'pen-end',id,part:stroke.part+1});
+                scheduleWrite();
+            }
             pointer = null; pointerType = ''; stroke = null; candidate = null;
             tip.hidden = true;
         }
@@ -514,24 +552,26 @@
             if (!id && !erasures) return;
             const count = pending.length;
             pending = pending.filter(op => !(id && op.id === id) && !erasures?.has(op));
+            if (id) stroke.style = null;
             if (pending.length !== count) redraw();
         }
-        function stopGestures() {
+        function stopGestures(commit = true) {
             abandonUnsentTouch();
             cancelAnimationFrame(pinchFrame); pinchFrame = undefined;
             if (contacts.size) touchBlocked = true;
             pinch = drag = null; space = false;
-            pointerEnd(); dragState();
+            pointerEnd(commit); dragState();
         }
         function wipeInk() {
             generation++;
-            stopPlayback(); stopGestures(); clearLabels(); clearPointers();
+            stopPlayback(); stopGestures(false); clearLabels(); clearPointers();
             clearTimeout(writeTimer); writeTimer = undefined;
-            ops = []; pending = []; sent = [];
-            removed.clear(); targetRev = 0; cursor = 0;
+            ops = []; pending = []; sent = []; retry = null;
+            removed.clear(); undone.clear(); targetRev = 0; cursor = serial = 0;
+            resnapshot = rebaseWrites = false;
         }
         function canWrite() { return options.canEdit() && (staff || data?.write === true); }
-        function editable() { return !!data && !busy && data.rev >= targetRev && canWrite(); }
+        function editable() { return !!data && !busy && !resnapshot && data.rev >= targetRev && canWrite(); }
         function queuedSlot() {
             if (pending.length + sent.reduce((count, entry) => count + entry.ops.length, 0) < queueLimit) return true;
             message('همگام‌سازی تخته عقب افتاده است؛ لحظه‌ای صبر کن.');
@@ -539,26 +579,42 @@
             return false;
         }
         function scheduleWrite() {
-            if (writing || writeTimer !== undefined || !pending.length || busy || !canWrite()) return;
-            writeTimer = setTimeout(write, writeDelay);
+            if (writing || writeTimer !== undefined || (!pending.length && !retry) || busy || resnapshot || !canWrite()) return;
+            writeTimer = setTimeout(write, retry ? Math.max(0,retry.at-performance.now()) : writeDelay);
         }
         function write() {
             clearTimeout(writeTimer); writeTimer = undefined;
-            if (writing || !data || !pending.length || !canWrite()) return writing;
-            const stamp = generation;
-            const entry = {ops:pending.splice(0,batchSize), until:null};
-            if (pointerType === 'touch' && entry.ops.some(op => (stroke.style && op.id === stroke.style.id)
-                || stroke.erasures?.has(op))) stroke.shared = true;
-            sent.push(entry);
-            writing = options.send('board-ink',{board:data.rev,strokes:entry.ops}).then(reply => {
-                if (stamp !== generation) return;
+            if (writing || !data || (!pending.length && !retry) || resnapshot || !canWrite()) return writing;
+            if (retry && retry.at > performance.now()) return Promise.resolve(false);
+            const stamp = generation, versioned = ordered();
+            const entry = retry || {ops:pending.splice(0,batchSize),until:null,seq:serial+1,attempt:0};
+            if (!retry) {
+                if (pointerType === 'touch' && entry.ops.some(op => (stroke.style && op.id === stroke.style.id)
+                    || stroke.erasures?.has(op))) stroke.shared = true;
+                sent.push(entry);
+            }
+            retry = null;
+            const payload = {board:data.rev,strokes:entry.ops,...(versioned ? {seq:entry.seq} : {})};
+            writing = options.send('board-ink',payload).then(reply => {
+                if (stamp !== generation) return false;
+                if (versioned && (reply.seq !== entry.seq || !Number.isSafeInteger(reply.ink))) throw new Error('Missing ink acknowledgement');
+                serial = entry.seq;
                 entry.until = reply.ink;
                 if (prune()) redraw();
+                return true;
             }).catch(error => {
-                if (stamp !== generation) return;
-                // An unknown or rejected prefix must not be linked to later points.
-                pending = []; sent = sent.filter(row => row !== entry);
-                pointerEnd(); redraw(); message(options.explain(error));
+                if (stamp !== generation) return false;
+                if (versioned && ambiguous(error)) {
+                    // Same bytes and sequence after an ambiguous response, never skip the head.
+                    entry.at = performance.now()+Math.min(2000,250*2**Math.min(3,entry.attempt++));
+                    retry = entry;
+                    if (entry.attempt === 1) message('دریافت خط تأیید نشد؛ دوباره تلاش می‌کنیم.');
+                } else {
+                    pending = []; sent = sent.filter(row => row !== entry);
+                    pointerEnd(false); redraw(); message(options.explain(error));
+                    if (versioned) { resnapshot = rebaseWrites = true; options.resync?.(); }
+                }
+                return false;
             }).finally(() => { writing = null; scheduleWrite(); });
             return writing;
         }
@@ -670,6 +726,10 @@
             if (!ready) tip.hidden = true;
             el('eraser').hidden = !staff && !canWrite();
             for (const id of ['pen','eraser','ink-color','ink-size']) el(id).disabled = !ready;
+            for (const id of ['board-undo','board-redo']) {
+                const button = el(id);
+                if (button) { button.hidden = !ordered(); button.disabled = !ready; }
+            }
             viewport.dataset.ink = ready ? 'yes' : 'no';
             zoomLabels();
             dragState();
@@ -690,28 +750,67 @@
             el('page-prev').disabled = !navigate || n <= 1;
             el('page-next').disabled = !navigate || n >= pages;
         }
+        function recover() {
+            if (options.rasterOnly) message('ترتیب تاریخچهٔ تخته معتبر نیست.');
+            resnapshot = true;
+            stopPlayback(true); clearRemoteCues(); toolState();
+            return false;
+        }
+        function contiguous(next, from) {
+            if (!Number.isSafeInteger(next.head) || !Number.isSafeInteger(next.rev) || next.rev < 1
+                || !Number.isSafeInteger(next.cursor) || next.cursor < from || next.head < next.cursor
+                || !!next.more !== (next.cursor < next.head)) return false;
+            if (next.ops != null && !Array.isArray(next.ops)) return false;
+            for (const op of next.ops || []) {
+                if (!op || op.from !== from || !Number.isSafeInteger(op.seq) || op.seq <= from || op.seq > next.cursor) return false;
+                from = op.seq;
+            }
+            return from === next.cursor;
+        }
         function sync(next, scope, requestedAt = performance.now()) {
             if (!next) return;
+            const versioned = 'head' in next;
             const rival = transport && (transport.lesson !== scope.lesson || transport.epoch !== scope.epoch || transport.sid !== scope.sid);
+            const resetPage = next.reset || !data || next.rev !== data.rev || rival;
+            if (next.checkpoint && !('doc' in next)) return recover();
             if (!('doc' in next)) {
-                // Compact deltas carry no document metadata; never borrow metadata from a different SID or page.
-                if (rival || !data || data.rev !== next.rev) return;
+                // Compact deltas carry no document metadata; never borrow it from a different SID or page.
+                if (resetPage) return versioned ? recover() : undefined;
                 next = {...next,doc:data.doc,page:data.page,docs:data.docs,ops:next.ops || []};
             }
-            const resetPage = next.reset || !data || next.rev !== data.rev || rival;
+            if (versioned && (!contiguous(next, resetPage ? 0 : cursor) || (resnapshot && !next.reset)
+                || (!resetPage && ((next.viewSeq ?? 0) < (data.viewSeq ?? 0) || next.page !== data.page || next.doc?.id !== data.doc?.id))
+                || (!options.rasterOnly && next.write && !data?.write && !Number.isSafeInteger(next.writeSeq)))) return recover();
             const reloadDoc = rival || next.doc?.id !== data?.doc?.id;
             const changedPaper = !data || reloadDoc || next.page !== data.page;
             const catchingUp = data?.more || next.more;
             const revoked = !staff && data?.write === true && next.write !== true;
             const wasNavigating = controlsView();
             const shared = checkedView(next.view), viewChanged = !sameView(shared,framing);
-            if (resetPage) wipeInk();
-            else if (revoked) {
+            const keepDraft = versioned && data && !rival && data.rev === next.rev && !rebaseWrites && !revoked && next.head >= cursor;
+            if (resetPage) {
+                if (keepDraft) {
+                    stopPlayback(); clearLabels(); clearRemoteCues();
+                    ops = []; removed.clear(); undone.clear();
+                } else {
+                    if (versioned && (pending.length || retry || sent.some(row=>row.until === null))) {
+                        message('بخش تأییدنشدهٔ قلم روی صفحه یا اتصال قبلی باقی ماند.');
+                    }
+                    wipeInk();
+                    serial = next.writeSeq ?? 0;
+                }
+                resnapshot = rebaseWrites = false;
+            } else if (revoked) {
                 // Keep confirmed ink; discard unsent strokes and make any old ACK harmless.
                 generation++;
                 clearTimeout(writeTimer); writeTimer = undefined;
-                pending = []; sent = []; pointerEnd();
+                pending = []; sent = []; retry = null; pointerEnd(false); clearRemoteCues();
+                rebaseWrites = true;
             }
+            if (!resetPage && rebaseWrites && !data?.write && next.write && Number.isSafeInteger(next.writeSeq)) {
+                serial = next.writeSeq; rebaseWrites = false;
+            }
+            if (next.presenter?.sid !== data?.presenter?.sid) clearRemoteCues();
             transport = scope;
             data = next;
             framing = shared;
@@ -725,16 +824,17 @@
             cursor = next.cursor;
             const dropped = prune();
             receive(next.ops);
-            if (removed.has(stroke?.style?.id)) pointerEnd();
-            for (const [id,cue] of labels) if (removed.has(cue.id)) {
+            if (hiddenStroke(stroke?.style?.id)) pointerEnd();
+            for (const [id,cue] of labels) if (hiddenStroke(cue.id)) {
                 clearTimeout(cue.timer); cue.label.remove(); labels.delete(id);
             }
             showRemoteLaser(next.rev < targetRev ? null : next.laser, requestedAt);
             if (reloadDoc) clearDocument();
+            let paperReady;
             if (changedPaper) {
                 blankPaper(next.doc);
-                show(next,scope);
-            } else if (resetPage || revoked || dropped || (next.ops.length && (pending.length || sent.length || next.ops.some(op => op.tool === 'erase-stroke')))) {
+                paperReady = show(next,scope);
+            } else if (resetPage || revoked || dropped || (next.ops.length && (pending.length || sent.length || next.ops.some(op => op.tool !== 'pen')))) {
                 redraw();
                 if (!resetPage && !catchingUp && !document.hidden) lastWriters(next.ops);
             }
@@ -760,7 +860,10 @@
                 select.value = next.doc?.id || '';
                 if (resetPage || document.activeElement !== el('page-number')) el('page-number').value = String(next.page);
             }
-            toolState();
+            toolState(); scheduleWrite();
+            // A fast-forwarded archive must wait for the selected page, not capture
+            // a blank canvas at the time when the live UI would still be loading it.
+            return paperReady;
         }
         function reset() {
             data = transport = null; zoomLevel = 1; framing = fullView;
@@ -834,10 +937,11 @@
             tip.classList.toggle('touch',type === 'touch');
             tip.style.left = `${point[0]/100}%`;
             tip.style.top = `${point[1]/100}%`;
+            options.publishCue?.('c',data.rev,[[...point,0]]);
         }
         function erase(a, b, rect, type) {
             const draft = drafts();
-            const hidden = collectRemoved(new Set(removed), draft);
+            const hidden = collectRemoved(new Set([...removed,...undone]), draft);
             let changed = false;
             for (const op of [...ops,...draft]) {
                 if (op.tool !== 'pen' || !op.id || (!staff && (!data.owner || !op.id.startsWith(data.owner))) || hidden.has(op.id) || !touches(op,a,b,rect,type==='touch' ? 19 : 14)) continue;
@@ -861,24 +965,28 @@
             // Retain the start of even a very short sweep; replace its newest point within each sample interval.
             if (samples.length >= 2 && end[2] - samples[samples.length-2][2] < laserSampleMs) samples[samples.length-1] = end;
             else { samples.push(end); if (samples.length > laserLimit) samples.shift(); }
-            if (!aimPending) options.aimSoon();
+            options.publishCue?.('l',data.rev,laserPoints(now));
+            if (!aimPending) options.aimSoon(); // Also keep the existing HTTP mirror for fallback/recording.
             aimPending = {at:now, rev:data.rev};
             animateLaser();
+        }
+        function laserPoints(now) {
+            return localLaser.samples.filter(([, , expires]) => expires > now)
+                .map(([x,y,expires]) => [x,y,Math.max(0,Math.floor(now + laserTtl - expires))]);
         }
         function takeAim() {
             const item = aimPending;
             aimPending = null;
             const now = performance.now();
             if (!staff || !editable() || item?.rev !== data.rev || now-item.at > 850) return {};
-            const points = localLaser.samples.filter(([, , expires]) => expires > now)
-                .map(([x,y,expires]) => [x,y,Math.max(0,Math.floor(now + laserTtl - expires))]);
+            const points = laserPoints(now);
             return points.length ? {aim:points} : {};
         }
         function beginStroke(id, type, point, rect, mode = tool) {
             if (!editable() || pointer !== null || mode === 'pan' || (mode === 'pen' && !queuedSlot())) return;
             stopPlayback(true);
             pointer = id; pointerType = type;
-            stroke = {last:point,mode};
+            stroke = {last:point,mode,part:0};
             if (mode === 'erase') {
                 if (type === 'touch') stroke.erasures = new Set();
                 aim(point,type); erase(point,point,rect,type);
@@ -889,7 +997,7 @@
                 const raw = Array.from(crypto.getRandomValues(new Uint8Array(16)), n => n.toString(16).padStart(2,'0')).join('');
                 const id = data.owner ? data.owner + raw.slice(16) : raw;
                 stroke.style = {tool:'pen',id,color:el('ink-color').value,size:Number(el('ink-size').value)};
-                const op = {...stroke.style,points:[point]};
+                const op = {...stroke.style,points:[point],...(ordered() ? {part:0} : {})};
                 pending.push(op); paint(op); scheduleWrite();
             }
         }
@@ -899,12 +1007,13 @@
             let tail = last(pending);
             if (tail?.id !== style.id || tail.points.length >= packetSize) {
                 if (!queuedSlot()) return;
-                tail = {...style,points:[before]};
+                tail = {...style,points:[before],...(ordered() ? {part:++stroke.part} : {})};
                 pending.push(tail);
             }
             tail.points.push(point); bounds.delete(tail);
             stroke.last = point;
             paint({...style,points:[before,point]}); scheduleWrite();
+            options.publishCue?.('c',data.rev,[[...point,0]]);
         }
         function inkPoint(point, rect) {
             if (!stroke) return;
@@ -1006,7 +1115,7 @@
             if (drag?.id === id) { moveDrag(event); return; }
             if (!editable() || tool === 'pan') return;
             if (type === 'pen') penUntil = performance.now() + 420;
-            if (pointer !== id && candidate?.id !== id && !(type !== 'touch' && tool === 'erase' && drawingTarget(event))) return;
+            if (pointer !== id && candidate?.id !== id && !(type !== 'touch' && drawingTarget(event))) return;
             const rect = ink.getBoundingClientRect();
             if (!rect.width || !rect.height) return;
             if (candidate?.id === id) {
@@ -1018,7 +1127,11 @@
             if (pointer === id && stroke) {
                 const samples = event.getCoalescedEvents?.();
                 for (const sample of samples?.length ? samples : [event]) inkPoint(xy(sample,rect),rect);
-            } else if (type !== 'touch' && tool === 'erase' && drawingTarget(event)) aim(xy(event,rect),type);
+            } else if (type !== 'touch' && drawingTarget(event)) {
+                const point = xy(event,rect);
+                if (tool === 'erase') aim(point,type);
+                else if (tool === 'pen') options.publishCue?.('c',data.rev,[[...point,0]]);
+            }
         }
         function done(event) {
             const id = event.pointerId;
@@ -1064,6 +1177,11 @@
         el('eraser').addEventListener('click',() => setTool('erase'));
         el('board-laser')?.addEventListener('click',() => setTool('laser'));
         el('pan')?.addEventListener('click',() => setTool('pan'));
+        for (const tool of ['undo','redo']) el(`board-${tool}`)?.addEventListener('click', () => {
+            if (!ordered() || !editable() || !queuedSlot()) return;
+            pointerEnd();
+            pending.push({tool}); scheduleWrite();
+        });
         if (staff) {
             async function act(work, navigate = false) {
                 if (!editable() || (navigate && !canNavigate())) return;
@@ -1071,7 +1189,10 @@
                 busy = true; pointerEnd(); aimPending = null; clearTrail(localLaser); toolState();
                 try {
                     // Commit the last drawn points on this page before changing the revision.
-                    while (stamp === generation && options.canEdit() && (writing || pending.length)) await (writing || write());
+                    while (stamp === generation && options.canEdit() && (writing || pending.length || retry)) {
+                        const accepted = await (writing || write());
+                        if (!accepted) { message('اول منتظر تأیید نوشته‌های همین صفحه بمان.'); return; }
+                    }
                     const current = () => stamp === generation && options.canEdit() && (!navigate || controlsView());
                     if (!current()) return;
                     const result = await work(current);
@@ -1079,15 +1200,26 @@
                 } catch (e) { if (stamp === generation) message(options.explain(e)); }
                 finally { busy = false; toolState(); scheduleWrite(); }
             }
-            function page(doc,n) {
-                act(() => options.send('board-page',{board:data.rev,doc,page:n}), true);
+            function changePage(action, fields, navigate = false) {
+                act(async current => {
+                    const input = {board:data.rev,...fields};
+                    try { return await options.send(action,input); }
+                    catch (error) {
+                        if (!ordered() || !ambiguous(error)) throw error;
+                        // Retry only this revision. A committed clear/page change advanced it,
+                        // so a lost reply can never clear a later page or apply twice.
+                        await new Promise(resolve => setTimeout(resolve,250));
+                        if (current() && data.rev === input.board) return options.send(action,input);
+                    }
+                }, navigate);
             }
+            function page(doc,n) { changePage('board-page',{doc,page:n}, true); }
             el('page-prev').addEventListener('click',() => page(data?.doc?.id || null,data.page-1));
             el('page-next').addEventListener('click',() => page(data?.doc?.id || null,data.page+1));
             el('page-go').addEventListener('click',() => page(data?.doc?.id || null,Number(el('page-number').value)));
             el('board-doc').addEventListener('change',e => page(e.target.value||null,1));
             el('board-clear').addEventListener('click',() => {
-                if (window.confirm('فقط نوشته‌های همین صفحه پاک شود؟')) act(() => options.send('board-clear',{board:data.rev}));
+                if (window.confirm('فقط نوشته‌های همین صفحه پاک شود؟')) changePage('board-clear',{});
             });
             el('board-upload').addEventListener('submit',event => {
                 event.preventDefault();
@@ -1111,6 +1243,7 @@
             });
         }
         toolState();
-        return {position:() => ({board:data?.rev || 0,ink:cursor}),framing:() => framing,laser:() => remoteLaser.samples,takeView,takeAim,sync,reset};
+        return {position:() => resnapshot ? {board:0,ink:0} : {board:data?.rev || 0,ink:cursor},
+            framing:() => framing,laser:() => remoteLaser.samples,takeView,takeAim,sync,reset,remoteCue,hasFastLaser};
     };
 })();

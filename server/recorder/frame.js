@@ -103,9 +103,9 @@
             draw(area);
             ctx.restore();
         }
-        function drawLaser(laser,crop,dest) {
+        function drawLaser(laser,crop,dest,now) {
             if (!laser?.length) return;
-            const now = performance.now(), samples = laser.filter(point => point[2] > now);
+            const samples = laser.filter(point => point[2] > now);
             if (!samples.length) return;
             const [left,top,right,bottom] = crop, [x,y,w,h] = dest;
             const point = ([a,b]) => [x+(a-left)*w/(right-left),y+(b-top)*h/(bottom-top)];
@@ -123,7 +123,7 @@
             dot(hx,hy,'#ff342c');
             ctx.restore();
         }
-        function boardPane(rect,paper,ink,doc,hasInk,view,laser) {
+        function boardPane(rect,paper,ink,doc,hasInk,view,laser,now) {
             pane(rect,doc?.mime === 'application/pdf' ? 'سند کلاس · PDF' : 'تختهٔ کلاس',area => {
                 if (!doc && !hasInk) {
                     const x = area.x + area.w/2, y = area.y + area.h/2;
@@ -142,14 +142,14 @@
                 if (doc || hasInk) {
                     ctx.drawImage(paper,...src,...dest); ctx.drawImage(ink,...src,...dest);
                 }
-                drawLaser(laser,crop,dest);
+                drawLaser(laser,crop,dest,now);
             });
             if (view && view.zoom !== 100 && (doc || hasInk)) {
                 label(percent.format(view.zoom/100),rect.x+13,rect.y+19,{size:14,color:'#a5b7d1',align:'left'});
             }
         }
         function videoPane(rect,video,title) {
-            pane(rect,title,area => ctx.drawImage(video,...fit(video.videoWidth,video.videoHeight,area)));
+            pane(rect,title,area => ctx.drawImage(video,...fit(video.videoWidth ?? video.displayWidth,video.videoHeight ?? video.displayHeight,area)));
         }
         function cameraGrid(n) {
             // Fit all published cameras, with no paging, favoring fewer rows at equal size.
@@ -178,7 +178,7 @@
                 const y = startY+row*(h+spacing), radius = Math.min(10,h/4);
                 box(x,y,w,h,radius,'#0b1527',roles[role] ? '#56759e' : '#314563');
                 ctx.save(); ctx.beginPath(); ctx.roundRect(x,y,w,h,radius); ctx.clip();
-                ctx.drawImage(video,...fit(video.videoWidth,video.videoHeight,{x,y,w,h}));
+                ctx.drawImage(video,...fit(video.videoWidth ?? video.displayWidth,video.videoHeight ?? video.displayHeight,{x,y,w,h}));
                 if (roles[role] && h >= 75) {
                     box(x+w-60,y+h-32,52,24,6,'#0b1527');
                     label(roles[role],x+w-34,y+h-20,{size:13,align:'center'});
@@ -186,13 +186,13 @@
                 ctx.restore();
             });
         }
-        return ({paper,ink,doc,hasInk,view,laser,cameras=[],screen,teacher,archiveBoard,preferScreen,heading}) => {
+        return ({paper,ink,doc,hasInk,view,laser,cameras=[],screen,teacher,archiveBoard,preferScreen,heading,at=performance.now()}) => {
             const shared = screen && (preferScreen || !teacher);
             const primary = shared ? screen : teacher;
             const gallery = cameras.filter(({video}) => video && video !== primary);
             const bottom = gallery.length ? galleryY-gap : height-footer;
             const presentation = {x:margin,y:top,w:width-2*margin,h:bottom-top};
-            const drawBoard = rect => boardPane(rect,paper,ink,doc,hasInk,view,laser);
+            const drawBoard = rect => boardPane(rect,paper,ink,doc,hasInk,view,laser,at);
             const drawVideo = rect => videoPane(rect,primary,shared ? 'صفحهٔ مشترک' : 'دوربین دبیر');
             ctx.fillStyle = background; ctx.fillRect(0,0,width,height);
             header(heading);

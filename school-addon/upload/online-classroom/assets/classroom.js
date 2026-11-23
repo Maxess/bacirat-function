@@ -6,7 +6,8 @@
     }
     async function request(root, action, data = {}, {multipart = false, keepalive = false} = {}) {
         const ctl = new AbortController();
-        const timer = setTimeout(() => ctl.abort(), multipart ? 90000 : action === 'board-sync' ? 2300 : 7000);
+        const timeout = multipart ? 90000 : action === 'board-sync' ? 2300 : action === 'board-ink' && Number.isSafeInteger(data.seq) ? 3000 : 7000;
+        const timer = setTimeout(() => ctl.abort(), timeout);
         try {
             const headers = {'X-Classroom-CSRF': root.dataset.csrf};
             let body;
@@ -27,6 +28,8 @@
     if (!root) return;
     const lk = window.LivekitClient;
     const fridaySlot = 'friday-test';
+    const boardWire = 1, boardCueTopic = 'baci.board.cue.v1', boardCueLimit = 512;
+    const snapshotPeriod = 12000;
     const isRepeatSlot = value => typeof value === 'string' && /^repeat-[a-f0-9]{32}$/.test(value);
     const staff = root.dataset.moderator === 'yes';
     const roomClass = Number(root.dataset.class);
@@ -60,7 +63,7 @@
     let active = null, connecting = false, busy = false, polling = false, needsRefresh = false, permanent = false, stopped = false;
     let wanted = true, autoStart = staff, optedIntoTest = false, state = {phase:'idle', ready:null}, chatCursor = 0, seconds = {}, admitted = false;
     let pollTimer, flow = 0, retryAt = 0, attempts = 0;
-    let statusAt = 0, inkAt = Infinity, aimAt = Infinity, inkRead = 0, inkRetryAt = 0;
+    let statusAt = 0, inkAt = Infinity, aimAt = Infinity, inkRead = 0, inkRetryAt = 0, checkpointAt = Infinity;
     let peopleKey = '', peopleRows = new Map(), speakersKey = '', slotKey = null;
     const cameraTiles = new Map();
     const cameraPreview = el('camera-preview'), previewVideo = el('camera-preview-video');
@@ -90,8 +93,9 @@
         return p?.canPublish === true && Array.isArray(p.canPublishSources) && p.canPublishSources.includes(features[feature].source);
     }
     const maySpeak = person => allows(person, 'mic');
-    const mayCamera = person => allows(person, 'camera');
-    const mayScreen = person => person?.permissions?.canPublish === true && Array.isArray(person.permissions.canPublishSources)
+    const cameraInRoom = id => state.mediaMode !== 'audio' && (state.mediaMode !== 'teacher-video' || id === state.cameraTeacher);
+    const mayCamera = person => cameraInRoom(person?.identity) && allows(person, 'camera');
+    const mayScreen = person => state.mediaMode !== 'audio' && person?.permissions?.canPublish === true && Array.isArray(person.permissions.canPublishSources)
         && person.permissions.canPublishSources.includes(3); // LiveKit TrackSource.SCREEN_SHARE, not SCREEN_SHARE_AUDIO.
     function granted(feature, identity) {
         const rule = state.access?.[feature];
@@ -124,6 +128,46 @@
         return enabling ? 'میکروفون برای ارسال صدا فعال نشد. (MIC-PUBLISH)' : 'خاموش‌کردن میکروفون کامل نشد. (MIC-MUTE)';
     }
 
+    function cueOwner(person) {
+        const owner = state.board?.presenter;
+        return !!(person && owner && person.identity === owner.identity && person.sid === owner.sid
+            && person.permissions?.canPublishData === true && performance.now()-inkRead < 4000);
+    }
+    function publishBoardCue(kind, rev, points) {
+        if (!staff || document.hidden || !hasAccess() || state.board?.rev !== rev || board.position().board !== rev) return;
+        const link = active, person = link.room.localParticipant, now = performance.now();
+        if (!cueOwner(person) || typeof person.publishData !== 'function' || link.cueSending || (link.cueAt ?? 0) > now) return;
+        const seq = link.cueSeq = (link.cueSeq ?? 0)+1;
+        const payload = new TextEncoder().encode(JSON.stringify([link.epoch,person.sid,rev,seq,kind,points]));
+        if (payload.byteLength > boardCueLimit) return;
+        // Keep at most one call in flight. Don't queue or retransmit old pointers
+        // when the data transport is connecting or congested.
+        link.cueAt = now+80;
+        link.cueSending = true;
+        person.publishData(payload,{reliable:false,topic:boardCueTopic}).catch(() => {}).finally(() => { link.cueSending = false; });
+    }
+    function receiveBoardCue(link, payload, person, kind, topic) {
+        if (active !== link || !hasAccess() || document.hidden || topic !== boardCueTopic || kind !== lk.DataPacket_Kind?.LOSSY
+            || !cueOwner(person) || !(payload instanceof Uint8Array) || !payload.byteLength || payload.byteLength > boardCueLimit) return;
+        let value;
+        try { value = JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(payload)); } catch { return; }
+        if (!Array.isArray(value) || value.length !== 6) return;
+        const [epoch,sid,rev,seq,mode,points] = value;
+        if (epoch !== link.epoch || sid !== person.sid || rev !== state.board.rev || rev !== board.position().board
+            || !Number.isSafeInteger(seq) || seq < 1 || seq > 2147483647
+            || seq <= (link.cueSeen.get(sid) ?? 0)
+            || (mode !== 'l' && mode !== 'c') || !Array.isArray(points) || points.length < 1 || points.length > (mode === 'c' ? 1 : 20)) return;
+        let age = mode === 'c' ? 0 : 1899;
+        for (const point of points) {
+            if (!Array.isArray(point) || point.length !== 3 || !point.every(Number.isInteger)
+                || point[0] < 0 || point[0] > 10000 || point[1] < 0 || point[1] > 10000 || point[2] < 0 || point[2] > age) return;
+            age = point[2];
+        }
+        if (!link.cueSeen.has(sid) && link.cueSeen.size >= 8) link.cueSeen.delete(link.cueSeen.keys().next().value);
+        link.cueSeen.set(sid,seq);
+        board.remoteCue(mode,points,person.identity);
+    }
+
     const board = window.ClassroomBoard(root, {
         canEdit: hasAccess,
         notice: note,
@@ -133,6 +177,8 @@
             return active?.room.remoteParticipants.get(id)?.name || '';
         },
         onExpand:attention.expand,
+        publishCue:publishBoardCue,
+        resync() { inkAt = Math.min(inkAt, performance.now()+85); schedulePoll(); },
         aimSoon() {
             aimAt = Math.min(aimAt, performance.now()+25);
             schedulePoll();
@@ -146,10 +192,10 @@
             try {
                 if (file) {
                     const form = new FormData();
-                    for (const [k,v] of Object.entries({class:roomClass, ...local, ...data})) form.set(k,String(v));
+                    for (const [k,v] of Object.entries({class:roomClass, ...local, ...data, wire:boardWire})) form.set(k,String(v));
                     form.set('file', file);
                     reply = await request(root, 'upload', form, {multipart:true});
-                } else reply = await api(action, {...local, ...data});
+                } else reply = await api(action, {...local, ...data, wire:boardWire});
                 return reply;
             } finally {
                 if (active === link && local.sid === scope().sid && hasAccess()) {
@@ -316,7 +362,7 @@
                 btn.setAttribute('aria-pressed', String(enabled));
                 btn.setAttribute('aria-label', label);
                 btn.title = `${enabled ? 'لغو اجازهٔ' : 'دادن اجازهٔ'} ${label}${on ? ' (روشن)' : ''}`;
-                btn.hidden = (feature === 'camera' && !state.cameraCodec)
+                btn.hidden = (feature === 'camera' && (!state.cameraCodec || !cameraInRoom(id)))
                     || (feature === 'board' && !enabled && state.board?.navigate !== true);
                 btn.disabled = busy || state.members?.[id] !== person.sid || btn.hidden;
             }
@@ -334,7 +380,7 @@
         return link.room.localParticipant.unpublishTrack(track, true).catch(() => {});
     }
     function canReceiveVideo(person, pub) {
-        if (!hasAccess() || document.hidden || pub.kind !== lk.Track.Kind.Video || pub.isMuted) return false;
+        if (!hasAccess() || state.mediaMode === 'audio' || document.hidden || pub.kind !== lk.Track.Kind.Video || pub.isMuted) return false;
         if (pub.source === cameraSource) return !!state.cameraCodec && mayCamera(person) && pub === person.getTrackPublication(cameraSource);
         return pub.source === screenSource && mayScreen(person) && person.identity === state.screen?.identity && person.sid === state.screen.sid
             && pub === person.getTrackPublication(screenSource);
@@ -347,7 +393,8 @@
         const live = hasAccess();
         for (const person of active.room.remoteParticipants.values()) {
             for (const pub of person.trackPublications.values()) {
-                const wanted = (live && pub.kind === lk.Track.Kind.Audio && pub.source === micSource) || canReceiveVideo(person, pub);
+                const wanted = (live && pub.kind === lk.Track.Kind.Audio && pub.source === micSource && maySpeak(person)
+                    && pub === person.getTrackPublication(micSource)) || canReceiveVideo(person, pub);
                 if (pub.isDesired !== wanted) pub.setSubscribed(wanted);
             }
         }
@@ -493,7 +540,7 @@
         if (!screenToggle) return false;
         const button = screenToggle;
         // The invitation is visible independently of picker support and the SFU update's arrival order.
-        const configured = live && state.screenEnabled === true;
+        const configured = live && state.mediaMode !== 'audio' && state.screenEnabled === true;
         const show = configured && (staff ? !!state.quality?.screen : mine);
         const sharing = !!(mine && active.screenTrack);
         const pending = !!mine && (!state.quality?.screen || !mayScreen(local));
@@ -704,7 +751,7 @@
             board.reset();
         }
         if (active) { active.speakers = []; stopCamera(active); stopScreen(active); }
-        admitted = false; inkAt = aimAt = Infinity; inkRetryAt = 0;
+        admitted = false; inkAt = aimAt = checkpointAt = Infinity; inkRetryAt = 0;
         chatCursor = 0; seconds = {};
         delete state.profiles; delete state.profilesRev;
         delete state.quality; delete state.qualityRev;
@@ -758,6 +805,7 @@
     function makeRoom() {
         return new lk.Room({
             adaptiveStream:false, // Enlarging a tile must not request another receiver or quality layer.
+            dynacast:true, // Suspend unused layers if explicitly enabled later; publishers still use one layer.
             singlePeerConnection:false, // Preserve the tested first-speaker fix; publishing does not renegotiate the receiving PC.
             audioCaptureDefaults:{channelCount:1,echoCancellation:true,noiseSuppression:true,autoGainControl:true},
             publishDefaults:{audioPreset:{maxBitrate:12000,priority:'high'},dtx:true,red:false,forceStereo:false},
@@ -774,7 +822,7 @@
             const ticket = await getTicket();
             if (pending !== flow || !wanted || stopped || permanent) { await room.disconnect(); return; }
             link = {room, lesson:ticket.lesson, epoch:ticket.epoch, speakers:[], cameraAttempt:0, cameraTrack:null, cameraCapture:null, cameraBusy:false,
-                screenAttempt:0, screenTrack:null, screenBusy:false};
+                screenAttempt:0, screenTrack:null, screenBusy:false, cueSeen:new Map()};
             active = link;
             flow++; // Ignore status requests made before this transport was installed.
             for (const event of [lk.RoomEvent.ParticipantConnected,lk.RoomEvent.ParticipantDisconnected,lk.RoomEvent.LocalTrackPublished,
@@ -782,14 +830,17 @@
                 lk.RoomEvent.AudioPlaybackStatusChanged,lk.RoomEvent.ConnectionStateChanged]) {
                 room.on(event, () => { if (active === link) render(); });
             }
+            if (lk.RoomEvent.DataReceived && lk.DataPacket_Kind?.LOSSY !== undefined) {
+                room.on(lk.RoomEvent.DataReceived, (payload, person, kind, topic) => receiveBoardCue(link,payload,person,kind,topic));
+            }
             room.on(lk.RoomEvent.ActiveSpeakersChanged, speakers => {
                 if (active !== link || !connected()) return;
                 link.speakers = speakers;
                 renderSpeakers();
             });
-            room.on(lk.RoomEvent.TrackSubscribed, (track) => {
+            room.on(lk.RoomEvent.TrackSubscribed, (track, pub, person) => {
                 if (active !== link) return;
-                if (track.kind === lk.Track.Kind.Audio && track.source === micSource) {
+                if (track.kind === lk.Track.Kind.Audio && track.source === micSource && maySpeak(person) && pub.isDesired) {
                     const node = track.attach(); node.muted = !hasAccess(); el('audio-tracks').append(node);
                 } else if (track.source === cameraSource) renderCameras();
                 else if (track.source === screenSource) renderScreen();
@@ -855,8 +906,13 @@
         // File/page commands and pupil permissions must use the same fresh authority
         // as the board toolbar, including a handoff received between status polls.
         const presenterChanged = staff && (view.navigate === true) !== (state.board?.navigate === true);
+        if (board.sync(view, local, requestedAt) === false) {
+            delete state.board; // Never authorize cues or page controls from a rejected delta.
+            inkAt = performance.now()+100;
+            return;
+        }
         state.board = view;
-        board.sync(view, local, requestedAt);
+        if (view.checkpoint === true) checkpointAt = performance.now()+snapshotPeriod;
         if (presenterChanged) {
             renderArchiveControls();
             renderAccessMenu(hasAccess());
@@ -864,7 +920,8 @@
         }
         inkRead = performance.now();
         // Keep the pointer visible while it fades, without continuing fast polling for an old snapshot.
-        const freshLaser = (view.laser?.points?.at(-1)?.[2] ?? 0) - (inkRead - requestedAt) > 1200;
+        const freshLaser = !board.hasFastLaser?.(view.laser?.by)
+            && (view.laser?.points?.at(-1)?.[2] ?? 0) - (inkRead - requestedAt) > 1200;
         inkAt = inkRead + (view.more ? 85 : (view.moving || view.viewMoving || freshLaser ? 280 : 850)) + Math.random()*(view.more ? 35 : 140);
     }
     async function poll(boardOnly) {
@@ -876,7 +933,7 @@
         const local = connected() ? scope() : {};
         const requestedAt = performance.now();
         try {
-            const position = {...board.position(), compact:true};
+            const position = {...board.position(), compact:true, wire:boardWire, checkpoint:requestedAt >= checkpointAt || undefined};
             if (boardOnly) {
                 aimAt = Infinity;
                 const result = await api('board-sync', {...local, ...position, ...board.takeAim(), ...board.takeView()});
@@ -1166,7 +1223,7 @@
     recordScreen?.addEventListener('click', () => setArchiveSource('screen'));
     screenToggle?.addEventListener('click', async () => {
         const link = active, shareVideo = state.quality?.screen;
-        if (!hasAccess() || !state.screenEnabled || !shareVideo || !canCaptureScreen || link.screenBusy || busy) return;
+        if (!hasAccess() || state.mediaMode === 'audio' || !state.screenEnabled || !shareVideo || !canCaptureScreen || link.screenBusy || busy) return;
         if (state.screen && !itsScreen(link)) return;
         const local = scope(link), person = link.room.localParticipant;
         link.screenBusy = true;
@@ -1314,7 +1371,7 @@
                 state = {phase:'idle', ready:null};
                 syncSlots();
                 note(test ? 'اتاق آزمایشی بسته شد؛ گزارشی ثبت نشد.' : reply.recording === 'queued'
-                    ? 'زنگ پایان یافت؛ فیلم برای ارسال به گروه کلاس در صف قرار گرفت.' : reply.recording === 'discarded'
+                    ? 'زنگ پایان یافت؛ ساخت و ارسال فیلم به گروه کلاس در صف قرار گرفت.' : reply.recording === 'discarded'
                     ? 'زنگ پایان یافت؛ فیلم ارسال نمی‌شود و نسخهٔ موقت حذف خواهد شد.' : 'زنگ پایان یافت؛ گزارش حضور در پنل ثبت شد.');
                 refresh();
             });
@@ -1326,7 +1383,7 @@
             if (recording?.confirm && recordClose) {
                 closeIntent = {lesson,recording:recording.id};
                 put(el('record-close-help'), recording.canSend
-                    ? `مقصد: ${recording.messenger} — ${recording.group}. «خیر» کلاس را بدون ارسال فیلم می‌بندد.`
+                    ? `مقصد: ${recording.messenger} — ${recording.group}. ساخت فیلم زودتر از ${persian.format(recording.delayMinutes ?? 180)} دقیقه پس از پایان کلاس شروع نمی‌شود و ممکن است در صف بماند. «خیر» کلاس را بدون ساخت فیلم می‌بندد.`
                     : 'فقط دبیر همین زنگ یا مدیر مجاز می‌تواند ارسال فیلم را تأیید کند. با «خیر» کلاس بدون ارسال بسته می‌شود.');
                 el('record-close-yes').disabled = recording.canSend !== true;
                 setAccessMenu(false);

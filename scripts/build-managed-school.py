@@ -16,13 +16,18 @@ HOST = ROOT / 'plugin-manager'
 SRC = ROOT / 'school-addon/upload/online-classroom'
 LEGACY = ARTIFACTS / 'school-classroom-pilot-v0.1.0.zip'
 LEGACY_SHA = 'bebc35a02f57346880373a034ee493b757a8017a12812a133ab957358d9de161'
-VERSION = '0.4.21'
-MANAGER_VERSION = '0.1.27'
+VERSION = '0.4.23'
+MANAGER_VERSION = '0.1.29'
 # Reuse byte-verified SDK/PDF assets; ship the same board implementation as the site.
-RECORDER_BASE = 'baci-classroom-recorder-v0.4.20.zip'
-RECORDER_BASE_SHA = '56f0dc55978c50d0600b3a8349cbd25ea5c9220bf763407b6d6ee463f675c98d'
-RECORDER_VERSION = '0.4.21'
+RECORDER_BASE = 'baci-classroom-recorder-v0.4.21.zip'
+RECORDER_BASE_SHA = 'ca64a9057dfbb758502f5ca89850fb9256f4a4c30266a7f8dd09864d08612cfe'
+RECORDER_VERSION = '0.4.23'
 RECORDER_SRC = ROOT / 'server/recorder'
+# Go 1.26.2, linux/amd64, same bytes as the verified GitHub Actions build.
+NATIVE = {
+    'baci-native-receiver': 'f142af48da82dcbe7dfc2bb233336c5e22a5c1a2be87e2d383b15dd6819a76ce',
+    'baci-native-NOTICES.txt': '868dad183677e4aa829cf45f531ff5e91fa9a2a77a7f8a2a36af8dc01bb965c4',
+}
 # Vazirmatn v33.003, byte-identical to the live classroom webfonts (see fonts/README.md).
 RECORDER_FONTS = {
     'fonts/Vazirmatn-Regular.woff2': 'e382101336c6eb32cfb31381c027d02d2e0354bad08f6a395d4088beb3db3d91',
@@ -42,7 +47,7 @@ def write_zip(path, entries):
     with ZipFile(path, 'w') as archive:
         for name, data in sorted(entries.items()):
             item = ZipInfo(name)
-            item.external_attr = 0o100644 << 16
+            item.external_attr = (0o100755 if name == 'baci-native-receiver' else 0o100644) << 16
             archive.writestr(item, data, compress_type=ZIP_DEFLATED, compresslevel=9)
 
 
@@ -119,7 +124,7 @@ def plugin_entries(pdf_archive):
         'report_menus': {role: 'حضور و غیاب کلاس مجازی' for role in ('teacher', 'admin', 'deputy')},
         'routes': {'page': 'index.php', 'api': 'api.php', 'content': 'content.php', 'events': 'events.php', 'job': 'job.php', 'recording': 'recording-api.php'},
         'store': True, 'pdf_resources': 'assets/pdf-resources.zip',
-        'preserve_settings_from': ['0.2.0', '0.2.1', '0.2.2', '0.2.3', '0.3.0', '0.4.0', '0.4.1', '0.4.2', '0.4.3', '0.4.4', '0.4.5', '0.4.6', '0.4.7', '0.4.8', '0.4.9', '0.4.10', '0.4.11', '0.4.12', '0.4.13', '0.4.14', '0.4.15', '0.4.16', '0.4.17', '0.4.18', '0.4.19', '0.4.20'],
+        'preserve_settings_from': ['0.2.0', '0.2.1', '0.2.2', '0.2.3', '0.3.0', '0.4.0', '0.4.1', '0.4.2', '0.4.3', '0.4.4', '0.4.5', '0.4.6', '0.4.7', '0.4.8', '0.4.9', '0.4.10', '0.4.11', '0.4.12', '0.4.13', '0.4.14', '0.4.15', '0.4.16', '0.4.17', '0.4.18', '0.4.19', '0.4.20', '0.4.21', '0.4.22'],
         'hooks': {'deactivate': 'deactivate.php'},
         'settings': [
             {'key': 'signal_url', 'type': 'wss', 'label': 'آدرس رسانه (wss://)'},
@@ -130,9 +135,12 @@ def plugin_entries(pdf_archive):
             {'key': 'student_screen_share', 'type': 'switch', 'label': 'اشتراک صفحهٔ دانش‌آموز (با اجازهٔ موردی دبیر؛ نیازمند اشتراک صفحه)'},
             {'key': 'camera_share', 'type': 'switch', 'label': 'وبکم کم‌مصرف (تصویر مربع، با اجازهٔ دبیر)'},
             {'key': 'room_video_quality', 'type': 'switch', 'label': 'اجازهٔ تغییر کیفیت تصویر در اتاق هر کلاس (دبیر یا مسئول مجاز)'},
+            {'key': 'class_media_modes', 'type': 'class-modes', 'label': 'حالت رسانه برای هر کلاس'},
             *default_video_settings(presets),
             *video_settings(presets),
             {'key': 'record_lessons', 'type': 'switch', 'label': 'ضبط اختیاری کلاس با سرویس جداگانهٔ VPS'},
+            {'key': 'recording_delay_minutes', 'type': 'integer', 'min': 1, 'max': 720, 'default': 180,
+             'label': 'فاصلهٔ پایان واقعی زنگ تا امکان شروع ساخت فیلم (دقیقه؛ پیش‌فرض: ۱۸۰)'},
             {'key': 'recording_secret', 'type': 'secret', 'label': 'کلید مستقل سرویس ضبط (فقط برای ضبط؛ متفاوت از کلید رسانه)', 'min': 32, 'max': 128},
             {'key': 'repeat_bells', 'type': 'switch', 'label': 'اجازهٔ برگزاری مجدد زنگ پایان‌یافته در همان روز (دستی، با گزارش جدا)'},
             {'key': 'notify_school_bale', 'type': 'switch', 'label': 'ارسال حضور به گفت‌وگوهای خصوصی ربات بله'},
@@ -147,7 +155,7 @@ def plugin_entries(pdf_archive):
     return files
 
 
-def recorder_release(output_dir):
+def recorder_release(output_dir, native_build):
     previous = (ARTIFACTS / RECORDER_BASE).read_bytes()
     if hashlib.sha256(previous).hexdigest() != RECORDER_BASE_SHA:
         raise ValueError('Expected the unchanged published Recorder base ZIP')
@@ -157,7 +165,15 @@ def recorder_release(output_dir):
     assets['board.js'] = (SRC / 'assets/board.js').read_bytes()
     files = {name: (RECORDER_SRC / name).read_bytes() for name in ('README-fa.md', 'requirements.txt',
              'capture.py', 'recording.py', 'transport.py', 'view.html', 'view.css', 'view.js', 'frame.js',
-             'school-classroom-recorder.service', 'fonts/README.md')}
+             'archive.py', 'clock.py', 'disk_writer.py', 'movie.py', 'native_capture.py', 'postprocess.py', 'ingest.html', 'ingest.js', 'encoded.js', 'replay.js',
+             'school-classroom-recorder.service', 'school-classroom-postprocess.service',
+             'school-classroom-recorder.service.d/10-recorder-credential.conf',
+             'school-classroom-recorder.service.d/60-native-recorder.conf', 'fonts/README.md')}
+    for name, digest in NATIVE.items():
+        data = (native_build / name).read_bytes()
+        if hashlib.sha256(data).hexdigest() != digest:
+            raise ValueError(f'Native build output differs from the pinned bytes: {name}')
+        files[name] = data
     for name, digest in RECORDER_FONTS.items():
         data = (RECORDER_SRC / name).read_bytes()
         if hashlib.sha256(data).hexdigest() != digest:
@@ -176,11 +192,12 @@ def main():
     parser.add_argument('--recorder-only', action='store_true', help='build the standalone VPS release, without changing the site packages')
     parser.add_argument('--approve-reviewed-manifest', action='store_true', help='replace the trusted manifest pin after reviewing the payload')
     parser.add_argument('--pdf-archive', type=Path, help='use a local copy of the same pinned PDF.js npm archive')
+    parser.add_argument('--native-build', type=Path, required=True, help='output of scripts/build-recorder-native.py (Linux x86-64)')
     opts = parser.parse_args()
     if opts.recorder_only:
         if opts.approve_reviewed_manifest or opts.pdf_archive:
             parser.error('site manifest and PDF build options do not apply to the standalone Recorder')
-        recorder_release(opts.output_dir)
+        recorder_release(opts.output_dir, opts.native_build)
         return
     entries = plugin_entries(opts.pdf_archive)
     expected = hashlib.sha256(entries['plugin.json']).hexdigest()
@@ -212,25 +229,30 @@ def main():
     upgrade = f'baci-plugin-manager-update-v{MANAGER_VERSION}.zip'
     write_zip(opts.output_dir / classroom, entries)
     write_zip(opts.output_dir / upgrade, update)
-    write_zip(opts.output_dir / f'baci-plugin-manager-v{MANAGER_VERSION}.zip', {
+    full_manager = f'baci-plugin-manager-v{MANAGER_VERSION}.zip'
+    write_zip(opts.output_dir / full_manager, {
         **update, 'README-fa.md': (HOST / 'README-fa.md').read_bytes(),
         'UPSTREAM.json': (BACI / 'UPSTREAM.json').read_bytes(),
         **{f'media/{name}': (ROOT / 'server' / name).read_bytes()
             for name in ('README-fa.md', 'WEBHOOK-fa.md', 'install.py', 'admission.py')},
         f'patches/{BACI_PATCH}': (HOST / 'patches' / BACI_PATCH).read_bytes(),
     })
-    recorder = recorder_release(opts.output_dir)
-    upgrader = RECORDER_SRC / f'upgrade-v{RECORDER_VERSION}.sh'
+    recorder = recorder_release(opts.output_dir, opts.native_build)
+    upgrader = RECORDER_SRC / f'upgrade-v{RECORDER_VERSION}.py'
     script = upgrader.read_bytes()
-    if f'readonly digest={hashlib.sha256(recorder.read_bytes()).hexdigest()}\n'.encode() not in script:
+    if f"PAYLOAD_SHA256 = '{hashlib.sha256(recorder.read_bytes()).hexdigest()}'\n".encode() not in script:
         raise ValueError('Recorder upgrade script does not pin the new archive')
-    bundle = {name: (opts.output_dir / name).read_bytes() for name in (upgrade, classroom, recorder.name)}
-    bundle[upgrader.name] = script
-    checksums = ''.join(f'{hashlib.sha256(data).hexdigest()}  {name}\n' for name, data in bundle.items())
-    write_zip(opts.output_dir / f'baci-classroom-upgrade-v{VERSION}.zip', {
-        **bundle, 'START-HERE-fa.txt': (ROOT / 'docs/baci-classroom-upgrade.fa.txt').read_bytes(),
-        'SHA256SUMS.txt': checksums.encode('ascii'),
-    })
+    archive_names = (upgrade, full_manager, classroom, recorder.name)
+    bundle = {name: (opts.output_dir / name).read_bytes() for name in archive_names}
+    bundle.update({upgrader.name: script,
+                   'START-HERE-fa.txt': (ROOT / 'docs/baci-classroom-upgrade.fa.txt').read_bytes(),
+                   'classroom-board-network.fa.md': (ROOT / 'docs/classroom-board-network.fa.md').read_bytes(),
+                   'vps-classroom-report.py': (ROOT / 'scripts/vps-classroom-report.py').read_bytes()})
+    checksum = lambda items: ''.join(f'{hashlib.sha256(data).hexdigest()}  {name}\n' for name, data in sorted(items)).encode('ascii')
+    outer = f'baci-classroom-upgrade-v{VERSION}.zip'
+    write_zip(opts.output_dir / outer, bundle | {'SHA256SUMS.txt': checksum(bundle.items())})
+    (opts.output_dir / f'SHA256SUMS-v{VERSION}.txt').write_bytes(checksum(
+        (name, (opts.output_dir / name).read_bytes()) for name in (*archive_names, outer)))
     print(f'Built all archives; classroom manifest SHA-256: {expected}')
 
 

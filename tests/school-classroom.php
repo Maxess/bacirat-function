@@ -129,6 +129,21 @@ check($refresh($get()), 'reconciliation succeeds after a transient mismatch');
 $permissions['teacher-1'] = array_replace($both, ['canPublishSources'=>[], 'canPublishData'=>true]);
 $tracks['teacher-1'] = [1,2,3,4];
 check($refresh($get()) && $permissions['teacher-1'] === $listener && !$tracks['teacher-1'],'wildcard SDK state never passes permission checks');
+// A real same-SID pulse opts only the active presenter into lossy board data.
+$dataLesson = array_replace($get(), ['phase'=>'live','staff'=>['teacher-1'=>'PA_Staff','admin-1'=>'PA_Admin'],'teacher'=>1]);
+foreach (['teacher-1','admin-1','student-1'] as $who) $dataLesson['pulses'][$who]['board_wire'] = true;
+check($refresh($dataLesson) && $permissions['teacher-1'] === array_replace($listener,['canPublishData'=>true])
+    && !$permissions['admin-1']['canPublishData'] && !$permissions['student-1']['canPublishData'],
+    'only the confirmed presenter may publish data, independently of audio/video grants');
+$handoff = $dataLesson;
+unset($handoff['staff']['teacher-1']);
+check($refresh($handoff) && !$permissions['teacher-1']['canPublishData'] && $permissions['admin-1']['canPublishData'],
+    'data follows the confirmed presenter on handoff');
+$broken['teacher-1'] = 'reconnect';
+check(!$refresh($dataLesson) && !$permissions['teacher-1']['canPublishData'] && $sfuSids['teacher-1']==='PA_New',
+    'replacement racing a data-only UpdateParticipant is also returned to listeners');
+unset($broken['teacher-1']); $sfuSids['teacher-1'] = 'PA_Staff';
+check($refresh($get()) && !$permissions['admin-1']['canPublishData'], 'no data remains when no confirmed capability exists');
 blocked(fn()=>cl_live_media_peers(['participants'=>null]),502);
 blocked(fn()=>cl_media_permission(['identity'=>'student-6','permission'=>['canPublish'=>false,'can_publish'=>true]],'student-6'),502);
 check(cl_service_grant('UpdateParticipant', $room) === ['roomAdmin'=>true,'room'=>$room], 'admin RPC cannot escape current room');

@@ -4,7 +4,7 @@ declare(strict_types=1);
 use BaciClassroom\Calendar;
 
 // School plugin runtime and gateway. Settings are exposed by the reviewed host overlay.
-const MPM_VERSION = '0.1.27';
+const MPM_VERSION = '0.1.29';
 const MPM_CLASSROOM_NATIVE = '0.4.0';
 const MPM_CLASSROOM_PUPIL_TRIAL = '0.4.3';
 const MPM_REGISTRY = 'mtg_plugin_registry';
@@ -41,6 +41,8 @@ const MPM_CATALOG = [
         '0.4.19' => '727f6edf67812f90470167732863a3c6dc3d413d5636fb107dd522d1fb72e0d7',
         '0.4.20' => 'dfa96e5bbc963c450a36037fd18184d1cb7a556edc9d00a92b7768605a4f09e5',
         '0.4.21' => 'ac9dfd49526a3496d8c02cc0f32d720adf315875bd2336675c91abd53772d1a8',
+        '0.4.22' => 'f062c3891428e107cc5c37c786d699660584829a3628087f0f3186969ef92570',
+        '0.4.23' => '179f220a4b81c4f3ef37e6c791b72b060e3af493f769c85646d3df63b05f505e',
     ],
 ];
 
@@ -609,6 +611,26 @@ function mpm_bell_hours(mixed $input): array
     return $hours;
 }
 
+const MPM_MEDIA_MODES = ['standard'=>'تنظیم عادی کلاس', 'teacher-video'=>'دوربین دبیر + اشتراک صفحهٔ مجاز', 'audio'=>'فقط صدا + تخته'];
+
+function mpm_media_classes(PDO $db): array
+{
+    return mpm_query($db, 'SELECT id,name,academic_year FROM classes ORDER BY id DESC LIMIT 200', [])->fetchAll(PDO::FETCH_ASSOC);
+}
+
+function mpm_media_modes(PDO $db, mixed $input, array $previous): array
+{
+    if (!is_array($input) || count($input) > 200) throw new MpmNotice('حالت رسانهٔ کلاس معتبر نیست.');
+    $rows = array_column(mpm_media_classes($db), null, 'id');
+    // The form may show only a subset of classes; leave other existing choices alone.
+    foreach ($input as $id=>$mode) {
+        if (!isset($rows[$id]) || !is_string($mode) || !isset(MPM_MEDIA_MODES[$mode])) throw new MpmNotice('کلاس یا حالت رسانه معتبر نیست.');
+        if ($mode === 'standard') unset($previous[$id]);
+        else $previous[$id] = ['year'=>$rows[$id]['academic_year'], 'mode'=>$mode];
+    }
+    return $previous;
+}
+
 function mpm_save_settings(PDO $db, string $dir, array $row, array $manifest, array $input): void
 {
     $previous = mpm_settings($db, $dir, $row);
@@ -618,6 +640,10 @@ function mpm_save_settings(PDO $db, string $dir, array $row, array $manifest, ar
         if (in_array($field['type'], ['bell-hours','friday-test'], true)) {
             // Preserve the separately saved bell schedule and Friday opt-in.
             if (isset($previous[$key])) $settings[$key] = $previous[$key];
+            continue;
+        }
+        if ($field['type'] === 'class-modes') {
+            $settings[$key] = mpm_media_modes($db, $input[$key] ?? [], $previous[$key] ?? []);
             continue;
         }
         $value = $input[$key] ?? ($field['type'] === 'select' ? ($previous[$key] ?? $field['default']) : '');
@@ -1078,7 +1104,15 @@ function mpm_post(PDO $db, ?array $site, string $origin, string $csrf): string
             return 'افزونه، فایل‌ها، تنظیمات و جدول اختصاصی آن حذف شدند.' . $warning;
         }
         if (in_array($row['state'], ['installing', 'removing'], true)) throw new MpmNotice('برای این افزونه فقط حذف کامل مجاز است.');
-        if ($action === 'disable') {
+        if ($action === 'disable' || $action === 'prepare-update') {
+            if ($action === 'prepare-update') {
+                if (!mpm_native_release($row) || $row['state'] !== 'enabled') throw new MpmNotice('افزونه برای آماده‌سازی ارتقا باید فعال باشد.');
+                // Same exclusive manager lock as disable. No recording route can add a job between this check and deactivation.
+                $table = mpm_check_store($db, $row);
+                if (mpm_query($db, "SELECT 1 FROM `$table` WHERE bucket IN ('active','record-pending') OR (bucket='record-slot' AND item='current') LIMIT 1")->fetchColumn() !== false) {
+                    throw new MpmNotice('زنگ باز یا ضبط در صف است. برای ارتقا صبر کن تا زنگ، ساخت، ارسال و ثبت رسید تمام شود.');
+                }
+            }
             mpm_state($db, $row, 'disabled');
             return 'غیرفعال شد؛ داده‌ها و فایل‌ها حفظ شدند.' . mpm_deactivate($db, $site, $dir, $row);
         }
@@ -1310,6 +1344,21 @@ function mpm_render_settings(PDO $db, ?array $site, string $csrf, string $notice
                 $key = $field['key'];
                 $name = 'settings[' . mpm_html($key) . ']';
                 $value = $values[$key] ?? '';
+                if ($field['type'] === 'class-modes') {
+                    echo '<fieldset class="mb-3"><legend>' . mpm_html($field['label']) . '</legend>'
+                        . '<p class="text-muted">برای زنگ‌های جدید. میکروفون طبق نوبت، و تخته در هر سه حالت فعال می‌ماند. فهرست تا ۲۰۰ کلاس اخیر.</p>';
+                    foreach (mpm_media_classes($db) as $class) {
+                        $id = (int)$class['id'];
+                        $saved = $value[$id] ?? [];
+                        $chosen = ($saved['year'] ?? null) === $class['academic_year'] ? ($saved['mode'] ?? 'standard') : 'standard';
+                        echo '<label class="block mb-2">' . mpm_html($class['name'] . ' · ' . $class['academic_year'])
+                            . ' <select class="form-input" name="settings[' . mpm_html($key) . '][' . $id . ']">';
+                        foreach (MPM_MEDIA_MODES as $mode=>$label) echo '<option value="' . $mode . '"' . ($chosen === $mode ? ' selected' : '') . '>' . mpm_html($label) . '</option>';
+                        echo '</select></label>';
+                    }
+                    echo '</fieldset>';
+                    continue;
+                }
                 echo '<label class="block mb-2">' . mpm_html($field['label']) . ' ';
                 if ($field['type'] === 'switch') {
                     echo '<input type="checkbox" name="' . $name . '" value="yes"' . ($value === true ? ' checked' : '') . ($key === 'notify_school_rubika' && !$rubikaBridge ? ' disabled' : '') . '>';
@@ -1353,6 +1402,11 @@ function mpm_render_settings(PDO $db, ?array $site, string $csrf, string $notice
                 echo '<form class="mb-3" method="post" action="' . $action . '">';
                 mpm_hidden($csrf, ($enabled || $retryRoom) ? 'disable' : 'enable', $slug);
                 echo '<button class="btn btn-primary" type="submit">' . ($enabled ? 'غیرفعال‌سازی (حفظ داده)' : ($retryRoom ? 'تلاش دوباره برای بستن اتاق VPS' : 'فعال‌سازی')) . '</button></form>';
+            }
+            if ($enabled && $compatible) {
+                echo '<form class="mb-3" method="post" action="' . $action . '">';
+                mpm_hidden($csrf, 'prepare-update', $slug);
+                echo '<button class="btn btn-primary" type="submit">آماده‌سازی ارتقا (حفظ داده و کنترل صف)</button></form>';
             }
             if ($enabled && isset($manifest['routes']['recording'])) {
                 echo '<p><a target="_top" href="plugins/school-plugins.php?plugin=school-classroom&amp;view=recordings">گروه‌های پیام‌رسان و ضبط کلاس</a></p>'

@@ -1,0 +1,43 @@
+[Unit]
+Description=Baci off-peak classroom film renderer
+PartOf=school-classroom-recorder.service
+
+[Service]
+Type=notify
+TimeoutStartSec=12
+User=school-recorder
+Group=school-recorder
+WorkingDirectory=/opt/school-classroom-recorder
+Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/school-classroom-recorder/browsers
+ExecStart=/opt/school-classroom-recorder/venv/bin/python -Esu /opt/school-classroom-recorder/releases/0.4.23/postprocess.py
+RuntimeDirectory=school-classroom-postprocess
+RuntimeDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateNetwork=true
+ProtectHome=true
+ProtectSystem=strict
+InaccessiblePaths=-/etc/school-classroom-recorder.json
+# Mask even credentials created after this service starts.
+TemporaryFileSystem=/run:ro
+BindPaths=/run/school-classroom-postprocess
+BindReadOnlyPaths=/run/systemd/notify
+ReadWritePaths=/var/lib/school-classroom-recorder
+KillMode=mixed
+TimeoutStopSec=5
+WatchdogSec=8
+WatchdogSignal=SIGKILL
+NotifyAccess=main
+Restart=on-failure
+RestartSec=3
+CPUWeight=10
+CPUQuota=150%
+Nice=10
+IOWeight=10
+IOSchedulingClass=idle
+MemoryHigh=1G
+MemoryMax=1600M
+TasksMax=256
+OOMScoreAdjust=400
+LimitCORE=0

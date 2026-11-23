@@ -258,6 +258,8 @@ caption { font-weight: 700; text-align: start; margin: 0 0 .45rem; }
 .laser-trails { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 .laser-trails line { stroke: #ff5646; stroke-width: 5px; stroke-linecap: round; vector-effect: non-scaling-stroke;
     filter: drop-shadow(0 1px 1px #3c1010e6); }
+.board-remote-cursor { position: absolute; pointer-events: none; width: 13px; height: 16px; z-index: 3;
+    background: #075cae; clip-path: polygon(0 0,100% 62%,59% 68%,43% 100%); }
 .laser-dot { position: absolute; pointer-events: none; width: 1.42rem; height: 1.42rem; border-radius: 50%;
     transform: translate(-50%,-50%); border: 2px solid #ff5d4e;
     box-shadow: 0 0 0 1px #fff5e7, 0 0 0 2px #541612, 0 0 .66rem #ff322bb0; }

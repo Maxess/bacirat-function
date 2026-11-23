@@ -24,6 +24,8 @@ function cl_room_icon(string $name): string
         'finish' => '<rect x="5" y="5" width="14" height="14" rx="2"/>',
         'pen' => '<path d="m3 21 1-5L16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 2Zm11-15 3 3"/>',
         'erase' => '<path d="m8 20-5-5a2.1 2.1 0 0 1 0-3L12 3a2.1 2.1 0 0 1 3 0l5 5a2.1 2.1 0 0 1 0 3l-9 9m-4-12 8 8m-7 4h13"/>',
+        'undo' => '<path d="M9 5l-5 5 5 5m-5-5h10a5 5 0 0 1 0 10h-3"/>',
+        'redo' => '<path d="m15 5 5 5-5 5m5-5H10a5 5 0 0 0 0 10h3"/>',
         'pan' => '<path d="M8 12V6a1.5 1.5 0 0 1 3 0v5-7a1.5 1.5 0 0 1 3 0v7-5a1.5 1.5 0 0 1 3 0v6-3a1.5 1.5 0 0 1 3 0v6a6 6 0 0 1-6 6h-2a5 5 0 0 1-4-2l-4-5a1.6 1.6 0 0 1 2.5-2Z"/>',
         'upload' => '<path d="M12 16V4m-5 5 5-5 5 5M4 15v4a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-4"/>',
         'trash' => '<path d="M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7m4 4v5m4-5v5"/>',
@@ -107,11 +109,11 @@ function cl_room_icon(string $name): string
     <?php if ($staff): ?>
     <dialog class="quality-dialog" id="record-start-dialog" aria-labelledby="record-start-title" aria-describedby="record-start-help">
         <h2 id="record-start-title">ضبط کلاس</h2>
-        <p id="record-start-help">صدای میکروفون‌ها، تصویر دوربین‌ها و صفحهٔ مشترکِ فعال، به همراه تخته و PDF ضبط می‌شود؛ نه چت یا فهرست حاضران. همه نشان ضبط را می‌بینند. فقط با تأیید دبیر همین زنگ یا مدیر مجاز هنگام بستن کلاس، فیلم به گروه تعیین‌شدهٔ مدرسه ارسال می‌شود.</p>
+        <p id="record-start-help">صدای میکروفون‌ها، تصویر دوربین‌ها و صفحهٔ مشترکِ فعال، به همراه تخته و PDF ضبط می‌شود؛ نه چت یا فهرست حاضران. همه نشان ضبط را می‌بینند. ساخت فیلم حین کلاس انجام نمی‌شود. فقط با تأیید دبیر همین زنگ یا مدیر مجاز هنگام بستن کلاس، فیلم به گروه تعیین‌شدهٔ مدرسه ارسال می‌شود.</p>
         <div class="actions"><button type="button" id="record-start-yes">شروع ضبط</button><button type="button" class="secondary" id="record-start-cancel" autofocus>انصراف</button></div>
     </dialog>
     <dialog class="quality-dialog" id="record-close-dialog" aria-labelledby="record-close-title" aria-describedby="record-close-help">
-        <h2 id="record-close-title">آیا فیلم ضبط شده از کلاس در پیامرسان ارسال شود ؟</h2>
+        <h2 id="record-close-title">فیلم کلاس بعداً ساخته و در پیام‌رسان ارسال شود؟</h2>
         <p id="record-close-help"></p>
         <div class="actions"><button type="button" id="record-close-yes">بله</button><button type="button" class="secondary" id="record-close-no">خیر</button>
             <button type="button" class="secondary" id="record-close-cancel" autofocus>انصراف از بستن کلاس</button></div>
@@ -185,6 +187,8 @@ function cl_room_icon(string $name): string
                 <div class="ink-tools" id="ink-tools" role="group" aria-label="ابزار نوشتن" hidden>
                     <button type="button" class="icon-button" id="pen" aria-pressed="true" title="قلم" aria-label="قلم"><?= cl_room_icon('pen') ?></button>
                     <button type="button" class="icon-button" id="eraser" aria-pressed="false" aria-label="<?= $staff ? 'پاک‌کن خط کامل' : 'پاک‌کن فقط خط‌های خودم' ?>" title="<?= $staff ? 'پاک‌کن خط کامل' : 'پاک‌کن فقط خط‌های خودم' ?>" <?= $staff ? '' : 'hidden' ?>><?= cl_room_icon('erase') ?></button>
+                    <button type="button" class="icon-button" id="board-undo" title="واگرد آخرین خط خودم" aria-label="واگرد آخرین خط خودم" hidden><?= cl_room_icon('undo') ?></button>
+                    <button type="button" class="icon-button" id="board-redo" title="بازانجام آخرین خط خودم" aria-label="بازانجام آخرین خط خودم" hidden><?= cl_room_icon('redo') ?></button>
                     <?php if ($staff): ?><button type="button" class="icon-button" id="board-laser" aria-pressed="false" title="نشانگر لیزری موقت" aria-label="نشانگر لیزری موقت"><?= cl_room_icon('laser') ?></button><?php endif; ?>
                     <?php if ($staff): ?><button type="button" class="icon-button" id="pan" aria-pressed="false" title="پیمایش تخته" aria-label="پیمایش تخته" hidden><?= cl_room_icon('pan') ?></button><?php endif; ?>
                     <label class="color-control" title="رنگ قلم"><span class="sr-only">رنگ قلم</span><input type="color" id="ink-color" value="#278bc7"></label>
@@ -247,6 +251,7 @@ function cl_room_icon(string $name): string
                         <svg class="laser-trails" viewBox="0 0 10000 10000" preserveAspectRatio="none" aria-hidden="true" focusable="false">
                             <g id="board-laser-remote-trail"></g><g id="board-laser-local-trail"></g>
                         </svg>
+                        <span id="board-remote-cursor" class="board-remote-cursor" aria-hidden="true" hidden></span>
                         <span id="board-laser-remote" class="laser-dot" aria-hidden="true" hidden></span>
                         <span id="board-laser-local" class="laser-dot" aria-hidden="true" hidden></span>
                     </div></div>

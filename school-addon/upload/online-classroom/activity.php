@@ -9,6 +9,7 @@ const CL_CHAT_LIMIT = 120;
 const CL_INK_POINTS = 96;
 const CL_INK_BATCH = 6;
 const CL_INK_TARGETS = 32;
+const CL_INK_HISTORY = 32;
 const CL_INK_CUE_SECONDS = 1.1; // A fresh delta can arrive on the approximately one-second idle read.
 const CL_LASER_POINTS = 20;
 const CL_LASER_TTL_MS = 1900;
@@ -59,10 +60,10 @@ function cl_activity_sync(ClassroomStore $s, array $lesson, array $actor, array 
     $chat = $n !== $state['messages'] ? array_values($s->rows('chat:' . $id, 40, cl_seq($n))) : [];
     $fresh = time() - 6;
     foreach ($chat as &$row) {
-        $at = $row['at'] ?? null;
-        if (!is_int($at) || $at <= 0) continue;
-        $row['clock'] = cl_tehran_clock($at);
-        if ($at >= $fresh) $row['recent'] = true;
+        $posted = $row['at'] ?? null;
+        if (!is_int($posted) || $posted <= 0) continue;
+        $row['clock'] = cl_tehran_clock($posted);
+        if ($posted >= $fresh) $row['recent'] = true;
     }
     unset($row);
     return ['chat'=>$chat, 'chatMore'=>($chat ? $chat[array_key_last($chat)]['n'] : $n) < $state['messages'],
@@ -92,13 +93,29 @@ function cl_view_input(mixed $value): array
     return ['zoom'=>$zoom, 'crop'=>$crop];
 }
 
+// Old readers (including the frozen Recorder) only understand pen/eraser rows.
+// A history edit advances their snapshot revision, not the modern page revision.
+function cl_board_rev(array $state, array $input): int
+{
+    return $state['rev'] + (cl_board_wire($input) ? 0 : ($state['history_rev'] ?? 0));
+}
+
+function cl_board_writer(ClassroomStore $s, array $lesson, array $state, string $author, mixed $sid): array
+{
+    $scope = ['epoch'=>cl_epoch($lesson), 'rev'=>$state['rev'], 'sid'=>$sid];
+    $writer = $s->get('board-writes:' . $lesson['id'], $author) ?? [];
+    return array_intersect_key($writer, $scope) === $scope ? $writer : $scope + ['seq'=>0];
+}
+
 // A null actor is the read-only recorder. It gets normalized laser points, never their author or SID.
 function cl_board_view(ClassroomStore $s, string $id, ?array $actor, array $input, array $state, ?array $lesson = null, ?int $at = null): array
 {
     $layer = cl_layer($s, $id, $state);
     $clock = $layer['clock'] ?? $layer['seq']; // Older rows are one tick each.
+    $wire = cl_board_wire($input);
+    $rev = cl_board_rev($state, $input);
     $position = cl_id($input['ink'] ?? null);
-    $reset = ($input['board'] ?? null) !== $state['rev'] || $position > $clock;
+    $reset = ($input['board'] ?? null) !== $rev || $position > $clock;
     if ($reset) $position = 0;
     $cursor = $position;
     $ops = [];
@@ -106,18 +123,22 @@ function cl_board_view(ClassroomStore $s, string $id, ?array $actor, array $inpu
     $compact = ($input['compact'] ?? null) === true;
     if ($position < $clock) {
         foreach ($s->rows('ink:' . $id . ':' . $layer['key'], $compact ? 32 : 120, cl_seq($position)) as $end => $op) {
+            $from = $cursor;
             $cursor = (int)$end;
+            if (!$wire && (in_array($op['tool'], ['undo','redo'], true)
+                || ($op['tool'] === 'pen' && isset($layer['undone'][$op['id'] ?? ''])))) continue;
             if ($op['tool'] === 'pen') {
                 if (!isset($op['id'])) $op['id'] = 'old-' . cl_seq($cursor);
                 else {
                     // A reader may already have part of the tail row. Send only its extension,
                     // with the last shared point to join the two pieces without a gap.
-                    $offset = count($op['points']) - ($cursor - $position) - 1;
+                    $offset = count($op['points']) - ($cursor - $from) - 1;
                     if ($offset > 0) $op['points'] = array_slice($op['points'], $offset);
                 }
             }
             if (!$reset && isset($op['author'], $op['at']) && $op['at'] > $now - CL_INK_CUE_SECONDS) $op['live'] = true;
             unset($op['at']);
+            if ($wire) $op += ['from'=>$from, 'seq'=>$cursor];
             $ops[] = $op;
         }
     }
@@ -125,7 +146,17 @@ function cl_board_view(ClassroomStore $s, string $id, ?array $actor, array $inpu
     $write = $actor && $lesson && cl_may_write($lesson, $actor);
     $frame = $state['view'] ?? null;
     $shared = $actor && $lesson && cl_controls_board($lesson, $actor, $at ?? (int)$now) ? ['navigate'=>true] : [];
+    $checkpoint = $wire && ($reset || ($input['checkpoint'] ?? false) === true);
+    if ($wire) {
+        $shared['head'] = $clock;
+        if ($actor && $lesson) $shared['presenter'] = cl_board_data_owner($lesson, $at ?? (int)$now);
+        if ($checkpoint) {
+            $shared['checkpoint'] = true;
+            if ($write) $shared['writeSeq'] = cl_board_writer($s, $lesson, $state, $actor['identity'], $input['sid'] ?? null)['seq'];
+        }
+    }
     if ($lesson && $frame && $frame['epoch'] === cl_epoch($lesson)) {
+        if ($wire) $shared['viewSeq'] = $frame['seq'] ?? 0;
         if ($frame['value'] !== CL_VIEW_FULL) $shared['view'] = $frame['value'];
         if ($frame['at'] > $now - 1.2) $shared['viewMoving'] = true;
     }
@@ -143,15 +174,15 @@ function cl_board_view(ClassroomStore $s, string $id, ?array $actor, array $inpu
         }
     }
     $moving = ($layer['changed_at'] ?? 0) > $now - 1.6;
-    if ($compact && !$reset) {
+    if ($compact && !$reset && !$checkpoint) {
         // A matching revision already implies the same page, document and file list.
         // Write permission is independent of that revision; send it even on an idle read.
-        return ['rev'=>$state['rev'], 'cursor'=>$cursor, 'write'=>$write]
+        return ['rev'=>$rev, 'cursor'=>$cursor, 'write'=>$write]
             + ($write ? ['owner'=>cl_ink_prefix($id, $actor['identity'])] : [])
             + ($cursor < $clock ? ['more'=>true] : []) + ($ops ? ['ops'=>$ops] : [])
             + ($moving ? ['moving'=>true] : []) + ($aim ? ['laser'=>$aim] : []) + $shared;
     }
-    return ['doc'=>$doc, 'page'=>$state['page'], 'rev'=>$state['rev'], 'cursor'=>$cursor, 'more'=>$cursor < $clock,
+    return ['doc'=>$doc, 'page'=>$state['page'], 'rev'=>$rev, 'cursor'=>$cursor, 'more'=>$cursor < $clock,
         'reset'=>$reset, 'write'=>$write, 'owner'=>$write ? cl_ink_prefix($id, $actor['identity']) : null,
         'ops'=>$ops, 'moving'=>$moving, 'laser'=>$aim,
         'docs'=>$actor && cl_is_staff($actor) ? array_values($state['docs']) : []] + $shared;
@@ -179,12 +210,12 @@ function cl_ink_input(array $lesson, array $actor, array $body): array
     foreach ($items as &$stroke) {
         if (!is_array($stroke)) throw new ClassroomError(400, 'مسیر قلم معتبر نیست.');
         $tool = $stroke['tool'] ?? null;
-        if ($tool === 'pen') {
+        if ($tool === 'pen' || ($tool === 'pen-end' && cl_board_wire($body))) {
             if (!is_string($stroke['id'] ?? null) || !preg_match('/^[a-f0-9]{32}$/D', $stroke['id'])) {
                 throw new ClassroomError(400, 'شناسهٔ خط معتبر نیست.');
             }
             $stroke['id'] = $prefix . substr($stroke['id'], 16);
-        } elseif (!$staff) {
+        } elseif (!$staff && !(cl_board_wire($body) && in_array($tool, ['undo','redo'], true))) {
             if ($tool !== 'erase-stroke') throw new ClassroomError(403, 'دانش‌آموز فقط می‌تواند خط خودش را پاک کند.');
             $targets = $stroke['targets'] ?? null;
             if (!is_array($targets) || !array_is_list($targets) || !$targets || count($targets) > CL_INK_TARGETS) {
@@ -203,7 +234,7 @@ function cl_ink_input(array $lesson, array $actor, array $body): array
     return $body;
 }
 
-/** One bounded snapshot of the current sweep, not an append-only history. */
+/** Read the durable page and optionally replace the bounded HTTPS laser fallback. */
 function cl_board_read(ClassroomStore $s, array $lesson, array $actor, array $body, ?float $receivedAt = null, ?int $at = null): array
 {
     $id = $lesson['id'];
@@ -218,9 +249,10 @@ function cl_board_read(ClassroomStore $s, array $lesson, array $actor, array $bo
         $epoch = cl_epoch($lesson);
         // Do not apply requests from the previous page. Reply with the current board so
         // a delayed read can recover without a second request. One snapshot, not a log.
-        if (($body['board'] ?? null) === $state['rev'] && (($prior['epoch'] ?? null) !== $epoch
-            || ($prior['value'] !== $view && $prior['at'] <= $now - .18))) {
-            $state['view'] = ['epoch'=>$epoch, 'value'=>$view, 'at'=>$now];
+        $arrived = min($receivedAt ?? $now, $now);
+        if (($body['board'] ?? null) === cl_board_rev($state, $body) && (($prior['epoch'] ?? null) !== $epoch
+            || ($prior['value'] !== $view && $prior['at'] <= $now - .18 && $arrived >= ($prior['received'] ?? 0)))) {
+            $state['view'] = ['epoch'=>$epoch, 'value'=>$view, 'at'=>$now, 'received'=>$arrived, 'seq'=>($prior['seq'] ?? 0)+1];
             $changed = true;
         }
     }
@@ -245,7 +277,7 @@ function cl_board_read(ClassroomStore $s, array $lesson, array $actor, array $bo
         }
         // A request waiting for the classroom lock does not get a fresh pointer lifetime.
         $delay = max(0, (int)ceil(($now - ($receivedAt ?? $now)) * 1000));
-        if (($body['board'] ?? null) === $state['rev'] && $older + $delay < CL_LASER_TTL_MS
+        if (($body['board'] ?? null) === cl_board_rev($state, $body) && $older + $delay < CL_LASER_TTL_MS
             && ($state['laser']['at'] ?? 0) <= $now - .18) {
             $points = array_map(static fn(array $point): array => [$point[0], $point[1], $point[2] + $delay], $points);
             $state['laser'] = ['by'=>$actor['identity'], 'sid'=>$sid, 'epoch'=>cl_epoch($lesson),
@@ -261,7 +293,7 @@ function cl_board_action(ClassroomStore $s, array $lesson, array $input, string 
 {
     $id = $lesson['id'];
     $state = cl_activity($s, $id);
-    if (($input['board'] ?? null) !== $state['rev']) throw new ClassroomError(409, 'صفحهٔ تخته تغییر کرده است؛ دوباره امتحان کن.');
+    if (($input['board'] ?? null) !== cl_board_rev($state, $input)) throw new ClassroomError(409, 'صفحهٔ تخته تغییر کرده است؛ دوباره امتحان کن.');
     if ($action === 'board-page') {
         $doc = $input['doc'] ?? null;
         $page = cl_id($input['page'] ?? null);
@@ -274,7 +306,7 @@ function cl_board_action(ClassroomStore $s, array $lesson, array $input, string 
             unset($state['laser'], $state['view']);
             $s->put('activity', $id, $state);
         }
-        return ['boardRev'=>$state['rev']];
+        return ['boardRev'=>cl_board_rev($state, $input)];
     }
     $layer = cl_layer($s, $id, $state);
     if ($action === 'board-clear') {
@@ -282,20 +314,43 @@ function cl_board_action(ClassroomStore $s, array $lesson, array $input, string 
         unset($state['laser']);
         $s->tx(static function () use ($s, $id, $state, $layer) {
             $s->delete('ink:' . $id . ':' . $layer['key']);
+            $s->delete('board-history:' . $id . ':' . $layer['key']);
             $s->delete('layers:' . $id, cl_layer_key($state));
             $state['ink_ops'] -= $layer['seq'];
             $s->put('activity', $id, $state);
         });
-        return ['boardRev'=>$state['rev']];
+        return ['boardRev'=>cl_board_rev($state, $input)];
     }
     $items = $input['strokes'] ?? null;
     if (!is_array($items) || !array_is_list($items) || !$items || count($items) > CL_INK_BATCH) throw new ClassroomError(400, 'مسیر قلم معتبر نیست.');
     $strokes = [];
     $author = $input['author'] ?? null; // Assigned by cl_ink_input at the authenticated entry point.
+    $wire = cl_board_wire($input);
+    $sid = $input['sid'] ?? null;
+    $seq = $input['seq'] ?? null;
+    if ($wire && (!cl_media_identity($author) || !cl_sid($sid) || !is_int($seq) || $seq < 1 || $seq > 2147483647)) {
+        throw new ClassroomError(400, 'ترتیب بستهٔ تخته معتبر نیست.');
+    }
     $stamp = microtime(true);
     foreach ($items as $item) {
         if (!is_array($item)) throw new ClassroomError(400, 'مسیر قلم معتبر نیست.');
         $tool = $item['tool'] ?? null;
+        if ($wire && in_array($tool, ['undo','redo'], true)) {
+            $strokes[] = ['tool'=>$tool]; // Never accept a client-selected Undo/Redo target.
+            continue;
+        }
+        $part = $item['part'] ?? null;
+        if ($wire && in_array($tool, ['pen','pen-end'], true)) {
+            if (!is_int($part) || $part < ($tool === 'pen-end' ? 1 : 0) || $part > 2147483647
+                || !is_string($item['id'] ?? null) || !preg_match('/^[a-f0-9]{32}$/D', $item['id'])
+                || !is_bool($item['end'] ?? false)) {
+                throw new ClassroomError(400, 'بخش خط یا شناسهٔ آن معتبر نیست.');
+            }
+            if ($tool === 'pen-end') {
+                $strokes[] = ['tool'=>$tool, 'id'=>$item['id'], 'part'=>$part, 'end'=>true];
+                continue;
+            }
+        }
         if ($tool === 'erase-stroke') {
             $targets = $item['targets'] ?? null;
             if (!is_array($targets) || !array_is_list($targets) || !$targets || count($targets) > CL_INK_TARGETS) {
@@ -324,15 +379,56 @@ function cl_board_action(ClassroomStore $s, array $lesson, array $input, string 
             }
             $op['id'] = $item['id'];
         }
-        if ($tool === 'pen' && cl_media_identity($author)) $op += ['author'=>$author, 'at'=>$stamp];
+        if ($tool === 'pen' && cl_media_identity($author)) $op['author'] = $author;
+        if ($wire && $tool === 'pen') $op += ['part'=>$part, 'end'=>$item['end'] ?? false];
         $strokes[] = $op;
     }
-    return $s->tx(static function () use ($s, $id, $state, $layer, $strokes) {
+    // A retry must have exactly the same normalized content. A lost 200 doesn't
+    // duplicate points (or toggle Undo/Redo twice), even after a peer writes.
+    $writer = $wire ? cl_board_writer($s, $lesson, $state, $author, $sid) : null;
+    $digest = $wire ? hash('sha256', json_encode($strokes, JSON_THROW_ON_ERROR)) : null;
+    if ($wire && $seq === $writer['seq'] && hash_equals($writer['digest'], $digest)) return $writer['reply'];
+    if ($wire && $seq !== $writer['seq'] + 1) throw new ClassroomError(409, 'ترتیب بسته‌های تخته عوض شده است؛ وضعیت دوباره خوانده می‌شود.');
+    return $s->tx(static function () use ($s, $id, $state, $layer, $strokes, $writer, $seq, $digest, $author, $stamp) {
         $bucket = 'ink:' . $id . ':' . $layer['key'];
-        $clock = $layer['clock'] ?? $layer['seq'];
+        $historyBucket = 'board-history:' . $id . ':' . $layer['key'];
+        $history = null;
+        $start = $clock = $layer['clock'] ?? $layer['seq'];
         $tail = $clock && isset($strokes[0]['id']) ? $s->get($bucket, cl_seq($clock)) : null;
+        $track = $writer['track'] ?? null;
         $added = 0;
         foreach ($strokes as $op) {
+            $tool = $op['tool'];
+            if ($writer !== null && isset($op['part'])) {
+                $part = $op['part'];
+                if ($part === 0 ? ($track['id'] ?? null) === $op['id']
+                    : (($track['id'] ?? null) !== $op['id'] || $track['next'] !== $part
+                        || ($tool === 'pen' && ($track['point'] !== $op['points'][0] || $track['size'] !== $op['size'] || $track['color'] !== $op['color'])))) {
+                    throw new ClassroomError(409, 'بخشی از خط نرسیده است؛ ترتیب قلم معتبر نیست.');
+                }
+                if ($op['end']) {
+                    $history ??= $s->get($historyBucket, $author) ?? ['undo'=>[], 'redo'=>[]];
+                    $history['undo'] = array_slice([...$history['undo'], $op['id']], -CL_INK_HISTORY);
+                    $history['redo'] = [];
+                    $track = null;
+                } else {
+                    $track = ['id'=>$op['id'], 'next'=>$part+1, 'point'=>$op['points'][array_key_last($op['points'])],
+                        'size'=>$op['size'], 'color'=>$op['color']];
+                }
+                if ($tool === 'pen-end') continue; // Control marker: no paint row or reader payload.
+                unset($op['part'], $op['end']);
+            }
+            if ($writer !== null && in_array($tool, ['undo','redo'], true)) {
+                $history ??= $s->get($historyBucket, $author) ?? ['undo'=>[], 'redo'=>[]];
+                if (!$history[$tool]) continue;
+                $target = array_pop($history[$tool]);
+                $history[$tool === 'undo' ? 'redo' : 'undo'][] = $target;
+                if ($tool === 'undo') $layer['undone'][$target] = true;
+                else unset($layer['undone'][$target]);
+                $op['targets'] = [$target];
+                $state['history_rev'] = ($state['history_rev'] ?? 0) + 1;
+            }
+            if (isset($op['author'])) $op['at'] = $stamp;
             $ticks = isset($op['id']) ? count($op['points']) : 1;
             // Coalesce time-based packets into bounded rows, but never across another
             // gesture or an erasure. Small, slow packets do not exhaust the page budget.
@@ -353,13 +449,21 @@ function cl_board_action(ClassroomStore $s, array $lesson, array $input, string 
             $s->put($bucket, cl_seq($clock), $op);
             $tail = $op;
         }
-        $layer['clock'] = $clock;
-        $layer['seq'] += $added;
-        $layer['changed_at'] = microtime(true);
-        $state['ink_ops'] += $added;
-        $s->put('layers:' . $id, cl_layer_key($state), $layer);
-        if ($added) $s->put('activity', $id, $state);
-        return ['ink'=>$clock];
+        if ($clock !== $start) {
+            $layer['clock'] = $clock;
+            $layer['seq'] += $added;
+            $layer['changed_at'] = $stamp;
+            $state['ink_ops'] += $added;
+            $s->put('layers:' . $id, cl_layer_key($state), $layer);
+            if ($added) $s->put('activity', $id, $state);
+        }
+        $reply = ['ink'=>$clock];
+        if ($writer !== null) {
+            if ($history !== null) $s->put($historyBucket, $author, $history);
+            $reply['seq'] = $seq;
+            $s->put('board-writes:' . $id, $author, array_replace($writer, compact('seq', 'digest', 'track', 'reply')));
+        }
+        return $reply;
     });
 }
 
@@ -413,7 +517,7 @@ function cl_lesson_dir(string $id, bool $create): ?string
 function cl_upload(ClassroomStore $s, array $lesson, array $input, array $file): array
 {
     $state = cl_activity($s, $lesson['id']);
-    if (cl_id($input['board'] ?? null) !== $state['rev']) throw new ClassroomError(409, 'صفحهٔ تخته تغییر کرده است؛ دوباره امتحان کن.');
+    if (cl_id($input['board'] ?? null) !== cl_board_rev($state, $input)) throw new ClassroomError(409, 'صفحهٔ تخته تغییر کرده است؛ دوباره امتحان کن.');
     $tmp = $file['tmp_name'] ?? null;
     if (($file['error'] ?? -1) !== UPLOAD_ERR_OK || !is_string($tmp) || !is_uploaded_file($tmp)) {
         throw new ClassroomError(413, 'فایل دریافت نشد؛ حجم فایل و حد آپلود PHP را بررسی کن.');
@@ -451,7 +555,7 @@ function cl_upload(ClassroomStore $s, array $lesson, array $input, array $file):
     unset($state['laser'], $state['view']);
     try { $s->put('activity', $lesson['id'], $state); }
     catch (Throwable $error) { @unlink($target); throw $error; }
-    return ['boardRev'=>$state['rev']];
+    return ['boardRev'=>cl_board_rev($state, $input)];
 }
 
 function cl_clear_activity(ClassroomStore $s, string $id): void
@@ -459,6 +563,7 @@ function cl_clear_activity(ClassroomStore $s, string $id): void
     // More than one layer may exist for a multi-page document. The prefix is an internally generated hex id.
     $s->eraseInk($id);
     $s->delete('layers:' . $id);
+    $s->delete('board-writes:' . $id);
     $s->delete('chat:' . $id);
     $s->delete('activity', $id);
 }

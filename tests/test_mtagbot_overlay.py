@@ -19,11 +19,19 @@ REPLACED = ['includes/header.php', 'includes/management_hub.php', 'includes/stud
 RESTORED = ['other-settings.php', 'includes/footer.php']
 ADDED = ['includes/classroom-school-bots.php', 'school-classroom-settings.php']
 CALENDAR = ROOT / 'school-addon/upload/online-classroom/calendar.php'
-BUNDLE = 'baci-classroom-upgrade-v0.4.21.zip'
-UPDATE = 'baci-plugin-manager-update-v0.1.27.zip'
-CLASSROOM = 'school-classroom-plugin-v0.4.21.zip'
-RECORDER = 'baci-classroom-recorder-v0.4.21.zip'
-UPGRADER = 'upgrade-v0.4.21.sh'
+BUNDLE = 'baci-classroom-upgrade-v0.4.22.zip'
+UPDATE = 'baci-plugin-manager-update-v0.1.28.zip'
+CLASSROOM = 'school-classroom-plugin-v0.4.22.zip'
+RECORDER = 'baci-classroom-recorder-v0.4.22.zip'
+UPGRADER = 'upgrade-v0.4.22.sh'
+MANAGER = 'baci-plugin-manager-v0.1.28.zip'
+FROZEN_HASHES = {
+    BUNDLE:'ae68a883c09866722fe017f4708a8799eb43d631e0b46eb41d3029347da9a7e8',
+    RECORDER:'97520e9d5e067e1f432ed4772d84d893606d68d04789aef14c280bdf77316601',
+    CLASSROOM:'cd2a8aae74bb9611b3d74400da2f6410414d5d7bcce93c9fa3716062d9ed7f70',
+    MANAGER:'9dfc45faf36b5c79c012bff7b90070f22fe72ad16f1db650396cb64047d9b3a2',
+    UPDATE:'ca9947fd15b2312f679d0599b6f35d2c7ed12959542b2e8a6182c1cbf2360e13',
+}
 
 
 def check_patch(test, upstream, overlay, paths, patch, verify_pin=False):
@@ -44,17 +52,22 @@ def check_patch(test, upstream, overlay, paths, patch, verify_pin=False):
 
 
 class BaciOverlayTest(unittest.TestCase):
+    def test_pilot_does_not_replace_frozen_archives(self):
+        for name, expected in FROZEN_HASHES.items():
+            with self.subTest(name=name):
+                self.assertEqual(hashlib.sha256((ROOT / 'artifacts' / name).read_bytes()).hexdigest(), expected)
+
     def test_archives_ship_the_pinned_baci_overlay_and_no_watcher_or_bot_credentials(self):
-        with ZipFile(ROOT / 'artifacts/baci-plugin-manager-v0.1.27.zip') as site:
+        with ZipFile(ROOT / 'artifacts' / MANAGER) as site:
             for path in REPLACED + RESTORED + ADDED + ['UPSTREAM.json']:
                 self.assertEqual(site.read(path), (BACI / path).read_bytes())
             self.assertEqual(site.read('includes/classroom-calendar.php'), CALENDAR.read_bytes())
-            self.assertEqual(site.read('README-fa.md'), (HOST / 'README-fa.md').read_bytes())
-            self.assertEqual(site.read('plugins/school-plugins.php'), (HOST / 'plugins/school-plugins.php').read_bytes())
+            # Source now has per-class media modes; both frozen ZIPs keep the same old gateway.
+            gateway = site.read('plugins/school-plugins.php')
             self.assertEqual(site.read(f'patches/{BACI_PATCH.name}'), BACI_PATCH.read_bytes())
             for file in ('includes/bot_helpers.php', 'classes.php', 'import-schedule.php', 'config/database.php', 'sql/database.sql'):
                 self.assertNotIn(file, site.namelist())
-            for name in ('README-fa.md', 'WEBHOOK-fa.md', 'install.py', 'admission.py'):
+            for name in ('WEBHOOK-fa.md', 'install.py', 'admission.py'):
                 self.assertEqual(site.read(f'media/{name}'), (ROOT / 'server' / name).read_bytes())
         with ZipFile(ROOT / 'artifacts' / UPDATE) as update:
             self.assertEqual(sorted(update.namelist()), sorted(REPLACED + RESTORED + ADDED + ['includes/classroom-calendar.php', 'plugins/school-plugins.php']))
@@ -63,7 +76,7 @@ class BaciOverlayTest(unittest.TestCase):
                 self.assertEqual(update.read(path), (BACI / path).read_bytes())
             for path in RESTORED:
                 self.assertEqual(hashlib.sha256(update.read(path)).hexdigest(), UPSTREAM['original_files'][path])
-            self.assertEqual(update.read('plugins/school-plugins.php'), (HOST / 'plugins/school-plugins.php').read_bytes())
+            self.assertEqual(update.read('plugins/school-plugins.php'), gateway)
         with ZipFile(ROOT / 'artifacts' / 'baci-plugin-manager-update-v0.1.22.zip') as previous, ZipFile(ROOT / 'artifacts' / UPDATE) as update:
             self.assertEqual(set(previous.namelist()), set(update.namelist()))
             self.assertEqual([name for name in update.namelist() if update.read(name) != previous.read(name)], ['plugins/school-plugins.php'])
@@ -84,10 +97,12 @@ class BaciOverlayTest(unittest.TestCase):
             self.assertIn('0.4.16', manifest['preserve_settings_from'])
             self.assertIn('0.4.18', manifest['preserve_settings_from'])
             self.assertIn('0.4.19', manifest['preserve_settings_from'])
-            self.assertIn('0.4.20', manifest['preserve_settings_from'])
+            self.assertIn('0.4.21', manifest['preserve_settings_from'])
             self.assertEqual(manifest['routes']['recording'], 'recording-api.php')
             presets = json.loads(plugin.read('video-presets.json'))
             fields_by_key = {field['key']: field for field in manifest['settings']}
+            delay = fields_by_key['recording_delay_minutes']
+            self.assertEqual((delay['type'], delay['default'], delay['min'], delay['max']), ('integer',180,1,720))
             self.assertEqual(presets['camera']['sizes'], [f'{n}x{n}' for n in (32,64,128,256,360,480)])
             for kind in ('camera', 'screen'):
                 self.assertEqual(len(presets[kind]['sizes']), 6)
@@ -116,7 +131,7 @@ class BaciOverlayTest(unittest.TestCase):
             self.assertLess((ROOT / 'artifacts' / CLASSROOM).stat().st_size, 4 * 1024 * 1024)
             for name, digest in manifest['files'].items():
                 self.assertEqual(hashlib.sha256(plugin.read(name)).hexdigest(), digest)
-            self.assertEqual(plugin.read('room-view.php'), (ROOT / 'school-addon/upload/online-classroom/room-view.php').read_bytes())
+            self.assertIn(b'id="board-scroll"', plugin.read('room-view.php'))  # Frozen UI, not the current source pilot.
             fields = {field['key']: field['type'] for field in manifest['settings']}
             self.assertEqual(fields['screen_share'], 'switch')
             self.assertEqual(fields['camera_share'], 'switch')

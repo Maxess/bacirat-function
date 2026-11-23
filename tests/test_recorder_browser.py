@@ -23,7 +23,7 @@ from capture import CSP, FPS, HEIGHT, WIDTH, Capture, Renderer, clips, encoder, 
 from recording import Runner
 
 ARTIFACT = ROOT / 'artifacts/baci-classroom-recorder-v0.4.21.zip'
-PREVIOUS = ROOT / 'artifacts/baci-classroom-recorder-v0.4.20.zip'
+DEFERRED = ROOT / 'artifacts/baci-classroom-recorder-v0.4.22.zip'
 SCHOOL_SITE = ROOT / 'artifacts/school-classroom-plugin-v0.4.21.zip'
 CREDIT = 'طراحی و توسعه : س. مهدی بیات'
 # Stub signaling only. Use the pinned SDK attach/detach methods and real inbound RTP audio
@@ -147,17 +147,24 @@ end
 
 
 class RecorderPackageTest(unittest.TestCase):
-    def test_standalone_payload_matches_sources_and_keeps_protocol_assets(self):
-        with ZipFile(ARTIFACT) as new, ZipFile(PREVIOUS) as old:
+    def test_frozen_standalone_payload_keeps_protocol_assets(self):
+        digest = hashlib.sha256(DEFERRED.read_bytes()).hexdigest()
+        script = (ROOT / 'server/recorder/upgrade-v0.4.22.sh').read_text()
+        self.assertIn(f'readonly digest={digest}\n',script)
+        with ZipFile(DEFERRED) as new, ZipFile(ARTIFACT) as old:
             fonts = {f'fonts/{name}' for name in ('OFL.txt','README.md','Vazirmatn-Regular.woff2','Vazirmatn-Bold.woff2')}
-            self.assertEqual(set(new.namelist()), set(old.namelist()))
+            added = {'archive.py','movie.py','ingest.html','ingest.js','encoded.js','replay.js'}
+            self.assertEqual(set(new.namelist()), set(old.namelist()) | added)
             self.assertTrue(fonts <= set(new.namelist()))
-            changed = {'board.js','frame.js','view.js','capture.py','recording.py','README-fa.md'}
+            changed = {'board.js','frame.js','capture.py','recording.py','transport.py','README-fa.md'}
             for name in set(old.namelist()) - changed:
                 self.assertEqual(new.read(name), old.read(name))
-            for name in (changed - {'board.js'}) | fonts:
+            # 0.4.22 ZIP is held unchanged while the native-source pilot is developed.
+            pilot = {'recording.py','archive.py','movie.py','replay.js','capture.py','board.js','README-fa.md'}
+            for name in ((changed | added | fonts) - pilot):
                 self.assertEqual(new.read(name), (ROOT / 'server/recorder' / name).read_bytes())
-            self.assertEqual(new.read('board.js'), (ROOT / 'school-addon/upload/online-classroom/assets/board.js').read_bytes())
+            with ZipFile(ROOT / 'artifacts/school-classroom-plugin-v0.4.22.zip') as site:
+                self.assertEqual(new.read('board.js'), site.read('assets/board.js'))
             if site := os.environ.get('MPM_TEST_BACI'):
                 for name in fonts:
                     if name.endswith('.woff2'):
@@ -535,7 +542,9 @@ class CompositorTest(unittest.IsolatedAsyncioTestCase):
                     await runner.stop(False)
                     await browser.close()
             [mp4] = clips(out / job)
-            image = subprocess.check_output([ffmpeg, '-v', 'error', '-sseof', '-0.4', '-i', str(mp4), '-an',
+            # The mux duration can end with audio after the last picture. Use the last
+            # decoded video frame, not an offset from the container's end.
+            image = subprocess.check_output([ffmpeg, '-v', 'error', '-i', str(mp4), '-an', '-vf', 'reverse',
                 '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-threads', '1', '-'], timeout=10)
             self.assertEqual(len(image), WIDTH*HEIGHT*3)
 
