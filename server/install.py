@@ -4,10 +4,13 @@ import argparse
 import base64
 import contextlib
 import fcntl
+from fractions import Fraction
 import hashlib
 import hmac
 import ipaddress
 import json
+from math import ceil
+import mmap
 import os
 from pathlib import Path, PurePosixPath
 import platform
@@ -144,7 +147,7 @@ def caddy_config(host, origin):
 '''
 
 
-def unit(description, exec_start):
+def unit(description, exec_start, *, environment=''):
     return f'''[Unit]
 Description={description}
 After=network.target
@@ -154,8 +157,7 @@ Type=simple
 User={NAME}
 Group={NAME}
 ExecStart={exec_start}
-Environment=GOMAXPROCS=1
-UMask=0077
+{environment}UMask=0077
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=yes
@@ -170,9 +172,20 @@ WantedBy=multi-user.target
 '''
 
 
-def sfu_unit_config(*, legacy=False):
+def sfu_unit_config(*, legacy=False, one_core=False):
     description = 'School classroom LiveKit audio SFU' if legacy else 'School classroom LiveKit SFU'
-    return unit(description, f'{APP}/livekit-server --config {CFG}/livekit.yaml')
+    # The pinned release's Go runtime sizes its scheduler. Remove even a pin
+    # inherited from the systemd manager, without touching the CPU allocation.
+    environment = 'Environment=GOMAXPROCS=1\n' if one_core else 'UnsetEnvironment=GOMAXPROCS\n'
+    return unit(description, f'{APP}/livekit-server --config {CFG}/livekit.yaml', environment=environment)
+
+
+def stock_sfu_unit(text):
+    for legacy in (False, True):
+        for one_core in (False, True):
+            if text == sfu_unit_config(legacy=legacy, one_core=one_core):
+                return legacy, one_core
+    raise ValueError('This is not the pilot systemd unit; automatic restart refused')
 
 
 def webhook_url(origin, path):
@@ -280,7 +293,7 @@ def pilot_deployment():
         raise ValueError('admission.json does not describe a supported test installation') from None
 
 
-def replace_pilot_config(path, expected, new, info):
+def replace_pilot_config(path, expected, new, info, *, private=True):
     # Write and sync next to the original, then replace only after checking it was not edited in the meantime.
     fd, scratch = tempfile.mkstemp(prefix='.livekit-webhook-', dir=path.parent)
     try:
@@ -290,9 +303,9 @@ def replace_pilot_config(path, expected, new, info):
             stream.write(new)
             stream.flush()
             os.fsync(stream.fileno())
-        current, actual = read_pilot_file(path)
+        current, actual = read_pilot_file(path, private=private)
         if current != expected or (actual.st_uid, actual.st_gid, actual.st_mode) != (info.st_uid, info.st_gid, info.st_mode):
-            raise ValueError('LiveKit configuration changed concurrently; it was not overwritten')
+            raise ValueError(f'LiveKit configuration changed concurrently ({path.name}); it was not overwritten')
         os.replace(scratch, path)
     finally:
         Path(scratch).unlink(missing_ok=True)
@@ -352,17 +365,22 @@ def local_rooms(deployment):
     return rooms
 
 
-def check_restart_target(deployment):
-    service_file = SYSTEMD / SFU_SERVICE
-    if read_pilot_file(service_file, private=False)[0] not in (sfu_unit_config(), sfu_unit_config(legacy=True)):
-        raise ValueError('This is not the pilot systemd unit; automatic restart refused')
-    values = subprocess.run(['systemctl', 'show', SFU_SERVICE, '--all',
-                             '--property=FragmentPath,DropInPaths,ActiveState,NeedDaemonReload'],
+def sfu_properties(*keys):
+    values = subprocess.run(['systemctl', 'show', SFU_SERVICE, '--all', '--property=' + ','.join(keys)],
                             capture_output=True, text=True, check=True, timeout=8).stdout.splitlines()
-    props = dict(line.split('=', 1) for line in values if '=' in line)
+    return dict(line.split('=', 1) for line in values if '=' in line)
+
+
+def check_restart_target(deployment, *, pid=None):
+    service_file = SYSTEMD / SFU_SERVICE
+    stock_sfu_unit(read_pilot_file(service_file, private=False)[0])
     expected = {'FragmentPath': str(service_file), 'DropInPaths': '', 'ActiveState': 'active', 'NeedDaemonReload': 'no'}
+    if pid is not None:
+        expected['MainPID'] = str(pid)
+    props = sfu_properties(*expected)
     if any(props.get(name) != value for name, value in expected.items()):
-        raise ValueError('Automatic restart needs the running, up-to-date pilot unit without overrides; apply without --restart instead')
+        hint = '; apply without --restart instead' if pid is None else ''
+        raise ValueError('Automatic restart needs the running, up-to-date pilot unit without overrides' + hint)
     try:
         rooms = local_rooms(deployment)
     except (ValueError, OSError):
@@ -389,6 +407,222 @@ def restart_pilot(deployment):
 def require_media_sudo():
     if os.geteuid() != 0 or platform.system() != 'Linux':
         raise ValueError('Run media setup locally on the test media VPS with sudo')
+
+
+def go_build_info(path):
+    """Read the inline Go 1.18+ build record from a Linux ELF without executing it."""
+    magic = b'\xff Go buildinf:'
+    frame = (bytes.fromhex('3077af0c9274080241e1c107e6d618e6'), bytes.fromhex('f932433186182072008242104116d8f2'))
+
+    def field(data, first, maximum):
+        size = 0
+        for shift in (0, 7, 14):
+            b = data[first]
+            first += 1
+            size |= (b & 127) << shift
+            if b < 128 and size <= maximum and first + size <= len(data):
+                return data[first:first + size], first + size
+            if b < 128:
+                break
+        raise ValueError('Invalid Go build record')
+
+    with path.open('rb') as source:
+        if source.read(4) != b'\x7fELF':
+            return None, []
+        with mmap.mmap(source.fileno(), 0, access=mmap.ACCESS_READ) as data:
+            first = data.find(magic)
+            while first != -1:
+                if first % 16 == 0 and first + 32 < len(data) and data[first + 15] & 2:
+                    try:
+                        version, cursor = field(data, first + 32, 64)
+                        metadata, _ = field(data, cursor, 1024 * 1024)
+                    except (ValueError, IndexError):
+                        pass  # The magic may also occur as an ordinary string constant.
+                    else:
+                        if metadata.startswith(frame[0]) and metadata.endswith(frame[1]):
+                            return version.decode('ascii', 'replace'), metadata[16:-16].decode('utf-8', 'replace').splitlines()
+                first = data.find(magic, first + len(magic))
+    return None, []
+
+
+def go_cpu_policy(version, metadata, debug):
+    if not any(re.fullmatch(r'path\tgithub\.com/livekit/livekit(?:-server)?/cmd/server', line) for line in metadata):
+        version = None
+    match = re.fullmatch(r'go1\.(\d{1,3})(?:\.\d{1,4})?', version or '', re.ASCII)
+    minor = int(match[1]) if match else None
+    if minor is None:
+        return None, None, None
+    # A Go >=1.25 compiler can still build a module with older language defaults.
+    # The running environment takes precedence over DefaultGODEBUG in the binary.
+    built = next((row.partition('=')[2].strip('"') for row in metadata if row.startswith('build\tDefaultGODEBUG=')), '')
+    settings = dict(item.split('=', 1) for item in (built + ',' + debug).split(',') if '=' in item)
+    auto = minor >= 25 and all(settings.get(key, '1') == '1' for key in ('containermaxprocs', 'updatemaxprocs'))
+    return version, minor, auto
+
+
+def cgroup_cpu_limits(membership, mountinfo):
+    """Return CPU cgroup version and unit/hierarchy hard quotas (None = unlimited)."""
+    groups = [row.split(':', 2) for row in membership.splitlines()]
+    v1 = next((row[2] for row in groups if len(row) == 3 and 'cpu' in row[1].split(',')), None)
+    v2 = next((row[2] for row in groups if len(row) == 3 and row[0] == '0' and not row[1]), None)
+    version, group = (1, v1) if v1 is not None else (2, v2)
+    if not group or not group.startswith('/') or '..' in PurePosixPath(group).parts:
+        raise ValueError('Unknown CPU cgroup')
+    for row in mountinfo.splitlines():
+        left, sep, right = row.partition(' - ')
+        fields, fs = left.split(), right.split()
+        # A subtree-only mount cannot tell us the limits of hidden ancestors.
+        if not sep or len(fields) < 5 or fields[3] != '/' or len(fs) < 3:
+            continue
+        if ((version == 2 and fs[0] == 'cgroup2') or
+                (version == 1 and fs[0] == 'cgroup' and 'cpu' in fs[2].split(','))):
+            base = Path(re.sub(r'\\([0-7]{3})', lambda m: chr(int(m[1], 8)), fields[4]))
+            break
+    else:
+        raise ValueError('CPU cgroup hierarchy is not visible')
+
+    node = base / group.lstrip('/')
+    quotas = []
+    while True:
+        if not node.is_dir():
+            raise ValueError('CPU cgroup disappeared')
+        if version == 1:
+            quota = (node / 'cpu.cfs_quota_us').read_text().strip()
+            period = (node / 'cpu.cfs_period_us').read_text().strip()
+            unlimited = '-1'
+        else:
+            try:
+                quota, period = (node / 'cpu.max').read_text().split()
+            except FileNotFoundError:
+                quota, period = 'max', '1'  # CPU controller not enabled here; still inspect parents.
+            unlimited = 'max'
+        if int(period) <= 0 or (quota != unlimited and int(quota) <= 0):
+            raise ValueError('Invalid CPU cgroup quota')
+        quotas.append(None if quota == unlimited else Fraction(int(quota), int(period)))
+        if node == base:
+            return version, quotas[0], min((q for q in quotas if q is not None), default=None)
+        node = node.parent
+
+
+def sfu_cpu_snapshot():
+    props = sfu_properties('ActiveState', 'MainPID', 'FragmentPath', 'DropInPaths', 'NeedDaemonReload')
+    pid = props.get('MainPID', '')
+    if props.get('ActiveState') != 'active' or not re.fullmatch(r'[1-9][0-9]*', pid):
+        raise ValueError('The dedicated LiveKit unit is not running; no live CPU settings to inspect')
+    service = SYSTEMD / SFU_SERVICE
+    layout = 'custom-or-stale'
+    if props.get('FragmentPath') == str(service) and props.get('DropInPaths') == '' and props.get('NeedDaemonReload') == 'no':
+        try:
+            _, one_core = stock_sfu_unit(read_pilot_file(service, private=False)[0])
+            layout = 'stock-one-core' if one_core else 'stock-auto'
+        except (OSError, ValueError):
+            pass  # We can still inspect the live process without trusting the unit on disk.
+    pid = int(pid)
+    proc = Path('/proc') / str(pid)
+    exe = proc / 'exe'
+    installed = APP / 'livekit-server'
+    running = exe.stat()
+    try:
+        disk = installed.lstat()
+        stock_path = (os.path.samestat(running, disk) and stat.S_ISREG(disk.st_mode)
+                      and disk.st_uid == os.geteuid() and not disk.st_mode & 0o022)
+    except FileNotFoundError:
+        stock_path = False
+    version, metadata = go_build_info(exe)
+    env = dict(item.split(b'=', 1) for item in (proc / 'environ').read_bytes().split(b'\0') if b'=' in item)
+    version, minor, auto = go_cpu_policy(version, metadata, env.get(b'GODEBUG', b'').decode('ascii', 'replace'))
+    affinity = len(os.sched_getaffinity(pid))
+    try:
+        cgroup, leaf, hard = cgroup_cpu_limits((proc / 'cgroup').read_text(), Path('/proc/self/mountinfo').read_text())
+    except (OSError, ValueError):
+        cgroup, leaf, hard = None, None, None
+    if not os.path.samestat(running, exe.stat()):
+        raise ValueError('LiveKit executable changed during inspection; recheck')
+    return dict(pid=pid, stock_path=stock_path, layout=layout, version=version, minor=minor, auto=auto,
+                pin=env.get(b'GOMAXPROCS'), affinity=affinity, cgroup=cgroup, leaf=leaf, hard=hard)
+
+
+def automatic_procs(affinity, quota):
+    # Go 1.25–1.27 rounds the unit quota up and uses at least two Ps if affinity allows.
+    return affinity if quota is None else min(affinity, max(2, ceil(quota)))
+
+
+def check_cpu_allocation(report):
+    if not report['stock_path'] or not report['auto'] or not report['cgroup'] or not report['affinity']:
+        raise ValueError('Verified automatic CPU sizing needs the installed LiveKit image, its Go defaults, and visible CPU limits; no change made')
+    if automatic_procs(report['affinity'], report['leaf']) > automatic_procs(report['affinity'], report['hard']):
+        raise ValueError('The Go runtime would not see the tighter parent CPU quota; no change made')
+
+
+def print_sfu_cpu(report):
+    def limit(value):
+        return 'unknown' if not report['cgroup'] else ('unlimited' if value is None else f'{float(value):.6g}')
+
+    pin = report['pin']
+    safe_pin = 'unset' if pin is None else (pin.decode() if re.fullmatch(rb'[0-9]{1,9}', pin) else 'set (noncanonical)')
+    version = report['version'] or 'unknown'
+    mode = {True: 'yes', False: 'no', None: 'unknown'}[report['auto']]
+    print(f"pid={report['pid']} livekit_go={version} GOMAXPROCS={safe_pin} go_cpu_auto_supported={mode}")
+    affinity, leaf, hard = (report[key] for key in ('affinity', 'leaf', 'hard'))
+    hierarchy = f"v{report['cgroup']}" if report['cgroup'] else 'unknown'
+    print(f'affinity_cpus={affinity} cgroup={hierarchy} unit_quota_cpus={limit(leaf)} hierarchy_quota_cpus={limit(hard)}')
+    print(f"unit_layout={report['layout']} running_installed_binary={'yes' if report['stock_path'] else 'no'}")
+    if report['auto'] and report['cgroup']:
+        guess = automatic_procs(affinity, leaf)
+        print(f'go_auto_expected_after_unset={guess} (estimate, not a runtime metric)')
+        if guess > automatic_procs(affinity, hard):
+            print('The parent CPU quota is tighter than the quota Go reads in the unit; review the effective allocation first.')
+    if report['minor'] is not None and report['minor'] < 25:
+        legacy = max(1, min(affinity, int(hard))) if hard is not None else affinity
+        legacy = legacy if report['cgroup'] else 'unknown'
+        print(f'legacy_gomaxprocs_start={legacy} (conservative starting point, not a capacity rating)')
+
+
+def configure_cpu(args):
+    require_media_sudo()
+    if not args.apply:
+        print_sfu_cpu(sfu_cpu_snapshot())
+        return
+    with locked_config(True):
+        report = sfu_cpu_snapshot()
+        print_sfu_cpu(report)
+        check_cpu_allocation(report)
+        service = SYSTEMD / SFU_SERVICE
+        before, info = read_pilot_file(service, private=False)
+        legacy, one_core = stock_sfu_unit(before)
+        if not one_core and report['pin'] is None:
+            print('cpu_auto=yes changed=no restarted=no')
+            return
+        if not one_core or report['pin'] != b'1':
+            raise ValueError('The running CPU setting does not match the stock one-core unit; no change made')
+        deployment = pilot_deployment()
+        check_restart_target(deployment, pid=report['pid'])
+        wanted = sfu_unit_config(legacy=legacy)
+        backup = CFG / (SFU_SERVICE + '.before-cpu-' + secrets.token_hex(6) + '.bak')
+        write_private(backup, before, mode=0o600)
+        print(f'backup={backup}', flush=True)
+        replace_pilot_config(service, before, wanted, info, private=False)
+        restarted = False
+        try:
+            subprocess.run(['systemctl', 'daemon-reload'], check=True)
+            check_restart_target(deployment, pid=report['pid'])
+            restarted = True
+            restart_pilot(deployment)
+            after = sfu_cpu_snapshot()
+            check_cpu_allocation(after)
+            if after['pin'] is not None or after['layout'] != 'stock-auto':
+                raise ValueError('Could not verify the automatic CPU setting in the restarted SFU')
+        except (ValueError, OSError, subprocess.SubprocessError):
+            try:
+                replace_pilot_config(service, wanted, before, info, private=False)
+                subprocess.run(['systemctl', 'daemon-reload'], check=True)
+                if restarted:
+                    restart_pilot(deployment)
+            except (ValueError, OSError, subprocess.SubprocessError):
+                raise ValueError(f'Automatic CPU change failed; recovery could not be verified. Review the unit and backup {backup}') from None
+            raise ValueError('Automatic CPU change not completed; previous unit restored') from None
+        print_sfu_cpu(after)
+        print('cpu_auto=yes changed=yes restarted=yes')
 
 
 def apply_pilot_change(path, before, wanted, info, deployment, restart, change):
@@ -527,20 +761,24 @@ def install(args):
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
-    if argv and argv[0] in ('webhook', 'camera'):
+    changes = {'webhook': configure_webhook, 'camera': configure_camera, 'cpu': configure_cpu}
+    if argv and argv[0] in changes:
         change = argv[0]
-        parser = argparse.ArgumentParser(prog='install.py ' + change, description=f'Configure {change} on the existing dedicated media pilot.')
+        description = ('Inspect the running LiveKit Go build and CPU limits; optionally enable automatic sizing on the stock SFU.'
+                       if change == 'cpu' else f'Configure {change} on the existing dedicated media pilot.')
+        parser = argparse.ArgumentParser(prog='install.py ' + change, description=description)
         if change == 'webhook':
             parser.add_argument('--site-path', type=site_path, help='test school subpath; default keeps a managed URL, or uses / for new setup')
             parser.add_argument('--verify', action='store_true', help='verify the receiver with a signed read-only probe')
         parser.add_argument('--apply', action='store_true', help='save the configuration after making a private backup; default is read-only')
         parser.add_argument('--restart', action='store_true', help='restart only the running, idle, unmodified pilot SFU unit; requires --apply')
-        args = parser.parse_args(argv[1:])
-        work = configure_webhook if change == 'webhook' else configure_camera
+        args, work = parser.parse_args(argv[1:]), changes[change]
         if args.restart and not args.apply:
             parser.error('--restart requires --apply')
+        if change == 'cpu' and args.apply and not args.restart:
+            parser.error('CPU changes require both --apply and --restart in a maintenance window')
     else:
-        parser = argparse.ArgumentParser(description=__doc__, epilog='Existing pilot? See install.py webhook --help or install.py camera --help.')
+        parser = argparse.ArgumentParser(description=__doc__, epilog='Existing pilot? See install.py {webhook,camera,cpu} --help.')
         parser.add_argument('media_host', type=hostname)
         parser.add_argument('ipv4', type=public_ip)
         parser.add_argument('school_origin', type=school_origin)

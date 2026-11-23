@@ -124,12 +124,12 @@ $db->exec("INSERT INTO class_schedules VALUES (91,1,'هفتم1','1405/1406','چ�
 must(array_keys(cl_slots_for_date($db,$first,$t)) === [13], 'identical duplicates and malformed periods are not eligible even without clock hours');
 $db->exec('DELETE FROM class_schedules WHERE id IN (91,92,93)');
 
-$runtime = null; $sfus = []; $snapshots = []; $outage = false;
+$runtime = null; $sfus = []; $snapshots = []; $outage = false; $expectedRoomCap = 4;
 $ctx = ['write_runtime'=>static function ($value) use (&$runtime) { $runtime = $value; }];
-$rpc = static function ($method,$room,$payload) use (&$runtime,&$sfus,&$snapshots,&$outage,$s,$cfg): array {
+$rpc = static function ($method,$room,$payload) use (&$runtime,&$sfus,&$snapshots,&$outage,&$expectedRoomCap,$s,$cfg): array {
     if ($method === 'CreateRoom') {
         must($runtime === 'scheduled-v2' && cl_active($s,cl_room_class($cfg,$room))['room'] === $room, 'room journal before request');
-        must($payload['maxParticipants']===4, 'pilot cap retained');
+        must($payload['maxParticipants'] === $expectedRoomCap, 'new SFU room receives the configured participant cap');
         $sfus[$room]=[];
     } elseif ($method === 'DeleteRoom') { unset($sfus[$room]); }
     elseif ($method === 'ListParticipants') {
@@ -974,7 +974,12 @@ must($s->rows('reports',100) === $normalReportRows && $s->rows('host-pending',10
 // A real Friday lesson keeps its original assignment and cannot be preempted by the pilot.
 $db->exec("INSERT INTO class_schedules (id,teacher_id,class_name,academic_year,day_of_week,period_num,subject_name) VALUES (990,1,'هفتم1','1405/1406','جمعه','زنگ 1','درس رسمی جمعه')");
 $morning = $fri+8*3600+35*60;
-$real = cl_open_lesson($s,$ctx,$trial,$first,$teacher,['slot'=>990],$morning,$rpc);
+$expectedRoomCap = 24;
+$schoolCap = array_replace($trial, ['max_participants'=>24]);
+$real = cl_open_lesson($s,$ctx,$schoolCap,$first,$teacher,['slot'=>990],$morning,$rpc);
+$expectedRoomCap = 0; // No CreateRoom is allowed when reopening the same live room.
+$existing = cl_open_lesson($s,$ctx,$trial,$first,$teacher,['slot'=>990],$morning,$rpc);
+must($existing['room'] === $real['room'], 'changing the cap applies to new room creation only');
 must(!cl_is_friday_test($real) && $real['deadline'] === $fri+9*3600+15*60, 'the weekly bell and its deadline remain ordinary even during a Friday pilot');
 denied(409,fn()=>cl_ticket($trial,$real,$priorYear,$bind($real,'PA_StaffOld'),$morning));
 denied(409,fn()=>$trialOpen($priorYear,$first,$morning));

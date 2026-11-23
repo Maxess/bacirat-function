@@ -65,7 +65,7 @@ class WebhookSetupTest(unittest.TestCase):
         self.write_private(self.path, self.base)
         self.write_private(self.config_dir / 'admission.json', json.dumps(DEPLOYMENT))
         self.service = self.systemd_dir / installer.SFU_SERVICE
-        self.service.write_text(installer.sfu_unit_config(legacy=True))
+        self.service.write_text(installer.sfu_unit_config(legacy=True, one_core=True))
         self.service.chmod(0o644)
         self.output = self.enterContext(redirect_stdout(StringIO()))
         # Unless explicitly testing local restart, keep the fixtures completely offline.

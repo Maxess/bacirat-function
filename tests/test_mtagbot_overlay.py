@@ -67,7 +67,10 @@ class BaciOverlayTest(unittest.TestCase):
             self.assertEqual(site.read(f'patches/{BACI_PATCH.name}'), BACI_PATCH.read_bytes())
             for file in ('includes/bot_helpers.php', 'classes.php', 'import-schedule.php', 'config/database.php', 'sql/database.sql'):
                 self.assertNotIn(file, site.namelist())
-            for name in ('WEBHOOK-fa.md', 'install.py', 'admission.py'):
+            # The standalone installer now tunes LiveKit; the 0.1.28 media copy is frozen.
+            self.assertEqual(hashlib.sha256(site.read('media/install.py')).hexdigest(),
+                             '28d4f1925fdea20c2bb78f5e88519d2b131cc2f38a1fed5e5b5ae99f9290fb6d')
+            for name in ('WEBHOOK-fa.md', 'admission.py'):
                 self.assertEqual(site.read(f'media/{name}'), (ROOT / 'server' / name).read_bytes())
         with ZipFile(ROOT / 'artifacts' / UPDATE) as update:
             self.assertEqual(sorted(update.namelist()), sorted(REPLACED + RESTORED + ADDED + ['includes/classroom-calendar.php', 'plugins/school-plugins.php']))

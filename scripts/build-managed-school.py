@@ -18,6 +18,8 @@ LEGACY = ARTIFACTS / 'school-classroom-pilot-v0.1.0.zip'
 LEGACY_SHA = 'bebc35a02f57346880373a034ee493b757a8017a12812a133ab957358d9de161'
 VERSION = '0.4.23'
 MANAGER_VERSION = '0.1.29'
+FROZEN_MANAGER = ARTIFACTS / 'baci-plugin-manager-v0.1.29.zip'
+FROZEN_MANAGER_SHA = 'db09418e148fbec9ca58906ba46e5ee93587a26a63b462a4953d01e7fc63b92b'
 # Reuse byte-verified SDK/PDF assets; ship the same board implementation as the site.
 RECORDER_BASE = 'baci-classroom-recorder-v0.4.21.zip'
 RECORDER_BASE_SHA = 'ca64a9057dfbb758502f5ca89850fb9256f4a4c30266a7f8dd09864d08612cfe'
@@ -245,6 +247,19 @@ def recorder_release(output_dir, native_build):
     return path
 
 
+def manager_media_entries():
+    paths = ('README-fa.md', 'WEBHOOK-fa.md', 'install.py', 'admission.py')
+    if MANAGER_VERSION != '0.1.29':
+        return {f'media/{name}': (ROOT / 'server' / name).read_bytes() for name in paths}
+    # Later changes to the standalone installer must not republish v0.1.29 or
+    # change the already-shipped 0.4.23 combined upgrade bundle.
+    data = FROZEN_MANAGER.read_bytes()
+    if hashlib.sha256(data).hexdigest() != FROZEN_MANAGER_SHA:
+        raise ValueError('Expected the unchanged published Manager 0.1.29 ZIP')
+    with ZipFile(BytesIO(data)) as published:
+        return {f'media/{name}': published.read(f'media/{name}') for name in paths}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output-dir', type=Path)
@@ -294,6 +309,7 @@ def main():
     for name in ('other-settings.php', 'includes/footer.php'):
         if hashlib.sha256(update[name]).hexdigest() != upstream['original_files'][name]:
             raise ValueError(f'Expected the original Baci release file: {name}')
+    media = manager_media_entries()
     opts.output_dir.mkdir(parents=True, exist_ok=True)
     classroom = f'school-classroom-plugin-v{VERSION}.zip'
     upgrade = f'baci-plugin-manager-update-v{MANAGER_VERSION}.zip'
@@ -303,8 +319,7 @@ def main():
     write_zip(opts.output_dir / full_manager, {
         **update, 'README-fa.md': (HOST / 'README-fa.md').read_bytes(),
         'UPSTREAM.json': (BACI / 'UPSTREAM.json').read_bytes(),
-        **{f'media/{name}': (ROOT / 'server' / name).read_bytes()
-            for name in ('README-fa.md', 'WEBHOOK-fa.md', 'install.py', 'admission.py')},
+        **media,
         f'patches/{BACI_PATCH}': (HOST / 'patches' / BACI_PATCH).read_bytes(),
     })
     recorder = recorder_release(opts.output_dir, opts.native_build)

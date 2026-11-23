@@ -76,7 +76,8 @@ MPM_TEST_BACI=/tmp/baci-site python3 -m unittest discover -s tests -p 'test_*.py
 
 ## طرح ظرفیت و آزمایش‌های قبلی
 
-- [طرح فعلی کلاس کم‌مصرف و پایلوت VPS](docs/classroom-bandwidth.fa.md)
+- [پیش از خرید: بررسی CPU LiveKit و سقف اتاق‌های مدرسه](docs/vps-sfu-cpu.fa.md)
+- [مدل تاریخی کلاس کم‌مصرف و پایلوت VPS](docs/classroom-bandwidth.fa.md)
 - [طرح ظرفیت قدیمی و سنجش خروجی TCP](docs/school-plan.fa.md)
 - [ابزار آزمون یک‌بارهٔ سرعت خروجی VPS](scripts/vps-egress.py)
 - [پایلوت PersianMeet صرفاً برای مقایسه](docs/persianmeet-pilot.fa.md)

@@ -594,6 +594,13 @@ try {
         && mpm_query($db,"SELECT payload FROM `$store` WHERE bucket='record-links' AND item=?",['1404/1405:22'])->fetchColumn() === $linkedGroup
         && mpm_query($db,"SELECT payload FROM `$store` WHERE bucket='recording' AND item=?",[$historicId])->fetchColumn() === $historicRecording,
         'the new media modes are opt-in; prior delay, encrypted credentials, recordings and group/history data are unchanged');
+    $schoolCapInput = array_replace($recInput, ['max_participants'=>'24','recording_delay_minutes'=>'135']);
+    denied(fn()=>submit($db,$site,'settings',['settings'=>array_replace($schoolCapInput, ['max_participants'=>'61'])]));
+    submit($db,$site,'settings',['settings'=>$schoolCapInput]);
+    $schoolSettings = mpm_settings($db,$dir,$row);
+    expect($schoolSettings['max_participants'] === 24 && $schoolSettings['api_secret'] === $secret
+        && $schoolSettings['recording_secret'] === $recordingKey && $schoolSettings['bell_hours'] === $hours
+        && $schoolSettings['recording_delay_minutes'] === 135, 'existing package can save the school cap without changing keys or the bell/recording policy');
     submit($db,$site,'enable');
     $_GET = ['view'=>'recordings','class'=>22];
     foreach ([['student_id'=>1],['admin_id'=>2],['admin_id'=>3]] as $unauthorized) {
