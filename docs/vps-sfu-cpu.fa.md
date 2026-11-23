@@ -12,6 +12,26 @@
 sudo /usr/bin/python3 -I server/install.py cpu
 ```
 
+اگر کپی مخزن روی VPS نیست، این بلوک فقط اسکریپتِ پین‌شده را در پوشهٔ موقت می‌گیرد، هش آن را بررسی می‌کند و **فقط حالت بررسی** را اجرا می‌کند. توکن GitHub لازم نیست:
+
+```sh
+(
+  set -eu
+  umask 077
+  d=$(mktemp -d /tmp/baci-sfu-cpu.XXXXXX)
+  cd "$d"
+  ref=f6e7ddaa38c1abea6f31bc4d2a6304dac0f19ee9
+  curl --proto '=https' -fsS --connect-timeout 10 --max-time 40 --retry 2 \
+    -H 'Accept: application/vnd.github.raw+json' \
+    "https://api.github.com/repos/Maxess/bacirat-function/contents/server/install.py?ref=$ref" -o install.py
+  sha256sum -c <<'SHA256'
+6dd018f843995131fc69d6c434d900b4f10be1a84ac547c97d9f1833bd1c6993  install.py
+SHA256
+  sudo /usr/bin/python3 -I install.py cpu
+  printf '\ncpu_script=%s/install.py\n' "$d"
+)
+```
+
 - `livekit_go` از متادیتای فایل اجرایی **همان MainPID** (`/proc/<pid>/exe`) می‌آید؛ نه از `go version` سیستم، شمارهٔ افزونه یا فایل احتمالی جایگزین‌شده روی دیسک. نصب Go لازم نیست. `running_installed_binary=no` یعنی فرایند فایل فعلی نصب استاندارد را اجرا نمی‌کند؛ علت را قبل از ری‌استارت بررسی کن. اگر Go ناشناخته بود، تغییری نده. اگر Go از قبل روی VPS هست، `sudo go version -m /proc/$(systemctl show school-classroom-sfu.service -p MainPID --value)/exe` راه جایگزین خواندن build info است.
 - `GOMAXPROCS=1` یعنی فرایند با سقف صریح قدیمی شروع شده. `go_cpu_auto_supported=yes` یعنی نسخه و پیش‌فرض‌های ساخت/محیط برای اندازه‌گذاری خودکار مناسب‌اند؛ تا وقتی مقدار صریح پابرجاست، این قابلیت سقف را برنمی‌دارد. `unset` همراه `yes` یعنی پین محیطی در کار نیست؛ صرفاً یک برآورد عددی چاپ می‌شود، نه اندازه‌گیری `GOMAXPROCS` از داخل فرایند.
 - `unit_layout=stock-one-core` یعنی واحد بارگذاری‌شده از چیدمان استاندارد قدیمی است. `custom-or-stale` یعنی پیش از برنامه‌ریزی ری‌استارت باید واحد، drop-inها یا تفاوت فایلِ فعلی و واحدِ بارگذاری‌شده را جداگانه بررسی کنی.
@@ -23,7 +43,7 @@ sudo /usr/bin/python3 -I server/install.py cpu
 اگر بررسی `GOMAXPROCS=1`، `go_cpu_auto_supported=yes` و `unit_layout=stock-one-core` داد، باینری با نصب فعلی منطبق بود و سهم CPU قابل‌مشاهده است:
 
 1. پس از پایان همهٔ زنگ‌ها **و** پایان ضبط، ساخت، ارسال و ثبت رسید، از تنظیمات سایت بکاپ بگیر. در مدیر `0.1.29` برای بستن ورود از **«آماده‌سازی ارتقا (حفظ داده و کنترل صف)»** استفاده کن. اگر زنگ باز یا ضبط معلق گزارش شد، صبر کن؛ با «غیرفعال‌سازی» عادی یا حذف آن را دور نزن. هیچ ZIP یا ارتقای دیگری لازم نیست. تا پایان بررسی زنگ جدید باز نشود؛ اگر سرویس جای دیگری هم استفاده می‌شود، ورود از آن مسیر را هم نگه دار.
-2. روی VPS همان فایل بررسی‌شده را با دو گزینه اجرا کن:
+2. روی VPS همان فایل بررسی‌شده را با دو گزینه اجرا کن. دستور زیر برای کپی مخزن است؛ اگر از بلوک دانلود استفاده کردی، به‌جای `server/install.py` مسیر کامل `cpu_script` را بگذار و قبل از `sudo` هش را دوباره با مرحلهٔ ۱ تطبیق بده:
 
    ```bash
    sudo /usr/bin/python3 -I server/install.py cpu --apply --restart
