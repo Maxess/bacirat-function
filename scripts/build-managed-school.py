@@ -23,6 +23,8 @@ RECORDER_BASE = 'baci-classroom-recorder-v0.4.21.zip'
 RECORDER_BASE_SHA = 'ca64a9057dfbb758502f5ca89850fb9256f4a4c30266a7f8dd09864d08612cfe'
 RECORDER_VERSION = '0.4.23'
 RECORDER_SRC = ROOT / 'server/recorder'
+# Keep the original 0.4.23 bundle byte-for-byte reproducible; the repo updater can get fixes.
+BUNDLED_UPGRADER_SHA = '49f08faf1e84df77c0c71a8030e6dbfbbeb198d800c097b3979ea3b5db6abb17'
 # Go 1.26.2, linux/amd64, same bytes as the verified GitHub Actions build.
 NATIVE = {
     'baci-native-receiver': 'f142af48da82dcbe7dfc2bb233336c5e22a5c1a2be87e2d383b15dd6819a76ce',
@@ -239,7 +241,13 @@ def main():
     })
     recorder = recorder_release(opts.output_dir, opts.native_build)
     upgrader = RECORDER_SRC / f'upgrade-v{RECORDER_VERSION}.py'
+    outer = f'baci-classroom-upgrade-v{VERSION}.zip'
     script = upgrader.read_bytes()
+    if hashlib.sha256(script).hexdigest() != BUNDLED_UPGRADER_SHA:
+        with ZipFile(ARTIFACTS / outer) as published:
+            script = published.read(upgrader.name)
+        if hashlib.sha256(script).hexdigest() != BUNDLED_UPGRADER_SHA:
+            raise ValueError('Expected the original reviewed upgrade script in the frozen bundle')
     if f"PAYLOAD_SHA256 = '{hashlib.sha256(recorder.read_bytes()).hexdigest()}'\n".encode() not in script:
         raise ValueError('Recorder upgrade script does not pin the new archive')
     archive_names = (upgrade, full_manager, classroom, recorder.name)
@@ -249,7 +257,6 @@ def main():
                    'classroom-board-network.fa.md': (ROOT / 'docs/classroom-board-network.fa.md').read_bytes(),
                    'vps-classroom-report.py': (ROOT / 'scripts/vps-classroom-report.py').read_bytes()})
     checksum = lambda items: ''.join(f'{hashlib.sha256(data).hexdigest()}  {name}\n' for name, data in sorted(items)).encode('ascii')
-    outer = f'baci-classroom-upgrade-v{VERSION}.zip'
     write_zip(opts.output_dir / outer, bundle | {'SHA256SUMS.txt': checksum(bundle.items())})
     (opts.output_dir / f'SHA256SUMS-v{VERSION}.txt').write_bytes(checksum(
         (name, (opts.output_dir / name).read_bytes()) for name in (*archive_names, outer)))

@@ -52,7 +52,8 @@ class ReleaseTest(unittest.TestCase):
                 self.assertEqual(digest(bundle.read(name)), release_hashes[name])
             for name, expected in contained.items():
                 self.assertEqual(digest(bundle.read(name)), expected, name)
-            self.assertEqual(bundle.read(UPGRADE.name), UPGRADE.read_bytes())
+            # The external VPS updater may be revised without changing the shipped release ZIPs.
+            self.assertEqual(digest(bundle.read(UPGRADE.name)), '49f08faf1e84df77c0c71a8030e6dbfbbeb198d800c097b3979ea3b5db6abb17')
             self.assertEqual(set(rec.namelist()), up.PROGRAM | up.UNITS)
             self.assertEqual(stat.S_IMODE(rec.getinfo(up.BINARY).external_attr >> 16), 0o755)
             for name in ('board.js','pdf-resources.zip','livekit-client.umd.js'):
@@ -125,6 +126,19 @@ class UpgradeTest(unittest.TestCase):
             (up.SYSTEMD / up.DROPIN / up.CREDENTIAL).write_bytes((SOURCE / up.DROPIN / up.CREDENTIAL).read_bytes())
         return (up.ROOT / 'recording.py').read_bytes()
 
+    def fontconfig(self):
+        root = up.SPOOL / '.cache'
+        path = root / 'fontconfig'
+        path.mkdir(parents=True)
+        root.chmod(0o755)
+        path.chmod(0o755)
+        for item in ('CACHEDIR.TAG', 'a'*32 + '-le64.cache-8', 'b'*32 + '-le64.cache-11'):
+            file = path / item
+            self._file(file, b'fixture cache (not a recording)')
+            if self.uid == 0:
+                os.chown(file, self.service_uid, -1)
+        return path
+
     def status(self, site, _, worker):
         self.assertEqual((site.hostname, site.path, worker), ('school.test','/sample',WORKER))
         return self.remote.copy()
@@ -160,6 +174,7 @@ class UpgradeTest(unittest.TestCase):
     def test_read_only_preflight_for_stock_21_without_legacy_dropin(self):
         # For .21 the runtime credential drop-in can be missing; the upgrader adds it on apply.
         self.install('0.4.21', credential=False)
+        self.fontconfig()
         self.resolve()
         self.assertEqual(self.events, [])
         self.assertFalse(self.release.exists())
@@ -167,11 +182,14 @@ class UpgradeTest(unittest.TestCase):
 
     def test_success_preserves_worker_credential_browser_and_old_runtime(self):
         old = self.install('0.4.22')
+        fontconfig = self.fontconfig()
+        fonts_before = {file.name:file.read_bytes() for file in fontconfig.iterdir()}
         config, worker, credential = up.CONFIG.read_bytes(), (up.SPOOL/'worker.json').read_bytes(), (up.SYSTEMD/up.DROPIN/up.CREDENTIAL).read_bytes()
         (up.ROOT/'browsers').mkdir()
         (up.ROOT/'browsers/unchanged').touch()
         self.resolve(True)
         self.assertTrue(self.was_started)
+        self.assertEqual({file.name:file.read_bytes() for file in fontconfig.iterdir()}, fonts_before)
         self.assertEqual(stat.S_IMODE(self.release.stat().st_mode), 0o755)
         self.assertEqual(stat.S_IMODE((self.release/'fonts').stat().st_mode), 0o755)
         self.assertEqual((up.ROOT / 'recording.py').read_bytes(), old)
@@ -183,6 +201,59 @@ class UpgradeTest(unittest.TestCase):
                          [('stop',up.RECORDER),('start',up.POSTPROCESS),('start',up.RECORDER)])
         with self.assertRaisesRegex(up.Refused,'already exists'):
             self.resolve(True)
+
+    def test_stock_home_cache_does_not_hide_a_local_recording_or_a_receipt(self):
+        self.install('0.4.22')
+        fontconfig = self.fontconfig()
+        self.resolve()  # read-only pass with state directory also serving as HOME
+        self.assertTrue((fontconfig / 'CACHEDIR.TAG').is_file())
+        active = up.SPOOL / ('a' * 32)
+        active.mkdir(mode=0o700)
+        with self.assertRaisesRegex(up.Refused,'render or delivery is pending'):
+            self.resolve(True)
+        active.rmdir()
+        self._file(self.records / 'receipt.json', b'{}')
+        with self.assertRaisesRegex(up.Refused,'receipt is still pending'):
+            self.resolve(True)
+        self.assertEqual(self.events, [])
+
+    def test_unrecognized_entries_are_never_skipped_in_the_spool_or_cache(self):
+        self.install('0.4.21')
+        fontconfig = self.fontconfig()
+        for entry in (up.SPOOL / 'unknown\nitem', fontconfig.parent / 'other', fontconfig / 'receipt.json'):
+            with self.subTest(entry=entry.name):
+                entry.touch()
+                with self.assertRaisesRegex(up.Refused,'Unexpected Recorder spool entry') as refusal:
+                    self.resolve(True)
+                self.assertNotIn('\n', str(refusal.exception))
+                self.assertTrue(entry.exists())
+                entry.unlink()
+        self.assertEqual(self.events, [])
+
+    def test_cache_dirs_and_files_cannot_be_symlinks_or_writable_by_other_users(self):
+        self.install('0.4.22')
+        fontconfig = self.fontconfig()
+        fontconfig.parent.chmod(0o777)
+        with self.assertRaisesRegex(up.Refused,'Unsafe directory'):
+            self.resolve(True)
+        fontconfig.parent.chmod(0o755)
+        saved = fontconfig.with_name('elsewhere')
+        fontconfig.rename(saved)
+        fontconfig.symlink_to(saved, target_is_directory=True)
+        with self.assertRaisesRegex(up.Refused,'Unsafe directory|Unexpected Recorder spool entry'):
+            self.resolve(True)
+        fontconfig.unlink()
+        saved.rename(fontconfig)
+        slot = fontconfig / ('d'*32 + '-le64.cache-8')
+        slot.symlink_to(self.records / 'source-1.baci')
+        with self.assertRaisesRegex(up.Refused,'Unexpected Recorder spool entry'):
+            self.resolve(True)
+        slot.unlink()
+        file = fontconfig / 'CACHEDIR.TAG'
+        file.chmod(0o666)
+        with self.assertRaisesRegex(up.Refused,'Unexpected Recorder spool entry'):
+            self.resolve(True)
+        self.assertEqual(self.events, [])
 
     def test_reject_tampered_zip_or_installed_files(self):
         self.install('0.4.22')

@@ -49,6 +49,7 @@ NEW = frozenset(f'clock.py disk_writer.py native_capture.py postprocess.py {BINA
 PROGRAM = COMMON | DEFERRED | NEW | {'README-fa.md', 'fonts/README.md'}
 UNITS = {RECORDER, POSTPROCESS, DROPIN + CREDENTIAL, DROPIN + NATIVE}
 HEX = re.compile(r'[a-f0-9]{32}')
+FONT_CACHE_FILE = re.compile(r'[a-f0-9]{32}-le64\.cache-[0-9]{1,3}')
 HOST = r'(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?'
 MAX_ZIP = 64 * 1024**2
 
@@ -210,6 +211,26 @@ def school_status(site, secret, worker):
         raise Refused(f'Cannot verify the school queue. Activate classroom {VERSION} with unchanged recording settings first.') from None
 
 
+def unexpected_spool_entry(path):
+    # Only a relative path, escaped even for control characters; never read the file.
+    return f'Unexpected Recorder spool entry {ascii(str(path.relative_to(SPOOL)))}; nothing was deleted.'
+
+
+def check_font_cache(path, uid):
+    # The stock service user's HOME is the 0700 spool. Chromium/fontconfig can
+    # create 0755 cache directories below it even with the service's 0077 umask.
+    # Recognize only that layout, with no symlinks or writable-by-others entries.
+    directory(path, uid=uid)
+    for cache in path.iterdir():
+        require(cache.name == 'fontconfig', unexpected_spool_entry(cache))
+        directory(cache, uid=uid)
+        for item in cache.iterdir():
+            require(item.name == 'CACHEDIR.TAG' or FONT_CACHE_FILE.fullmatch(item.name), unexpected_spool_entry(item))
+            info = item.lstat()
+            require(stat.S_ISREG(info.st_mode) and info.st_uid == uid and info.st_nlink == 1
+                    and not info.st_mode & 0o022, unexpected_spool_entry(item))
+
+
 def check_spool(uid):
     directory(SPOOL, uid=uid, private=True)
     worker = private_json(SPOOL / 'worker.json', uid=uid).get('id')
@@ -217,7 +238,10 @@ def check_spool(uid):
     for path in SPOOL.iterdir():
         if path.name in ('.lock', 'worker.json'):
             continue
-        require(HEX.fullmatch(path.name), 'Unexpected file in the Recorder spool; nothing was deleted.')
+        if path.name == '.cache':
+            check_font_cache(path, uid)
+            continue
+        require(HEX.fullmatch(path.name), unexpected_spool_entry(path))
         directory(path, uid=uid, private=True)
         require(not any(exists(path / f) for f in ('receipt.json', '.capturing')), 'A recording or receipt is still pending.')
         terminal = False
