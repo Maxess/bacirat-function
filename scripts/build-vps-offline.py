@@ -91,7 +91,7 @@ def apt_bundle(work, bundle, sources):
         folder.mkdir(parents=True)
     own_sources = apt / 'ubuntu.sources'
     own_sources.write_text(f'Types: deb deb-src\nURIs: {ARCHIVE}\n'
-                           'Suites: noble noble-updates noble-security\nComponents: main universe restricted multiverse\n'
+                           'Suites: noble noble-updates noble-security\nComponents: main universe\n'
                            'Architectures: amd64\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n')
     status = apt / 'empty-status'
     status.touch()
@@ -105,6 +105,7 @@ def apt_bundle(work, bundle, sources):
                       'APT::Get::Always-Include-Phased-Updates "true";\nAPT::Install-Recommends "false";\n'
                       f'APT::Sandbox::User "{os.environ["USER"]}";\nAcquire::Languages "none";\nAcquire::Retries "3";\n')
     env = os.environ | {'APT_CONFIG': str(config), 'LC_ALL': 'C', 'DEBIAN_FRONTEND': 'noninteractive'}
+    print('Fetching signed Noble APT indexes…', flush=True)
     run('apt-get', '-q', '-o', 'APT::Update::Error-Mode=any', 'update', env=env)
     goals = [line for line in (OFFLINE / 'ubuntu-packages.txt').read_text().splitlines() if line and not line.startswith('#')]
     # An empty dpkg status avoids accidentally relying on anything installed on CI (including dev libraries).
@@ -139,6 +140,7 @@ def apt_bundle(work, bundle, sources):
     (sources / 'ubuntu-package-lock.tsv').write_bytes((bundle / 'ubuntu-package-lock.tsv').read_bytes())
     (sources / 'README.txt').write_text('Corresponding Ubuntu archive source packages (.dsc and referenced tar files).\n'
                                        'Not needed for VPS installation. See ubuntu-package-lock.tsv and the signed Ubuntu archive.\n')
+    print(f'Fetching matching source for {len(rows)} Ubuntu binaries ({len(source_set)} source packages)…', flush=True)
     run('apt-get', '-q', '--download-only', '--only-source', 'source',
         *(f'{p}={v}' for p, v in sorted(source_set)), env=env, cwd=sources)
     if len(list(sources.glob('*.dsc'))) != len(source_set):

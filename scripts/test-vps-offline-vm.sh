@@ -26,7 +26,7 @@ vm() { ssh -i "$work/ssh" -F /dev/null -o BatchMode=yes -o StrictHostKeyChecking
 send() { scp -i "$work/ssh" -F /dev/null -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -P "$port" "$@" vpsqa@127.0.0.1:; }
 wait_vm() {
     for attempt in $(seq 1 60); do
-        if vm 'cloud-init status --wait >/dev/null; test -f /run/cloud-init/result.json' 2>/dev/null; then return; fi
+        if vm 'cloud-init status --wait >/dev/null' 2>/dev/null; then return; fi
         sleep 2
     done
     return 1
@@ -137,7 +137,7 @@ sudo ip netns exec schoolqa ip link set schoolqa0 up
 sudo ip netns exec schoolqa ip link set lo up
 printf '172.30.123.2 school.example.test\n' | sudo tee -a /etc/hosts >/dev/null
 sudo systemd-run --quiet --unit=baci-fixture-peer --property=WorkingDirectory="$PWD" \
-    /usr/sbin/ip netns exec schoolqa /usr/bin/python3 "$PWD/vps-offline-peer.py" school.pem school.key
+    "$(command -v ip)" netns exec schoolqa /usr/bin/python3 "$PWD/vps-offline-peer.py" school.pem school.key
 sudo /usr/bin/python3 vps-offline-peer.py --exercise
 sudo baci-vps doctor --online | tee online.log
 grep -Fq 'school_webhook=ok' online.log

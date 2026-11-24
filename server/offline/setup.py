@@ -23,7 +23,7 @@ import tarfile
 import tempfile
 import time
 from urllib.parse import urlsplit
-from zipfile import ZipFile
+from zipfile import BadZipFile, ZipFile
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))  # python -I: only the verified staging or root-owned install directory.
@@ -117,12 +117,17 @@ def json_file(path, *, private=True):
 def write(path, data, mode=0o644, *, uid=0, gid=0):
     if isinstance(data, str):
         data = data.encode()
-    with path.open('xb') as file:
-        os.fchown(file.fileno(), uid, gid)
-        os.fchmod(file.fileno(), mode)
-        file.write(data)
-        file.flush()
-        os.fsync(file.fileno())
+    file = path.open('xb')  # Do not unlink a pre-existing file if the exclusive open failed.
+    try:
+        with file:
+            os.fchown(file.fileno(), uid, gid)
+            os.fchmod(file.fileno(), mode)
+            file.write(data)
+            file.flush()
+            os.fsync(file.fileno())
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
 
 
 def save_json(path, obj, mode=0o600, **kwargs):
@@ -200,6 +205,8 @@ def fresh_preflight():
                        (7883, socket.SOCK_STREAM), (7882, socket.SOCK_DGRAM)]:
         try:
             with socket.socket(socket.AF_INET, kind) as sock:
+                if kind == socket.SOCK_STREAM:
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 sock.bind(('0.0.0.0', port))
         except OSError:
             raise Refused(f'Port {port}/{"UDP" if kind == socket.SOCK_DGRAM else "TCP"} is already in use. No service was stopped.') from None
@@ -233,6 +240,8 @@ def validate_cert(host, chain, key):
         run('openssl', 'x509', '-in', fullchain, '-noout', '-checkend', '86400', label=label)
         san = run('openssl', 'x509', '-in', fullchain, '-noout', '-ext', 'subjectAltName', output=True, label=label)
         need(b'DNS:' in san, 'The media hostname must be in the certificate DNS SAN list.')
+        features = run('openssl', 'x509', '-in', fullchain, '-noout', '-ext', 'tlsfeature', output=True, label=label)
+        need(b'status_request' not in features, 'Use a certificate that does not require online OCSP stapling.')
         pub = run('openssl', 'x509', '-in', fullchain, '-noout', '-pubkey', output=True, label=label)
         pub_key = run('openssl', 'pkey', '-in', privkey, '-passin', 'pass:', '-pubout', output=True, label='TLS private key')
         need(pub and pub == pub_key, 'The TLS private key does not match the media certificate.')
@@ -246,7 +255,7 @@ def pairing(config):
 def edge_config(config):
     site = media.caddy_config(config['media'], config['origin'])
     domain, rules = site.split(' {\n', 1)
-    return ('{\n    admin off\n    auto_https off\n    servers {\n        protocols h1 h2\n    }\n}\n\n'
+    return ('{\n    admin off\n    auto_https off\n    ocsp_stapling off\n    servers {\n        protocols h1 h2\n    }\n}\n\n'
             f'{domain} {{\n    bind 0.0.0.0\n    tls {TLS}/fullchain.pem {TLS}/privkey.pem\n' + rules)
 
 
@@ -453,8 +462,6 @@ class Fresh:
             safe_remove(path)
         if self.starting:
             run('systemctl', 'daemon-reload')
-            run('systemctl', 'reset-failed', *UNITS, label='systemd failed-state cleanup') if any(
-                info('-p', 'LoadState', unit) != 'not-found' for unit in UNITS) else None
         for name in reversed(self.users):
             run('userdel', name)
             with contextlib.suppress(KeyError):
@@ -483,7 +490,7 @@ class Fresh:
             write(APP / dest, (HERE / source).read_bytes())
         deployment = {k: keys[k] for k in ('api_key', 'api_secret')}
         callback = media.webhook_url(config['origin'], config['site_path'])
-        write(CFG / 'livekit.yaml', media.engine_config(config['ipv4'], **{'api_key': keys['api_key'], 'secret': keys['api_secret']})
+        write(CFG / 'livekit.yaml', media.engine_config(config['ipv4'], keys['api_key'], keys['api_secret'])
               + media.native_webhook_block(keys['api_key'], callback), 0o640, gid=sfu.pw_gid)
         save_json(CFG / 'admission.json', deployment | {'school_origin': config['origin']}, 0o640, gid=sfu.pw_gid)
         save_json(PAIR, keys)
@@ -628,7 +635,7 @@ def main(argv=None):
         txn = None  # The durable install is complete; do not undo it if exporting fails.
         print('installation=ok local_https=ok renderer_mp4=ok. School pairing and public DNS/firewall still need confirmation.')
         return 0 if export_pair() else 1
-    except (Refused, OSError, ValueError, KeyboardInterrupt, EOFError, KeyError, http.client.HTTPException, sp.SubprocessError) as error:
+    except (Refused, OSError, ValueError, KeyboardInterrupt, EOFError, KeyError, http.client.HTTPException, sp.SubprocessError, tarfile.TarError, BadZipFile) as error:
         if txn:
             try:
                 txn.cleanup()

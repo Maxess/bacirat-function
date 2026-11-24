@@ -635,6 +635,8 @@ try {
         'api_key'=>str_repeat('a',24),'api_secret'=>str_repeat('b',64),'recording_secret'=>str_repeat('c',64)];
     $pairRaw = json_encode($pair, JSON_THROW_ON_ERROR);
     $GLOBALS['MPM_CLI_SITE_PATH'] = '/school-test';
+    $previousScript = $_SERVER['SCRIPT_NAME'] ?? null;
+    $_SERVER['SCRIPT_NAME'] = '/school-test/school-classroom-settings.php'; // non-CLI PHP-WASM fixture
     $savedBeforePair = mpm_owned_row($db,$row)['settings'];
     foreach ([['site'=>$origin], ['site'=>'https://other.example.ir/school-test'], ['signal_url'=>'wss://127.0.0.1'],
         ['signal_url'=>'wss://test-school.example.ir'], ['signal_url'=>'wss://new-media.example.ir:443'], ['recording_secret'=>$pair['api_secret']],
@@ -662,6 +664,7 @@ try {
         'same pairing is idempotent and does not rotate or rewrite');
     mpm_write_settings($db,$dir,$row,$savedAttendance);
     unset($GLOBALS['MPM_CLI_SITE_PATH']);
+    if ($previousScript === null) unset($_SERVER['SCRIPT_NAME']); else $_SERVER['SCRIPT_NAME'] = $previousScript;
     submit($db,$site,'enable');
     denied(fn()=>mpm_dispatch($db,$site,$slug,'job'));
     expect(http_response_code()===404, 'attendance recovery remains internal and is not a public job endpoint');
