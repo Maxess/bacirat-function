@@ -4,7 +4,7 @@ declare(strict_types=1);
 use BaciClassroom\Calendar;
 
 // School plugin runtime and gateway. Settings are exposed by the reviewed host overlay.
-const MPM_VERSION = '0.1.29';
+const MPM_VERSION = '0.1.30';
 const MPM_CLASSROOM_NATIVE = '0.4.0';
 const MPM_CLASSROOM_PUPIL_TRIAL = '0.4.3';
 const MPM_REGISTRY = 'mtg_plugin_registry';
@@ -43,6 +43,7 @@ const MPM_CATALOG = [
         '0.4.21' => 'ac9dfd49526a3496d8c02cc0f32d720adf315875bd2336675c91abd53772d1a8',
         '0.4.22' => 'f062c3891428e107cc5c37c786d699660584829a3628087f0f3186969ef92570',
         '0.4.23' => '179f220a4b81c4f3ef37e6c791b72b060e3af493f769c85646d3df63b05f505e',
+        '0.4.24' => '0fc20fd10db7439d7856003264cf75ca17d8bd76b3f82b9571c3998b4dfb52b2',
     ],
 ];
 
@@ -1112,6 +1113,9 @@ function mpm_post(PDO $db, ?array $site, string $origin, string $csrf): string
                 if (mpm_query($db, "SELECT 1 FROM `$table` WHERE bucket IN ('active','record-pending') OR (bucket='record-slot' AND item='current') LIMIT 1")->fetchColumn() !== false) {
                     throw new MpmNotice('زنگ باز یا ضبط در صف است. برای ارتقا صبر کن تا زنگ، ساخت، ارسال و ثبت رسید تمام شود.');
                 }
+                if (mpm_query($db, "SELECT 1 FROM `$table` WHERE bucket IN ('host-pending','host-outbox') LIMIT 1")->fetchColumn() !== false) {
+                    throw new MpmNotice('اعلان حضور هنوز در صف است. تا تخلیهٔ صف با Cron هاست صبر کن؛ برای ارتقا غیرفعال‌سازی معمولی نزن.');
+                }
             }
             mpm_state($db, $row, 'disabled');
             return 'غیرفعال شد؛ داده‌ها و فایل‌ها حفظ شدند.' . mpm_deactivate($db, $site, $dir, $row);
@@ -1472,7 +1476,7 @@ function mpm_run(): void
     }
 }
 
-// FastCGI sites can start one delivery after returning the report to the teacher. The host's one-shot cron drains the rest.
+// FastCGI sites drain a bounded attendance batch after returning the response. Cron recovers any remaining work.
 function mpm_classroom_delivery_after_response(): void
 {
     static $scheduled = false;

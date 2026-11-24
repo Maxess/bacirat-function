@@ -8,7 +8,7 @@ $mode = $ctx['job_mode'] ?? '';
 if (!in_array($mode, ['cli','after-response','friday-cleanup'], true)) throw new ClassroomError(404, '');
 $cfg = cl_config();
 $s = cl_store();
-// Optional host cron finalizes abandoned lessons past their deadline. It does not supervise live media.
+// Host cron recovers unfinished delivery batches and finalizes expired lessons. It does not supervise live media.
 if ($mode !== 'after-response') {
     $failed = false;
     $testOnly = $mode === 'friday-cleanup';
@@ -35,4 +35,5 @@ if ($mode !== 'after-response') {
         return;
     }
 }
-cl_delivery_job($s, $cfg, $ctx['school_bot'], $mode === 'cli' ? 40 : 1);
+// Return the HTTP reply before doing the same bounded batch as the CLI job.
+cl_delivery_job($s, $cfg, $ctx['school_bot']);

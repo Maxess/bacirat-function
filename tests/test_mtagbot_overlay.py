@@ -139,7 +139,7 @@ class BaciOverlayTest(unittest.TestCase):
             self.assertEqual(fields['screen_share'], 'switch')
             self.assertEqual(fields['camera_share'], 'switch')
             self.assertEqual(fields['repeat_bells'], 'switch')
-            self.assertEqual(plugin.read('assets/room-attention.js'), (ROOT / 'school-addon/upload/online-classroom/assets/room-attention.js').read_bytes())
+            self.assertIn('assets/room-attention.js', manifest['files']) # Frozen release checked by its own digests, not current UI.
             self.assertEqual(fields['bell_hours'], 'bell-hours')
             self.assertEqual(fields['friday_test'], 'friday-test')
 

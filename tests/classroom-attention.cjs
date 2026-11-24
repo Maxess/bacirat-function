@@ -10,7 +10,9 @@ function fixture({teacher=false, acquire, supported=true}={}) {
     const nodes=new Map(), events=new Map(), tasks=new Map(), locks=[], changes=[];
     const el=id=>{
         if (!teacher && id.startsWith('wake-')) return null;
-        if (!nodes.has(id)) nodes.set(id,{dataset:{},textContent:'',hidden:true,handlers:{},addEventListener(k,fn){this.handlers[k]=fn;}});
+        if (!nodes.has(id)) nodes.set(id,{dataset:{},textContent:'',hidden:true,handlers:{},id,
+            addEventListener(k,fn){this.handlers[k]=fn;},setAttribute(k,v){this[k]=v;},focus(){document.activeElement=this;},
+            contains(node){return node===this || (this.id==='board-chat-toast' && node?.id?.startsWith('board-chat-'));}});
         return nodes.get(id);
     };
     const sentinel=()=>{
@@ -19,7 +21,12 @@ function fixture({teacher=false, acquire, supported=true}={}) {
         }};
         locks.push(item); return item;
     };
-    const document={getElementById:el,hidden:false,addEventListener(k,fn){events.set(k,fn);}};
+    const document={getElementById:el,hidden:false,addEventListener(k,fn){events.set(k,[...(events.get(k)||[]),fn]);}};
+    const emit=(type,props={})=>{
+        const event={type,isTrusted:true,target:document,preventDefault(){this.prevented=true;},stopPropagation(){this.stopped=true;},...props};
+        for (const listener of events.get(type)||[]) listener(event);
+        return event;
+    };
     const window={isSecureContext:true,localStorage:{getItem:()=>{throw Error('class wake mode is not local');}},navigator:supported ? {wakeLock:{async request(type){
         assert.equal(type,'screen'); count++; return acquire ? acquire(count,sentinel) : sentinel();
     }}} : {}};
@@ -36,8 +43,11 @@ function fixture({teacher=false, acquire, supported=true}={}) {
         }
         now=end; await tick();
     }
-    return {el,attention,locks,changes,move,tick,get requests(){return count;},hidden(value){document.hidden=value;events.get('visibilitychange')();},
-        event(type,trusted=true){events.get(type)({type,isTrusted:trusted});},select(value){el('wake-mode').value=value;el('wake-mode').handlers.change();}};
+    return {el,attention,locks,changes,move,tick,get requests(){return count;},get focus(){return document.activeElement;},
+        hidden(value){document.hidden=value;emit('visibilitychange');},
+        event(type,trusted=true){emit(type,{isTrusted:trusted});},
+        click(id) { const target=el(id); const event=emit('click',{target}); target.handlers.click?.(event); },
+        key(key){return emit('keydown',{key});},select(value){el('wake-mode').value=value;el('wake-mode').handlers.change();}};
 }
 
 test('default wake lock is only for an admitted, visible class, is reacquired safely and has a system opt-out',async()=>{
@@ -91,21 +101,44 @@ test('power-policy refusal does not trigger background retry loops',async()=>{
     f.hidden(true);f.hidden(false);await f.tick();assert.equal(f.requests,2);
 });
 
-test('expanded board shows fresh pupil chat for two seconds and newly admitted names for one, not history or staff chat',async()=>{
+test('expanded board shows 60 graphemes of recent pupil chat for 6 seconds and join notices for exactly 3',async()=>{
     const f=fixture(); const a=f.attention, chat=f.el('board-chat-toast'), join=f.el('board-join-toast');
     const one={'student-1':{name:'احسانی'}}, two={...one,'student-2':{name:'صادقی'}};
     const message={author:'student-1',text:'قدیمی',recent:true};
     a.setLive(true); a.expand(true); a.snapshot(one,[message],false,'teacher-1');
     assert.equal(chat.hidden,true); assert.equal(join.hidden,true);
     const family='👩‍👩‍👧‍👦';
-    a.snapshot(two,[{...message,text:family.repeat(35)},{author:'teacher-2',text:'نباید دیده شود',recent:true}],false,'teacher-1');
-    assert.equal(chat.textContent,`احسانی: ${family.repeat(29)}…`);
+    a.snapshot(two,[{...message,text:family.repeat(65)},{author:'teacher-2',text:'نباید دیده شود',recent:true}],false,'teacher-1');
+    assert.equal(f.el('board-chat-snippet').textContent,`احسانی: ${family.repeat(59)}…`);
     assert.equal(join.textContent,'صادقی وارد کلاس شد');
-    await f.move(999); assert.equal(join.hidden,false); await f.move(1);
+    f.click('board-join-toast'); assert.equal(f.el('board-chat-detail').hidden,true,'join is not an expandable message');
+    await f.move(2999); assert.equal(join.hidden,false); await f.move(1);
     assert.equal(join.hidden,true); assert.equal(chat.hidden,false);
-    await f.move(1000); assert.equal(chat.hidden,true);
+    await f.move(2999); assert.equal(chat.hidden,false); await f.move(1); assert.equal(chat.hidden,true);
     a.snapshot(two,[{...message,recent:false}],false,'teacher-1'); assert.equal(chat.hidden,true);
     a.expand(false); a.snapshot(two,[message],false,'teacher-1'); assert.equal(chat.hidden,true);
     a.expand(true); a.snapshot(two,[message],true,'teacher-1'); a.snapshot(two,[message],false,'teacher-1'); assert.equal(chat.hidden,true);
+    a.snapshot(two,[message],false,'student-1'); assert.equal(chat.hidden,true,'no alert for one’s own message');
     a.snapshot(two,[message],false,'teacher-1'); assert.equal(chat.hidden,false); f.hidden(true); assert.equal(chat.hidden,true);
+});
+
+test('only chat opens the full plain-text message, holds it past the timeout, and can dismiss independently',async()=>{
+    const f=fixture({teacher:true}), a=f.attention;
+    const text='۱ خط با نشانه‌های <b>\n'+'دنبالهٔ کامل پیام '.repeat(18);
+    const profiles={'student-1':{name:'احسانی'}}, message={author:'student-1',text,recent:true};
+    const next={...message,text:'پیام بعدی'}, toast=f.el('board-chat-toast'), detail=f.el('board-chat-detail');
+    a.setLive(true,'system'); a.snapshot(profiles,[],false,'teacher-1'); a.expand(true);
+    a.snapshot(profiles,[message],false,'teacher-1'); f.click('board-chat-preview');
+    assert.equal(detail.hidden,false); assert.equal(f.el('board-chat-full').textContent,text);
+    assert.equal(f.el('board-chat-sender').textContent,'احسانی'); assert.equal(f.focus.id,'board-chat-close');
+    a.snapshot(profiles,[next],false,'teacher-1');
+    await f.move(12000);
+    f.click('board-chat-full'); assert.equal(detail.hidden,false);
+    f.click('board-chat-close'); assert.equal(detail.hidden,true); assert.equal(f.focus.id,'board-expand');
+    assert.equal(f.el('board-chat-snippet').textContent,'احسانی: پیام بعدی','new arrivals do not replace an opened message');
+    f.click('board-chat-preview'); f.click('board-scroll'); assert.equal(toast.hidden,true,'outside click closes it');
+    a.snapshot(profiles,[message],false,'teacher-1'); f.click('board-chat-preview');
+    const escape=f.key('Escape'); assert.equal(escape.stopped,true); assert.equal(toast.hidden,true);
+    a.snapshot(profiles,[message],false,'teacher-1'); f.click('board-chat-preview'); a.expand(false);
+    assert.equal(toast.hidden,true); assert.equal(f.el('board-chat-full').textContent,'');
 });

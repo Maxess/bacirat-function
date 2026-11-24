@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Assemble the managed classroom, Baci update, fresh-install overlay and download bundle."""
+"""Build the managed classroom site release or reproduce the separate VPS archives."""
 import argparse
 from io import BytesIO
 import hashlib
@@ -16,10 +16,8 @@ HOST = ROOT / 'plugin-manager'
 SRC = ROOT / 'school-addon/upload/online-classroom'
 LEGACY = ARTIFACTS / 'school-classroom-pilot-v0.1.0.zip'
 LEGACY_SHA = 'bebc35a02f57346880373a034ee493b757a8017a12812a133ab957358d9de161'
-VERSION = '0.4.23'
-MANAGER_VERSION = '0.1.29'
-FROZEN_MANAGER = ARTIFACTS / 'baci-plugin-manager-v0.1.29.zip'
-FROZEN_MANAGER_SHA = 'db09418e148fbec9ca58906ba46e5ee93587a26a63b462a4953d01e7fc63b92b'
+VERSION = '0.4.24'
+MANAGER_VERSION = '0.1.30'
 # Reuse byte-verified SDK/PDF assets; ship the same board implementation as the site.
 RECORDER_BASE = 'baci-classroom-recorder-v0.4.21.zip'
 RECORDER_BASE_SHA = 'ca64a9057dfbb758502f5ca89850fb9256f4a4c30266a7f8dd09864d08612cfe'
@@ -31,8 +29,6 @@ RENDERER_FIX = ('movie.py', 'postprocess.py')
 RENDERER_REPAIR = f'baci-classroom-renderer-v{RECORDER_VERSION}-r1.zip'
 RENDERER_INSTALLER = f'repair-renderer-v{RECORDER_VERSION}-r1.py'
 MAINTENANCE_SHA = '2782b003fb54886777e2ea3e06b76d9587d1b3ef89bcc0e736e15283ca5782f6'
-# Keep the original 0.4.23 bundle byte-for-byte reproducible; the repo updater can get fixes.
-BUNDLED_UPGRADER_SHA = '49f08faf1e84df77c0c71a8030e6dbfbbeb198d800c097b3979ea3b5db6abb17'
 # Go 1.26.2, linux/amd64, same bytes as the verified GitHub Actions build.
 NATIVE = {
     'baci-native-receiver': 'f142af48da82dcbe7dfc2bb233336c5e22a5c1a2be87e2d383b15dd6819a76ce',
@@ -134,7 +130,7 @@ def plugin_entries(pdf_archive):
         'report_menus': {role: 'حضور و غیاب کلاس مجازی' for role in ('teacher', 'admin', 'deputy')},
         'routes': {'page': 'index.php', 'api': 'api.php', 'content': 'content.php', 'events': 'events.php', 'job': 'job.php', 'recording': 'recording-api.php'},
         'store': True, 'pdf_resources': 'assets/pdf-resources.zip',
-        'preserve_settings_from': ['0.2.0', '0.2.1', '0.2.2', '0.2.3', '0.3.0', '0.4.0', '0.4.1', '0.4.2', '0.4.3', '0.4.4', '0.4.5', '0.4.6', '0.4.7', '0.4.8', '0.4.9', '0.4.10', '0.4.11', '0.4.12', '0.4.13', '0.4.14', '0.4.15', '0.4.16', '0.4.17', '0.4.18', '0.4.19', '0.4.20', '0.4.21', '0.4.22'],
+        'preserve_settings_from': ['0.2.0', '0.2.1', '0.2.2', '0.2.3', '0.3.0', '0.4.0', '0.4.1', '0.4.2', '0.4.3', '0.4.4', '0.4.5', '0.4.6', '0.4.7', '0.4.8', '0.4.9', '0.4.10', '0.4.11', '0.4.12', '0.4.13', '0.4.14', '0.4.15', '0.4.16', '0.4.17', '0.4.18', '0.4.19', '0.4.20', '0.4.21', '0.4.22', '0.4.23'],
         'hooks': {'deactivate': 'deactivate.php'},
         'settings': [
             {'key': 'signal_url', 'type': 'wss', 'label': 'آدرس رسانه (wss://)'},
@@ -153,6 +149,8 @@ def plugin_entries(pdf_archive):
              'label': 'فاصلهٔ پایان واقعی زنگ تا امکان شروع ساخت فیلم (دقیقه؛ پیش‌فرض: ۱۸۰)'},
             {'key': 'recording_secret', 'type': 'secret', 'label': 'کلید مستقل سرویس ضبط (فقط برای ضبط؛ متفاوت از کلید رسانه)', 'min': 32, 'max': 128},
             {'key': 'repeat_bells', 'type': 'switch', 'label': 'اجازهٔ برگزاری مجدد زنگ پایان‌یافته در همان روز (دستی، با گزارش جدا)'},
+            {'key': 'attendance_min_minutes', 'type': 'integer', 'min': 0, 'max': 120, 'default': 0,
+             'label': 'حداقل حضور برای اعلان (دقیقه؛ صفر: بدون حداقل)'},
             {'key': 'notify_school_bale', 'type': 'switch', 'label': 'ارسال حضور به گفت‌وگوهای خصوصی ربات بله'},
             {'key': 'notify_school_telegram', 'type': 'switch', 'label': 'ارسال حضور به گفت‌وگوهای خصوصی ربات تلگرام'},
             {'key': 'notify_school_rubika', 'type': 'switch', 'label': 'ارسال حضور به گفت‌وگوهای خصوصی ربات روبیکا'},
@@ -247,19 +245,6 @@ def recorder_release(output_dir, native_build):
     return path
 
 
-def manager_media_entries():
-    paths = ('README-fa.md', 'WEBHOOK-fa.md', 'install.py', 'admission.py')
-    if MANAGER_VERSION != '0.1.29':
-        return {f'media/{name}': (ROOT / 'server' / name).read_bytes() for name in paths}
-    # Later changes to the standalone installer must not republish v0.1.29 or
-    # change the already-shipped 0.4.23 combined upgrade bundle.
-    data = FROZEN_MANAGER.read_bytes()
-    if hashlib.sha256(data).hexdigest() != FROZEN_MANAGER_SHA:
-        raise ValueError('Expected the unchanged published Manager 0.1.29 ZIP')
-    with ZipFile(BytesIO(data)) as published:
-        return {f'media/{name}': published.read(f'media/{name}') for name in paths}
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output-dir', type=Path)
@@ -276,14 +261,14 @@ def main():
             parser.error('renderer-only builds need an explicit --output-dir and no release build options')
         (renderer_repair if opts.renderer_repair else renderer_candidate)(opts.output_dir)
         return
-    if not opts.native_build:
-        parser.error('release builds require --native-build')
     opts.output_dir = opts.output_dir or ARTIFACTS
     if opts.recorder_only:
-        if opts.approve_reviewed_manifest or opts.pdf_archive:
-            parser.error('site manifest and PDF build options do not apply to the standalone Recorder')
+        if not opts.native_build or opts.approve_reviewed_manifest or opts.pdf_archive:
+            parser.error('Recorder rebuilds need --native-build and no site build options')
         recorder_release(opts.output_dir, opts.native_build)
         return
+    if opts.native_build:
+        parser.error('--native-build applies only to --recorder-only; the default build is site-only')
     entries = plugin_entries(opts.pdf_archive)
     expected = hashlib.sha256(entries['plugin.json']).hexdigest()
     manager = HOST / 'plugins/school-plugins.php'
@@ -309,7 +294,6 @@ def main():
     for name in ('other-settings.php', 'includes/footer.php'):
         if hashlib.sha256(update[name]).hexdigest() != upstream['original_files'][name]:
             raise ValueError(f'Expected the original Baci release file: {name}')
-    media = manager_media_entries()
     opts.output_dir.mkdir(parents=True, exist_ok=True)
     classroom = f'school-classroom-plugin-v{VERSION}.zip'
     upgrade = f'baci-plugin-manager-update-v{MANAGER_VERSION}.zip'
@@ -319,31 +303,22 @@ def main():
     write_zip(opts.output_dir / full_manager, {
         **update, 'README-fa.md': (HOST / 'README-fa.md').read_bytes(),
         'UPSTREAM.json': (BACI / 'UPSTREAM.json').read_bytes(),
-        **media,
+        **{f'media/{name}': (ROOT / 'server' / name).read_bytes()
+           for name in ('README-fa.md', 'WEBHOOK-fa.md', 'install.py', 'admission.py')},
         f'patches/{BACI_PATCH}': (HOST / 'patches' / BACI_PATCH).read_bytes(),
     })
-    recorder = recorder_release(opts.output_dir, opts.native_build)
-    upgrader = RECORDER_SRC / f'upgrade-v{RECORDER_VERSION}.py'
-    outer = f'baci-classroom-upgrade-v{VERSION}.zip'
-    script = upgrader.read_bytes()
-    if hashlib.sha256(script).hexdigest() != BUNDLED_UPGRADER_SHA:
-        with ZipFile(ARTIFACTS / outer) as published:
-            script = published.read(upgrader.name)
-        if hashlib.sha256(script).hexdigest() != BUNDLED_UPGRADER_SHA:
-            raise ValueError('Expected the original reviewed upgrade script in the frozen bundle')
-    if f"PAYLOAD_SHA256 = '{hashlib.sha256(recorder.read_bytes()).hexdigest()}'\n".encode() not in script:
-        raise ValueError('Recorder upgrade script does not pin the new archive')
-    archive_names = (upgrade, full_manager, classroom, recorder.name)
-    bundle = {name: (opts.output_dir / name).read_bytes() for name in archive_names}
-    bundle.update({upgrader.name: script,
-                   'START-HERE-fa.txt': (ROOT / 'docs/baci-classroom-upgrade.fa.txt').read_bytes(),
-                   'classroom-board-network.fa.md': (ROOT / 'docs/classroom-board-network.fa.md').read_bytes(),
-                   'vps-classroom-report.py': (ROOT / 'scripts/vps-classroom-report.py').read_bytes()})
-    checksum = lambda items: ''.join(f'{hashlib.sha256(data).hexdigest()}  {name}\n' for name, data in sorted(items)).encode('ascii')
-    write_zip(opts.output_dir / outer, bundle | {'SHA256SUMS.txt': checksum(bundle.items())})
-    (opts.output_dir / f'SHA256SUMS-v{VERSION}.txt').write_bytes(checksum(
-        (name, (opts.output_dir / name).read_bytes()) for name in (*archive_names, outer)))
-    print(f'Built all archives; classroom manifest SHA-256: {expected}')
+    # This site-only update must not carry a VPS installer or payload. Existing
+    # Recorder 0.4.23 / Renderer r1 services keep the same HTTP protocol and files.
+    outer = f'baci-classroom-site-upgrade-v{VERSION}.zip'
+    site_names = (upgrade, classroom)
+    bundle = {name: (opts.output_dir / name).read_bytes() for name in site_names}
+    bundle['START-HERE-fa.txt'] = (ROOT / f'docs/baci-classroom-site-v{VERSION}.fa.txt').read_bytes()
+    def checksums(items):
+        return ''.join(f'{hashlib.sha256(data).hexdigest()}  {name}\n' for name, data in sorted(items)).encode('ascii')
+    write_zip(opts.output_dir / outer, bundle | {'SHA256SUMS.txt': checksums(bundle.items())})
+    (opts.output_dir / f'SHA256SUMS-v{VERSION}.txt').write_bytes(checksums(
+        (name, (opts.output_dir / name).read_bytes()) for name in (*site_names, full_manager, outer)))
+    print(f'Built site archives; classroom manifest SHA-256: {expected}')
 
 
 if __name__ == '__main__':

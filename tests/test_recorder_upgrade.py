@@ -77,7 +77,7 @@ class ReleaseTest(unittest.TestCase):
             self.assertEqual({f['key']:f['type'] for f in manifest['settings']}['class_media_modes'], 'class-modes')
             with ZipFile(BytesIO(bundle.read('baci-plugin-manager-update-v0.1.29.zip'))) as update:
                 manager = update.read('plugins/school-plugins.php')
-                self.assertEqual(manager, (REPO / 'plugin-manager/plugins/school-plugins.php').read_bytes())
+                self.assertEqual(digest(manager), '5ac47f788212a1f1556a0c9fbfe0016dfed8097270f0ad679b7b140c4fd8b28b')
                 self.assertIn(f"'0.4.23' => '{digest(site.read('plugin.json'))}'".encode(), manager)
                 self.assertNotIn(up.BINARY, update.namelist())
 

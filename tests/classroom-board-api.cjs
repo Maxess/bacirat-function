@@ -8,7 +8,7 @@ const {join, resolve} = require('node:path');
 const test = require('node:test');
 const {twoPageBoardPDF} = require('./fixtures/classroom-board-docs.cjs');
 
-const {MPM_TEST_PHP_WASM:runtime, MPM_TEST_CLASSROOM_ZIP:archive=join(__dirname,'../artifacts/school-classroom-plugin-v0.4.23.zip')} = process.env;
+const {MPM_TEST_PHP_WASM:runtime, MPM_TEST_CLASSROOM_ZIP:archive=join(__dirname,'../artifacts/school-classroom-plugin-v0.4.24.zip')} = process.env;
 
 test('packaged API restores board controls for the admitted manager in normal and Friday lessons', {skip:!runtime,timeout:25000}, async t=>{
     const load = createRequire(resolve(runtime,'package.json'));

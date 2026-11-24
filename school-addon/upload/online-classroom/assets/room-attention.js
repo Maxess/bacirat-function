@@ -7,7 +7,7 @@
     function shortMessage(text) {
         const line = text.replace(/\s+/gu,' ').trim();
         const units = letters ? [...letters.segment(line)].map(x => x.segment) : Array.from(line);
-        return units.length > 30 ? units.slice(0,29).join('') + '…' : line;
+        return units.length > 60 ? units.slice(0,59).join('') + '…' : line;
     }
 
     window.ClassroomAttention = changeMode => {
@@ -15,10 +15,10 @@
         const modeField = el('wake-mode'), status = el('wake-status'), control = el('wake-control');
         const wake = window.isSecureContext ? window.navigator?.wakeLock : null;
         const supported = typeof wake?.request === 'function';
-        const channels = [
-            {node:el('board-chat-toast'), time:2000, limit:2, queue:[]},
-            {node:el('board-join-toast'), time:1000, limit:3, queue:[]},
-        ];
+        const chat = {node:el('board-chat-toast'), time:6000, limit:2, queue:[]};
+        const join = {node:el('board-join-toast'), time:3000, limit:3, queue:[]};
+        const preview = el('board-chat-preview'), snippet = el('board-chat-snippet'), chatStatus = el('board-chat-status');
+        const detail = el('board-chat-detail'), sender = el('board-chat-sender'), full = el('board-chat-full'), close = el('board-chat-close');
         let mode = 'live', live = false, expanded = false, known = null, chatReady = false;
         let lastInput = Date.now(), idleTimer, lock, pending = false, generation = 0, blockedUntil = 0, wanted = false;
         function release(sentinel) { if (sentinel && !sentinel.released) sentinel.release().catch(() => {}); }
@@ -86,27 +86,61 @@
         });
 
         const canNotify = () => live && expanded && !document.hidden;
+        function hide(channel) {
+            clearTimeout(channel.timer); channel.timer = undefined; channel.current = null;
+            channel.node.hidden = true;
+            if (channel === chat) {
+                detail.hidden = true;
+                preview.hidden = false;
+                preview.setAttribute('aria-expanded','false');
+                snippet.textContent = chatStatus.textContent = sender.textContent = full.textContent = '';
+            } else channel.node.textContent = '';
+        }
         function clearToasts() {
-            for (const channel of channels) {
-                clearTimeout(channel.timer); channel.timer = undefined; channel.queue = [];
-                channel.node.hidden = true; channel.node.textContent = '';
-            }
+            for (const channel of [chat, join]) { channel.queue = []; hide(channel); }
         }
         function display(channel) {
-            if (!canNotify() || !channel.queue.length) return;
-            channel.node.textContent = channel.queue.shift();
+            if (!canNotify() || !channel.queue.length || channel.current) return;
+            const item = channel.current = channel.queue.shift();
             channel.node.hidden = false;
-            channel.timer = setTimeout(() => {
-                channel.timer = undefined; channel.node.hidden = true; channel.node.textContent = '';
-                display(channel);
-            }, channel.time);
+            if (channel === chat) snippet.textContent = chatStatus.textContent = `${item.name}: ${shortMessage(item.text)}`;
+            else channel.node.textContent = item;
+            channel.timer = setTimeout(() => dismiss(channel), channel.time);
         }
-        function notify(channel, texts) {
-            if (!canNotify() || !texts.length) return;
-            channel.queue.push(...texts);
-            if (channel.timer === undefined) display(channel);
+        function dismiss(channel) {
+            const hadFocus = channel === chat && channel.node.contains(document.activeElement);
+            hide(channel);
+            if (hadFocus) el('board-expand')?.focus({preventScroll:true});
+            display(channel);
+        }
+        function notify(channel, items) {
+            if (!canNotify() || !items.length) return;
+            channel.queue.push(...items);
+            display(channel);
             channel.queue = channel.queue.slice(-channel.limit);
         }
+        preview.addEventListener('click', () => {
+            if (!canNotify() || !chat.current || !detail.hidden) return;
+            clearTimeout(chat.timer); chat.timer = undefined;
+            sender.textContent = chat.current.name;
+            full.textContent = chat.current.text;
+            detail.hidden = false;
+            preview.setAttribute('aria-expanded','true');
+            preview.hidden = true;
+            close.focus({preventScroll:true});
+        });
+        close.addEventListener('click', () => dismiss(chat));
+        const dismissOutside = event => {
+            if (!detail.hidden && !chat.node.contains(event.target)) dismiss(chat);
+        };
+        document.addEventListener('pointerdown', dismissOutside, {capture:true,passive:true});
+        document.addEventListener('click', dismissOutside, {capture:true});
+        document.addEventListener('keydown', event => {
+            if (event.key !== 'Escape' || detail.hidden) return;
+            event.preventDefault();
+            event.stopPropagation(); // Close the detail before the board's own Escape handler.
+            dismiss(chat);
+        }, {capture:true});
         document.addEventListener('visibilitychange', () => {
             known = null; chatReady = false; clearToasts();
             if (!document.hidden) blockedUntil = 0;
@@ -132,15 +166,12 @@
             expand(value) { expanded = value; if (!expanded) clearToasts(); },
             snapshot(profiles, messages, more, self) {
                 const next = new Set(Object.keys(profiles || {}).filter(isPupil));
-                if (known) notify(channels[1], [...next].filter(id => id !== self && !known.has(id))
+                if (known) notify(join, [...next].filter(id => id !== self && !known.has(id))
                     .map(id => `${profiles[id].name || 'دانش‌آموز'} وارد کلاس شد`));
                 known = next;
                 if (chatReady && !more) {
                     const rows = messages.filter(m => m.recent === true && isPupil(m.author) && m.author !== self && typeof m.text === 'string');
-                    notify(channels[0], rows.slice(-3).map(row => {
-                        const name = profiles?.[row.author]?.name || 'دانش‌آموز';
-                        return `${name}: ${shortMessage(row.text)}`;
-                    }));
+                    notify(chat, rows.slice(-3).map(row => ({name:profiles?.[row.author]?.name || row.by || 'دانش‌آموز', text:row.text})));
                 }
                 chatReady = !more;
             },

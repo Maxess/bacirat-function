@@ -36,6 +36,7 @@ function cl_room_icon(string $name): string
         'plus' => '<path d="M12 5v14M5 12h14"/>',
         'minus' => '<path d="M5 12h14"/>',
         'check' => '<path d="m5 12 4 4L19 6"/>',
+        'close' => '<path d="m6 6 12 12M18 6 6 18"/>',
         'send' => '<path d="m21 4-5 16-4-7-8-3 17-6Zm-9 9 5-5"/>',
         default => '',
     };
@@ -104,6 +105,7 @@ function cl_room_icon(string $name): string
             <?php endif; ?>
         </div>
         <p id="screen-hint" class="screen-hint" role="status" hidden></p>
+        <p id="screen-warning" class="screen-warning" role="status" hidden></p>
     </header>
     <span id="recording-status" class="sr-only" role="status"></span>
     <?php if ($staff): ?>
@@ -182,51 +184,57 @@ function cl_room_icon(string $name): string
         </section>
         <section class="board-card" id="board" aria-label="تختهٔ کلاس">
             <div class="board-toolbar">
-                <div class="board-heading"><span class="board-signal" aria-hidden="true"><?= cl_room_icon('board') ?></span><h2>تختهٔ کلاس</h2></div>
-                <?php if ($staff): ?><button type="button" class="subtle-button archive-source" id="record-board-display" aria-label="نمایش تخته در ضبط" aria-pressed="false" title="با فعال‌کردن، تخته کنار تصویر اصلی فیلم می‌آید" hidden>نمایش در ضبط</button><?php endif; ?>
-                <div class="ink-tools" id="ink-tools" role="group" aria-label="ابزار نوشتن" hidden>
-                    <button type="button" class="icon-button" id="pen" aria-pressed="true" title="قلم" aria-label="قلم"><?= cl_room_icon('pen') ?></button>
-                    <button type="button" class="icon-button" id="eraser" aria-pressed="false" aria-label="<?= $staff ? 'پاک‌کن خط کامل' : 'پاک‌کن فقط خط‌های خودم' ?>" title="<?= $staff ? 'پاک‌کن خط کامل' : 'پاک‌کن فقط خط‌های خودم' ?>" <?= $staff ? '' : 'hidden' ?>><?= cl_room_icon('erase') ?></button>
-                    <button type="button" class="icon-button" id="board-undo" title="واگرد آخرین خط خودم" aria-label="واگرد آخرین خط خودم" hidden><?= cl_room_icon('undo') ?></button>
-                    <button type="button" class="icon-button" id="board-redo" title="بازانجام آخرین خط خودم" aria-label="بازانجام آخرین خط خودم" hidden><?= cl_room_icon('redo') ?></button>
-                    <?php if ($staff): ?><button type="button" class="icon-button" id="board-laser" aria-pressed="false" title="نشانگر لیزری موقت" aria-label="نشانگر لیزری موقت"><?= cl_room_icon('laser') ?></button><?php endif; ?>
-                    <?php if ($staff): ?><button type="button" class="icon-button" id="pan" aria-pressed="false" title="پیمایش تخته" aria-label="پیمایش تخته" hidden><?= cl_room_icon('pan') ?></button><?php endif; ?>
-                    <label class="color-control" title="رنگ قلم"><span class="sr-only">رنگ قلم</span><input type="color" id="ink-color" value="#278bc7"></label>
-                    <label class="size-control" title="ضخامت قلم"><span class="sr-only">ضخامت قلم</span><input type="range" id="ink-size" min="1" max="36" value="4"></label>
-                    <?php if ($staff): ?><button type="button" class="icon-button" id="board-clear" title="پاک‌کردن همهٔ نوشته‌های این صفحه" aria-label="پاک‌کردن همهٔ نوشته‌های این صفحه"><?= cl_room_icon('trash') ?></button><?php endif; ?>
+                <div class="board-primary">
+                    <div class="board-heading"><span class="board-signal" aria-hidden="true"><?= cl_room_icon('board') ?></span><h2>تختهٔ کلاس</h2></div>
+                    <div class="board-layout-tools" role="group" aria-label="حالت نمایش تخته">
+                        <button type="button" id="board-expand" class="icon-button" aria-label="نمای بزرگ تخته" aria-pressed="false" title="نمای بزرگ تخته"><?= cl_room_icon('expand') . cl_room_icon('shrink') ?></button>
+                        <?php if ($actor['role'] === 'teacher'): ?>
+                        <details id="wake-control" class="wake-control" hidden>
+                            <summary class="icon-button" aria-label="تنظیم روشن‌ماندن صفحهٔ کلاس" title="تنظیم روشن‌ماندن صفحهٔ کلاس"><?= cl_room_icon('wake') ?></summary>
+                            <div class="wake-menu">
+                                <label for="wake-mode">روشن‌ماندن صفحه در این زنگ</label>
+                                <select id="wake-mode" aria-describedby="wake-help wake-status">
+                                    <option value="live">تا وقتی کلاس در جریان است</option>
+                                    <option value="idle">رهاسازی بعد از ۵ دقیقه بدون تعامل</option>
+                                    <option value="system">طبق تنظیمات هر دستگاه</option>
+                                </select>
+                                <p id="wake-help">برای همهٔ زبانه‌های قابل‌دیدن این زنگ. زمان خاموشی یا قفل را خود دستگاه تعیین می‌کند.</p>
+                                <p id="wake-status" role="status"></p>
+                            </div>
+                        </details>
+                        <?php endif; ?>
+                    </div>
                 </div>
-                <?php if ($staff): ?>
-                <div class="page-tools" id="board-pages" role="group" aria-label="صفحه‌های فایل" hidden>
-                    <button type="button" class="icon-button" id="page-prev" aria-label="صفحهٔ قبلی" title="صفحهٔ قبلی" disabled><?= cl_room_icon('prev') ?></button>
-                    <label><span class="sr-only">شمارهٔ صفحه</span><input type="number" id="page-number" min="1" value="1" dir="ltr" disabled></label>
-                    <button type="button" class="icon-button" id="page-go" aria-label="رفتن به صفحه" title="رفتن به صفحه" disabled><?= cl_room_icon('check') ?></button>
-                    <button type="button" class="icon-button" id="page-next" aria-label="صفحهٔ بعدی" title="صفحهٔ بعدی" disabled><?= cl_room_icon('next') ?></button>
-                </div>
-                <button type="button" class="icon-button file-toggle" id="toggle-files" aria-controls="board-files" aria-expanded="false" title="فایل‌های تخته" hidden><?= cl_room_icon('upload') ?><span>فایل</span></button>
-                <?php endif; ?>
-                <div class="view-tools" role="group" aria-label="اندازهٔ نمایش تخته">
+                <div class="board-tools">
+                    <div class="ink-tools" id="ink-tools" role="group" aria-label="ابزار نوشتن" hidden>
+                        <button type="button" class="icon-button" id="pen" aria-pressed="true" title="قلم" aria-label="قلم"><?= cl_room_icon('pen') ?></button>
+                        <button type="button" class="icon-button" id="eraser" aria-pressed="false" aria-label="<?= $staff ? 'پاک‌کن خط کامل' : 'پاک‌کن فقط خط‌های خودم' ?>" title="<?= $staff ? 'پاک‌کن خط کامل' : 'پاک‌کن فقط خط‌های خودم' ?>" <?= $staff ? '' : 'hidden' ?>><?= cl_room_icon('erase') ?></button>
+                        <button type="button" class="icon-button" id="board-undo" title="واگرد آخرین خط خودم" aria-label="واگرد آخرین خط خودم" hidden><?= cl_room_icon('undo') ?></button>
+                        <button type="button" class="icon-button" id="board-redo" title="بازانجام آخرین خط خودم" aria-label="بازانجام آخرین خط خودم" hidden><?= cl_room_icon('redo') ?></button>
+                        <?php if ($staff): ?><button type="button" class="icon-button" id="board-laser" aria-pressed="false" title="نشانگر لیزری موقت" aria-label="نشانگر لیزری موقت"><?= cl_room_icon('laser') ?></button><?php endif; ?>
+                        <?php if ($staff): ?><button type="button" class="icon-button" id="pan" aria-pressed="false" title="پیمایش تخته" aria-label="پیمایش تخته" hidden><?= cl_room_icon('pan') ?></button><?php endif; ?>
+                        <label class="color-control" title="رنگ قلم"><span class="sr-only">رنگ قلم</span><input type="color" id="ink-color" value="#278bc7"></label>
+                        <label class="size-control" title="ضخامت قلم"><span class="sr-only">ضخامت قلم</span><input type="range" id="ink-size" min="1" max="36" value="4"></label>
+                        <?php if ($staff): ?><button type="button" class="icon-button" id="board-clear" title="پاک‌کردن همهٔ نوشته‌های این صفحه" aria-label="پاک‌کردن همهٔ نوشته‌های این صفحه"><?= cl_room_icon('trash') ?></button><?php endif; ?>
+                    </div>
                     <?php if ($staff): ?>
-                    <button type="button" id="board-zoom-out" class="icon-button" aria-label="کوچک‌نمایی تخته" title="کوچک‌نمایی" hidden><?= cl_room_icon('minus') ?></button>
-                    <button type="button" id="board-zoom" class="zoom-value" dir="ltr" aria-label="بازنشانی بزرگ‌نمایی به ۱۰۰ درصد" title="بازنشانی بزرگ‌نمایی" hidden>۱۰۰٪</button>
-                    <button type="button" id="board-zoom-in" class="icon-button" aria-label="بزرگ‌نمایی تخته" title="بزرگ‌نمایی" hidden><?= cl_room_icon('plus') ?></button>
+                    <div class="page-tools" id="board-pages" role="group" aria-label="صفحه‌های فایل" hidden>
+                        <button type="button" class="icon-button" id="page-prev" aria-label="صفحهٔ قبلی" title="صفحهٔ قبلی" disabled><?= cl_room_icon('prev') ?></button>
+                        <label><span class="sr-only">شمارهٔ صفحه</span><input type="number" id="page-number" min="1" value="1" dir="ltr" disabled></label>
+                        <button type="button" class="icon-button" id="page-go" aria-label="رفتن به صفحه" title="رفتن به صفحه" disabled><?= cl_room_icon('check') ?></button>
+                        <button type="button" class="icon-button" id="page-next" aria-label="صفحهٔ بعدی" title="صفحهٔ بعدی" disabled><?= cl_room_icon('next') ?></button>
+                    </div>
+                    <button type="button" class="icon-button file-toggle" id="toggle-files" aria-controls="board-files" aria-expanded="false" title="فایل‌های تخته" hidden><?= cl_room_icon('upload') ?><span>فایل</span></button>
                     <?php endif; ?>
-                    <bdi id="board-zoom-shared" class="board-zoom-shared" dir="ltr" title="بزرگ‌نماییِ نمای ارائه‌دهندهٔ تخته">۱۰۰٪</bdi>
-                    <button type="button" id="board-expand" class="icon-button" aria-label="نمای بزرگ تخته" aria-pressed="false" title="نمای بزرگ تخته"><?= cl_room_icon('expand') . cl_room_icon('shrink') ?></button>
-                    <?php if ($actor['role'] === 'teacher'): ?>
-                    <details id="wake-control" class="wake-control" hidden>
-                        <summary class="icon-button" aria-label="تنظیم روشن‌ماندن صفحهٔ کلاس" title="تنظیم روشن‌ماندن صفحهٔ کلاس"><?= cl_room_icon('wake') ?></summary>
-                        <div class="wake-menu">
-                            <label for="wake-mode">روشن‌ماندن صفحه در این زنگ</label>
-                            <select id="wake-mode" aria-describedby="wake-help wake-status">
-                                <option value="live">تا وقتی کلاس در جریان است</option>
-                                <option value="idle">رهاسازی بعد از ۵ دقیقه بدون تعامل</option>
-                                <option value="system">طبق تنظیمات هر دستگاه</option>
-                            </select>
-                            <p id="wake-help">برای همهٔ زبانه‌های قابل‌دیدن این زنگ. زمان خاموشی یا قفل را خود دستگاه تعیین می‌کند.</p>
-                            <p id="wake-status" role="status"></p>
-                        </div>
-                    </details>
-                    <?php endif; ?>
+                    <div class="view-tools" role="group" aria-label="اندازهٔ نمایش تخته">
+                        <?php if ($staff): ?>
+                        <button type="button" id="board-zoom-out" class="icon-button" aria-label="کوچک‌نمایی تخته" title="کوچک‌نمایی" hidden><?= cl_room_icon('minus') ?></button>
+                        <button type="button" id="board-zoom" class="zoom-value" dir="ltr" aria-label="بازنشانی بزرگ‌نمایی به ۱۰۰ درصد" title="بازنشانی بزرگ‌نمایی" hidden>۱۰۰٪</button>
+                        <button type="button" id="board-zoom-in" class="icon-button" aria-label="بزرگ‌نمایی تخته" title="بزرگ‌نمایی" hidden><?= cl_room_icon('plus') ?></button>
+                        <?php endif; ?>
+                        <bdi id="board-zoom-shared" class="board-zoom-shared" dir="ltr" title="بزرگ‌نماییِ نمای ارائه‌دهندهٔ تخته">۱۰۰٪</bdi>
+                    </div>
+                    <?php if ($staff): ?><button type="button" class="subtle-button archive-source" id="record-board-display" aria-label="نمایش تخته در ضبط" aria-pressed="false" title="با فعال‌کردن، تخته کنار تصویر اصلی فیلم می‌آید" hidden>نمایش در ضبط</button><?php endif; ?>
                 </div>
             </div>
             <?php if ($staff): ?>
@@ -256,11 +264,24 @@ function cl_room_icon(string $name): string
                         <span id="board-laser-local" class="laser-dot" aria-hidden="true" hidden></span>
                     </div></div>
                 </div>
-            </div>
-            <div class="board-notices">
-                <p id="board-screen-hint" class="board-toast" role="status" hidden></p>
-                <p id="board-join-toast" class="board-toast join-toast" role="status" hidden></p>
-                <p id="board-chat-toast" class="board-toast" role="status" hidden></p>
+                <div class="board-notices">
+                    <p id="board-screen-hint" class="board-toast" role="status" hidden></p>
+                    <p id="board-join-toast" class="board-toast join-toast" role="status" hidden></p>
+                    <span id="board-chat-status" class="sr-only" role="status"></span>
+                    <div id="board-chat-toast" class="board-toast chat-toast" hidden>
+                        <button type="button" id="board-chat-preview" aria-controls="board-chat-detail" aria-expanded="false">
+                            <?= cl_room_icon('chat') ?><bdi id="board-chat-snippet"></bdi>
+                            <span class="sr-only">نمایش متن کامل</span><?= cl_room_icon('expand') ?>
+                        </button>
+                        <section id="board-chat-detail" aria-label="متن کامل پیام دانش‌آموز" hidden>
+                            <div class="board-chat-head">
+                                <bdi id="board-chat-sender"></bdi>
+                                <button type="button" id="board-chat-close" class="icon-button" aria-label="بستن پیام" title="بستن پیام"><?= cl_room_icon('close') ?></button>
+                            </div>
+                            <p id="board-chat-full" dir="auto" tabindex="0"></p>
+                        </section>
+                    </div>
+                </div>
             </div>
             <div class="board-footer" id="board-footer" hidden>
                 <bdi class="board-page" id="board-page-label" dir="ltr" aria-label="شمارهٔ صفحهٔ تخته"></bdi>

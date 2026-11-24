@@ -651,9 +651,11 @@ foreach ($send as [$provider,$target,$text]) {
     must(str_contains($text, "\nتاریخ: چهارشنبه ۱۴۰۵/۰۸/۲۷\n") && !str_contains($text, '(تهران)') && !str_contains($text, '2026-11-18'),
         'bot date is Shamsi without a timezone suffix');
     must(str_contains($text, "\nساعت برگزاری: ۰۸:۳۰ تا ۰۸:۳۰\n"), 'bot wall clock uses Tehran, separate from verified presence duration');
-    $arrival = $target === '333' ? 'ثبت نشده' : '۰۸:۳۰:۰۹';
-    must(str_contains($text,"\nاولین حضور تأییدشده: $arrival\nمدت حضور: ۰ دقیقه حضور از ۰ دقیقه کلاس") && !str_contains($text,'تهران'),
-        'bot distinguishes a real first clock from absence, omits the timezone and prints whole minutes');
+    if ($target === '333') {
+        must(str_ends_with($text,"\nمدت حضور: دانش‌آموز غایب بوده است.") && !str_contains($text,'اولین حضور'),
+            'a no-show gets the explicit absence line with no invented arrival');
+    } else must(str_contains($text,"\nاولین حضور تأییدشده: ۰۸:۳۰:۰۹\nمدت حضور: ۰ دقیقه حضور از ۰ دقیقه کلاس") && !str_contains($text,'تهران'),
+        'without a minimum, the verified first clock and the original whole-minute summary remain');
 }
 
 $exampleStart = (new DateTimeImmutable('2026-11-21 08:00:00', new DateTimeZone('Asia/Tehran')))->getTimestamp();
@@ -669,6 +671,34 @@ must(cl_attendance_text($example,1) === <<<'TEXT'
 مدت حضور: ۳۰ دقیقه حضور از ۴۰ دقیقه کلاس
 زمان انتظار و وقفهٔ کلاس در این مدت منظور نشده است.
 TEXT, 'full bot layout and active, not wall-clock minutes');
+
+$below = array_replace($example, ['seconds'=>['student-1'=>179], 'attendance_min_minutes'=>5]);
+must(cl_attendance_text($below,1) === <<<'TEXT'
+حضور در کلاس مجازی — حسن محمدی
+هفتم ۱ · ریاضی · زنگ ۱
+تاریخ: شنبه ۱۴۰۵/۰۸/۳۰
+ساعت برگزاری: ۰۸:۰۰ تا ۰۸:۵۰
+اولین حضور تأییدشده: ۰۸:۰۷:۰۰
+مدت حضور: ۲ دقیقه حضور - عملاً دانش‌آموز غایب بوده است.
+زمان انتظار و وقفهٔ کلاس در این مدت منظور نشده است.
+TEXT, 'short attendance is based on credited intervals and still shows a real arrival and actual bell clocks');
+$noShow = array_replace($below, ['seconds'=>[], 'first_seen'=>[]]);
+must(cl_attendance_text($noShow,1) === <<<'TEXT'
+حضور در کلاس مجازی — حسن محمدی
+هفتم ۱ · ریاضی · زنگ ۱
+تاریخ: شنبه ۱۴۰۵/۰۸/۳۰
+ساعت برگزاری: ۰۸:۰۰ تا ۰۸:۵۰
+مدت حضور: دانش‌آموز غایب بوده است.
+TEXT, 'complete absence has no arrival row or fabricated participation');
+foreach ([0=>'۰ دقیقه حضور', 1=>'کمتر از یک دقیقه حضور', 299=>'۴ دقیقه حضور'] as $seconds=>$duration) {
+    $text = cl_attendance_text(array_replace($below, ['seconds'=>['student-1'=>$seconds]]),1);
+    must(str_contains($text,"اولین حضور تأییدشده: ۰۸:۰۷:۰۰\nمدت حضور: $duration - عملاً دانش‌آموز غایب بوده است."),
+        'a verified sighting is not a no-show; compare exact seconds, not elapsed or rounded minutes');
+}
+$equal = cl_attendance_text(array_replace($below, ['seconds'=>['student-1'=>300]]),1);
+must(str_contains($equal,'مدت حضور: ۵ دقیقه حضور از ۴۰ دقیقه کلاس') && !str_contains($equal,'غایب'), 'equality meets the threshold');
+must(str_contains(cl_attendance_text(array_replace($below, ['attendance_min_minutes'=>0]),1),'مدت حضور: ۲ دقیقه حضور از ۴۰ دقیقه کلاس'),
+    'zero turns off only the short-attendance rule');
 
 // Simulated unlink, inactive provider, changed bot, and ambiguous send after the packet was queued.
 $makeNotice = static function (string $provider, string $chat, int $student) use ($s,$cl,$t) {
@@ -984,5 +1014,68 @@ must(!cl_is_friday_test($real) && $real['deadline'] === $fri+9*3600+15*60, 'the 
 denied(409,fn()=>cl_ticket($trial,$real,$priorYear,$bind($real,'PA_StaffOld'),$morning));
 denied(409,fn()=>$trialOpen($priorYear,$first,$morning));
 cl_close_lesson($s,$trial,$real,$morning+1,$rpc);
+
+// Exercise the actual job entrypoint after one close. Both pupils share the same
+// verified private conversation; neither a second bell nor a second job is needed.
+$s->delete('host-pending'); $s->delete('host-outbox');
+$db->exec("INSERT INTO bale_bot_users VALUES ('777',1),('777',1),('777',4)");
+$end = time();
+$paired = array_replace($example, ['id'=>str_repeat('8',32),'class_id'=>10,'teacher'=>1,'teacher_name'=>'دبیر ریاضی','year'=>$year,
+    'room'=>null,'phase'=>'paused','created'=>$end-1000,'started'=>$end-900,'deadline'=>$end+60,'active_seconds'=>600,
+    'first_seen'=>['student-1'=>$end-700], 'seconds'=>['student-1'=>120],'roster'=>['student-1'=>'دانش‌آموز اول','student-4'=>'دانش‌آموز دوم']]);
+$noticeCfg = array_replace($cfg,['enabled'=>true,'notify_school_telegram'=>false,'notify_school_rubika'=>false,'attendance_min_minutes'=>5]);
+$s->put('active','10',['id'=>$paired['id']]);
+cl_close_lesson($s,$noticeCfg,$paired,$end,$rpc);
+must(!$s->get('active','10') && $s->get('lesson',$paired['id'])['attendance_min_minutes'] === 5,
+    'finalize the bell and snapshot its threshold before delivery');
+$delivered=[];
+$failBeforeSend=false;
+$pairedBot = static function (string $provider) use (&$delivered,&$failBeforeSend,$db): ?array {
+    must($provider === 'bale','only an opted-in provider');
+    return ['revision'=>'paired-bale', 'active'=>static fn()=>true,
+        'links'=>static fn($student)=>cl_query($db,'SELECT bale_chat_id FROM bale_bot_users WHERE student_id=? ORDER BY bale_chat_id',[$student])->fetchAll(PDO::FETCH_COLUMN),
+        'private'=>static function ($chat) use (&$failBeforeSend): bool {
+            if ($chat !== '777') return false;
+            if ($failBeforeSend) throw new RuntimeException('simulated pre-send error');
+            return true;
+        },
+        'send'=>static function ($student,$chat,$text) use (&$delivered): bool { $delivered[$student][] = [$chat,$text]; return true; }];
+};
+$runNoticeJob = static function (string $mode) use ($db,$table,$pairedBot,$noticeCfg): void {
+    $_SERVER['HTTPS']='on'; $_SERVER['HTTP_HOST']='school.example.test';
+    $GLOBALS['MTAG_PLUGIN_CONTEXT'] = ['pdo'=>$db,'store'=>$table,'school_bot'=>$pairedBot,'job_mode'=>$mode,
+        'config'=>array_replace($noticeCfg, ['attendance_min_minutes'=>0])]; // Changed since this bell closed.
+    try { require __DIR__ . '/../school-addon/upload/online-classroom/job.php'; }
+    finally { unset($GLOBALS['MTAG_PLUGIN_CONTEXT']); }
+};
+denied(404,fn()=>$runNoticeJob(''));
+$runNoticeJob('friday-cleanup');
+must($delivered === [] && $s->get('host-pending',$paired['id']) !== null, 'Friday cleanup never consumes ordinary notices');
+$runNoticeJob('after-response');
+must(count($delivered)===2 && count($delivered[1])===1 && count($delivered[4])===1
+    && $delivered[1][0][0]==='777' && $delivered[4][0][0]==='777'
+    && str_contains($delivered[1][0][1],"دانش‌آموز اول\n") && str_contains($delivered[1][0][1],'۲ دقیقه حضور - عملاً دانش‌آموز غایب بوده است.')
+    && str_contains($delivered[4][0][1],"دانش‌آموز دوم\n") && str_ends_with($delivered[4][0][1],'مدت حضور: دانش‌آموز غایب بوده است.')
+    && $s->rows('host-pending',10) === [] && $s->rows('host-outbox',10) === [], 'one batch sends two different attendance messages to the shared Bale chat');
+$runNoticeJob('cli');
+must(count($delivered[1])===1 && count($delivered[4])===1, 'the subsequent scheduled job does not duplicate those sends');
+
+$recovery = array_replace($paired,['id'=>str_repeat('9',32),'roster'=>['student-1'=>'دانش‌آموز اول']]);
+cl_close_lesson($s,$noticeCfg,$recovery,$end,$rpc);
+$failBeforeSend=true;
+$runNoticeJob('after-response');
+$retried = $s->rows('host-outbox',10);
+must(count($delivered[1]) === 1 && count($retried) === 1 && reset($retried)['attempt'] === 1
+    && (int)substr((string)array_key_first($retried),0,12) >= $end+60, 'only the pre-send failure is deferred with backoff');
+$failBeforeSend=false;
+$runNoticeJob('cli');
+must(count($delivered[1]) === 1, 'cron does not consume work before it is due');
+// Advance the due key without sleeping or altering the host clock.
+$s->delete('host-outbox',array_key_first($retried));
+$entry = reset($retried);
+$s->put('host-outbox',cl_outbox_key($entry,time()-1),$entry);
+$runNoticeJob('cli');
+must(count($delivered[1]) === 2 && count($delivered[4]) === 1 && $s->rows('host-outbox',10) === [],
+    'once due, cron recovers the deferred recipient without another classroom trigger');
 if ($mysql) foreach ([$table,'academic_years','settings','classes','students','teachers','admins','class_schedules','bale_bot_users','telegram_bot_users'] as $name) $db->exec("DROP TABLE `$name`");
 echo "PASS calendar, access roles, Friday practice, configured and repeat bell windows, native events, trusted presence, waiting/resume, reports, board/chat and conditional school bot delivery\n";

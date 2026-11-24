@@ -18,18 +18,30 @@ function cl_first_presence_clock(array $lesson, string $identity): ?string
     return is_int($at) && $at > 0 ? cl_persian_digits(cl_tehran_clock($at, true)) : null;
 }
 
+function cl_attendance_minimum(array $settings): int
+{
+    return max(0, min(120, (int)($settings['attendance_min_minutes'] ?? 0)));
+}
+
 function cl_attendance_text(array $lesson, int $student): string
 {
     $id = 'student-' . $student;
     $times = cl_lesson_times($lesson);
     $first = cl_first_presence_clock($lesson, $id);
+    $seconds = max(0, (int)($lesson['seconds'][$id] ?? 0));
     $minutes = static fn(int $seconds): string => cl_persian_digits((string)intdiv(max(0, $seconds), 60));
-    return 'حضور در کلاس مجازی — ' . $lesson['roster'][$id] . "\n" . $lesson['class_name'] . ' · ' . $lesson['subject'] . ' · ' . cl_persian_digits($lesson['period'])
+    $header = 'حضور در کلاس مجازی — ' . $lesson['roster'][$id] . "\n" . $lesson['class_name'] . ' · ' . $lesson['subject'] . ' · ' . cl_persian_digits($lesson['period'])
         . (isset($lesson['repeat_of']) ? ' · برگزاری مجدد' : '') . "\nتاریخ: " . cl_display_day($lesson['date'])
-        . "\nساعت برگزاری: " . ($times !== '' ? $times : 'ثبت نشده')
-        . "\nاولین حضور تأییدشده: " . ($first ?? 'ثبت نشده')
-        . "\nمدت حضور: " . $minutes($lesson['seconds'][$id] ?? 0) . ' دقیقه حضور از '
-        . $minutes($lesson['active_seconds']) . " دقیقه کلاس\nزمان انتظار و وقفهٔ کلاس در این مدت منظور نشده است.";
+        . "\nساعت برگزاری: " . ($times !== '' ? $times : 'ثبت نشده');
+    // A verified sighting can precede the first credited interval; old reports can
+    // also have credited time without a stored arrival. Neither is a no-show.
+    if ($seconds === 0 && $first === null) return $header . "\nمدت حضور: دانش‌آموز غایب بوده است.";
+    if ($seconds < 60 * cl_attendance_minimum($lesson)) {
+        $duration = ($seconds > 0 && $seconds < 60 ? 'کمتر از یک دقیقه حضور' : $minutes($seconds) . ' دقیقه حضور')
+            . ' - عملاً دانش‌آموز غایب بوده است.';
+    } else $duration = $minutes($seconds) . ' دقیقه حضور از ' . $minutes($lesson['active_seconds']) . ' دقیقه کلاس';
+    return $header . "\nاولین حضور تأییدشده: " . ($first ?? 'ثبت نشده')
+        . "\nمدت حضور: " . $duration . "\nزمان انتظار و وقفهٔ کلاس در این مدت منظور نشده است.";
 }
 
 function cl_delivery_add(ClassroomStore $s, string $lesson, string $type, int $delta = 1): void

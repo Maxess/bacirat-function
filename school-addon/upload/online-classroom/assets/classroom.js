@@ -45,7 +45,7 @@
     const cameraSource = lk?.Track.Source.Camera, micSource = lk?.Track.Source.Microphone, screenSource = lk?.Track.Source.ScreenShare;
     const profileKey = p => p && `${p.width}×${p.height}/${p.frameRate}/${p.bitrate}`;
     const screenToggle = el('screen-toggle'), screenAction = el('screen-action'), screenVideo = el('screen-video');
-    const screenHint = el('screen-hint'), boardScreenHint = el('board-screen-hint');
+    const screenHint = el('screen-hint'), boardScreenHint = el('board-screen-hint'), screenWarning = el('screen-warning');
     const qualityButton = el('quality-open'), qualityDialog = el('quality-dialog');
     const recordButton = el('record-start'), recordStart = el('record-start-dialog'), recordClose = el('record-close-dialog');
     const recordStatus = el('recording-status');
@@ -58,7 +58,6 @@
         ? 'اجازهٔ مرورگر برای اشتراک صفحه در این برگه بسته است؛ کلاس را دوباره باز کن.'
         : typeof window.navigator?.mediaDevices?.getDisplayMedia !== 'function'
             ? 'این مرورگر امکان اشتراک صفحه ندارد. این محدودیت از مرورگر است، نه اجازهٔ کلاس؛ برای اشتراک از یک مرورگر سازگار روی رایانه وارد شو.' : '';
-    const canCaptureScreen = !screenBlocked;
     const attention = window.ClassroomAttention(changeWake);
     let active = null, connecting = false, busy = false, polling = false, needsRefresh = false, permanent = false, stopped = false;
     let wanted = true, autoStart = staff, optedIntoTest = false, state = {phase:'idle', ready:null}, chatCursor = 0, seconds = {}, admitted = false;
@@ -176,7 +175,10 @@
             if (student(id)) return state.profiles?.[id]?.name || '';
             return active?.room.remoteParticipants.get(id)?.name || '';
         },
-        onExpand:attention.expand,
+        onExpand(value) {
+            if (value && screenWarning) screenWarning.hidden = true;
+            attention.expand(value);
+        },
         publishCue:publishBoardCue,
         resync() { inkAt = Math.min(inkAt, performance.now()+85); schedulePoll(); },
         aimSoon() {
@@ -545,22 +547,24 @@
         const sharing = !!(mine && active.screenTrack);
         const pending = !!mine && (!state.quality?.screen || !mayScreen(local));
         button.hidden = !show;
-        button.disabled = !show || !canCaptureScreen || pending || busy || !!active?.screenBusy || (!!selected && !mine);
+        // In a blocked browser the button only explains the problem, even while a pupil's grant is syncing.
+        button.disabled = !show || (!screenBlocked && pending) || busy || !!active?.screenBusy || (!!selected && !mine);
+        if (screenWarning && (!show || document.hidden || (!!selected && !mine))) screenWarning.hidden = true;
         const label = sharing ? 'توقف اشتراک صفحه' : !!selected && !mine ? 'ارائه‌دهندهٔ دیگری در حال اشتراک است'
             : mine ? 'اشتراک صفحه' : 'آماده‌سازی اشتراک صفحه';
         button.setAttribute('aria-label',label); button.title = label;
         button.setAttribute('aria-pressed',String(sharing));
         button.dataset.prepared = String(!!mine && !sharing);
         if (screenAction) put(screenAction, sharing ? 'توقف اشتراک' : 'اشتراک صفحه');
-        const invited = show && !sharing;
-        const reason = screenBlocked || (pending ? 'در حال همگام‌سازی اجازهٔ اشتراک صفحه…' : '');
+        const invited = show && !sharing && !staff && !screenBlocked;
+        const syncing = pending ? 'در حال همگام‌سازی اجازهٔ اشتراک صفحه…' : '';
         if (screenHint) {
-            const hint = invited ? (staff ? screenBlocked : reason || 'دبیر اجازه داد؛ برای شروع، «اشتراک صفحه» را بزن.') : '';
+            const hint = invited ? syncing || 'دبیر اجازه داد؛ برای شروع، «اشتراک صفحه» را بزن.' : '';
             put(screenHint,hint);
             screenHint.hidden = !hint;
         }
         if (boardScreenHint) {
-            const hint = invited ? (staff ? screenBlocked : reason || 'دبیر اجازهٔ اشتراک صفحه داد. برای شروع به نمای کلاس برگرد.') : '';
+            const hint = invited ? syncing || 'دبیر اجازهٔ اشتراک صفحه داد. برای شروع به نمای کلاس برگرد.' : '';
             put(boardScreenHint,hint);
             boardScreenHint.hidden = !hint;
         }
@@ -1221,10 +1225,26 @@
     screenVideo?.addEventListener('emptied', renderArchiveControls);
     recordBoard?.addEventListener('click', () => setArchiveSource('board'));
     recordScreen?.addEventListener('click', () => setArchiveSource('screen'));
+    if (screenWarning) {
+        document.addEventListener('click', event => {
+            if (!screenWarning.hidden && !screenWarning.contains(event.target) && !screenToggle?.contains(event.target)) screenWarning.hidden = true;
+        }, {capture:true});
+        screenToggle?.addEventListener('keydown', event => {
+            if (event.key === 'Escape') screenWarning.hidden = true;
+        });
+    }
     screenToggle?.addEventListener('click', async () => {
         const link = active, shareVideo = state.quality?.screen;
-        if (!hasAccess() || state.mediaMode === 'audio' || !state.screenEnabled || !shareVideo || !canCaptureScreen || link.screenBusy || busy) return;
+        if (!hasAccess() || state.mediaMode === 'audio' || !state.screenEnabled || link.screenBusy || busy) return;
         if (state.screen && !itsScreen(link)) return;
+        if (screenBlocked) {
+            if (screenWarning) {
+                screenWarning.hidden = !screenWarning.hidden;
+                put(screenWarning, screenWarning.hidden ? '' : screenBlocked);
+            }
+            return; // No reservation, permission change or capture in this browser.
+        }
+        if (!shareVideo) return;
         const local = scope(link), person = link.room.localParticipant;
         link.screenBusy = true;
         render();

@@ -4,6 +4,7 @@ require_once __DIR__ . '/school.php';
 require_once __DIR__ . '/store.php';
 require_once __DIR__ . '/quality.php';
 require_once __DIR__ . '/recording.php';
+require_once __DIR__ . '/notifications.php';
 
 const CL_SAMPLE_TTL = 11;
 const CL_SAMPLE_INTERVAL = 3;
@@ -682,6 +683,8 @@ function cl_finish_lesson(ClassroomStore $s, array $cfg, array $lesson, int $now
             $lesson['ended'] = min($now, $lesson['deadline']);
             foreach (['sample','transport_at','room','pulses','seen','staff','deadline','last_attempt','event_received','profiles','profiles_at','access','camera_codec','media_pending','screen','screen_used','wake_mode','recorder','recording_consent'] as $key) unset($lesson[$key]);
             $lesson['phase'] = 'finished';
+            // This bell's recipients get the same rule even if settings change while notices are queued.
+            $lesson['attendance_min_minutes'] = cl_attendance_minimum($cfg);
             $s->put('lesson', $id, $lesson);
             $key = sprintf('%012d:%s', $lesson['created'], $id);
             $entry = array_intersect_key($lesson, array_flip(['id','class_id','class_name','year','date','period','subject','teacher_name','active_seconds','started','ended','repeat_of']));

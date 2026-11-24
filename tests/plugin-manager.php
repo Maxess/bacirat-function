@@ -602,6 +602,36 @@ try {
         && $schoolSettings['recording_secret'] === $recordingKey && $schoolSettings['bell_hours'] === $hours
         && $schoolSettings['recording_delay_minutes'] === 135, 'existing package can save the school cap without changing keys or the bell/recording policy');
     submit($db,$site,'enable');
+    $beforeV24 = mpm_owned_row($db,$row)['settings'];
+    foreach (['host-pending','host-outbox'] as $bucket) {
+        mpm_query($db,"INSERT INTO `$store` (bucket,item,payload) VALUES (?,?,'{}')",[$bucket,$busyId]);
+        denied(fn()=>submit($db,$site,'prepare-update'));
+        expect(mpm_row($db,$slug)['state'] === 'enabled' && mpm_query($db,"SELECT 1 FROM `$store` WHERE bucket=? AND item=?",[$bucket,$busyId])->fetchColumn() !== false,
+            'guarded site upgrade must not discard either kind of pending attendance work');
+        mpm_query($db,"DELETE FROM `$store` WHERE bucket=? AND item=?",[$bucket,$busyId]);
+    }
+    submit($db,$site,'prepare-update');
+    expect(mpm_install($db,$dir,__DIR__ . '/../artifacts/school-classroom-plugin-v0.4.24.zip'), 'upgrade .23 to the reviewed site-only release');
+    $row = mpm_row($db,$slug);
+    expect(MPM_VERSION === '0.1.30' && $row['version'] === '0.4.24' && mpm_owned_row($db,$row)['settings'] === $beforeV24
+        && mpm_settings($db,$dir,$row) === $schoolSettings && mpm_check_store($db,$row) === $store && $row['owner'] === $oldRow['owner']
+        && mpm_query($db,"SELECT payload FROM `$store` WHERE bucket='lesson' AND item=?",[$oldId])->fetchColumn() === $finishedBefore
+        && mpm_query($db,"SELECT payload FROM `$store` WHERE bucket='record-links' AND item=?",['1404/1405:22'])->fetchColumn() === $linkedGroup
+        && mpm_query($db,"SELECT payload FROM `$store` WHERE bucket='recording' AND item=?",[$historicId])->fetchColumn() === $historicRecording,
+        'site-only upgrade preserves the encrypted settings, ownership, historic reports and Recorder mappings');
+    ob_start(); mpm_render_settings($db,$site,'fixture-form-token',''); $attendanceUI = ob_get_clean();
+    expect(substr_count($attendanceUI,'name="settings[attendance_min_minutes]"') === 1
+        && str_contains($attendanceUI,'name="settings[attendance_min_minutes]" value="0" min="0" max="120"'),
+        'exactly one minute setting, defaulting to no minimum on upgrade without rewriting settings');
+    foreach (['-1','121','1.5','نامعتبر'] as $bad) denied(fn()=>submit($db,$site,'settings',['settings'=>$schoolCapInput + ['attendance_min_minutes'=>$bad]]));
+    expect(mpm_owned_row($db,$row)['settings'] === $beforeV24, 'invalid attendance thresholds do not change settings');
+    submit($db,$site,'settings',['settings'=>$schoolCapInput + ['attendance_min_minutes'=>'5']]);
+    $savedAttendance = mpm_settings($db,$dir,$row);
+    expect($savedAttendance['attendance_min_minutes'] === 5 && $savedAttendance == ($schoolSettings + ['attendance_min_minutes'=>5]),
+        'store an integer threshold along with the existing options');
+    submit($db,$site,'enable');
+    denied(fn()=>mpm_dispatch($db,$site,$slug,'job'));
+    expect(http_response_code()===404, 'attendance recovery remains internal and is not a public job endpoint');
     $_GET = ['view'=>'recordings','class'=>22];
     foreach ([['student_id'=>1],['admin_id'=>2],['admin_id'=>3]] as $unauthorized) {
         $_SESSION = $unauthorized;

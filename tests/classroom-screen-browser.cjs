@@ -153,12 +153,26 @@ test('packaged pupil gets a labelled screen button by mic and camera only after 
     assert.equal(await share.isEnabled(),true);
     assert.match(await hint.textContent(),/دبیر اجازه داد/);
     for (const path of ['/unsupported','/blocked']) {
-        const device=await browser.newPage({viewport:{width:320,height:650}});
+        const device=await browser.newPage({viewport:{width:320,height:650},isMobile:true,hasTouch:true});
         await device.goto(origin+path);
-        await device.locator('#screen-toggle').waitFor({timeout:6500});
-        assert.equal(await device.locator('#screen-toggle').isDisabled(),true);
-        assert.match(await device.locator('#screen-hint').textContent(),path==='/blocked'?/بسته است/:/مرورگر امکان اشتراک صفحه ندارد/);
-        assert.equal(await device.evaluate(()=>window.screenFixture.clicks.length),0);
+        const button=device.locator('#screen-toggle'), warning=device.locator('#screen-warning');
+        const expand=device.locator('#board-expand');
+        await button.waitFor({timeout:6500});
+        assert.equal(await button.isEnabled(),true,'the blocked browser can ask for guidance without a synced SFU permission');
+        assert.equal(await device.locator('#screen-hint').isVisible(),false);
+        assert.equal(await warning.isVisible(),false);
+        await expand.tap();
+        assert.equal(await device.locator('#board-screen-hint').isVisible(),false);
+        await expand.tap();
+        await button.tap();
+        assert.match(await warning.textContent(),path==='/blocked'?/بسته است/:/مرورگر امکان اشتراک صفحه ندارد/);
+        await warning.tap();
+        assert.equal(await warning.isVisible(),true,'inside taps do not dismiss the warning');
+        await device.locator('.room-name').tap();
+        assert.equal(await warning.isVisible(),false,'an outside tap dismisses the warning');
+        await button.tap(); assert.equal(await warning.isVisible(),true);
+        await button.press('Escape'); assert.equal(await warning.isVisible(),false);
+        assert.deepEqual(await device.evaluate(()=>[window.screenFixture.clicks.length,window.screenFixture.published.length]),[0,0]);
         await device.close();
     }
     assert.deepEqual(await teacher.evaluate(()=>window.screenFixture.clicks),[]);
@@ -233,11 +247,14 @@ test('only a recording presenter can compose the archive, apart from live sharin
         return page;
     }
     const phone=await open('/unsupported-staff',320);
-    const share=phone.locator('#screen-toggle');
+    const share=phone.locator('#screen-toggle'), warning=phone.locator('#screen-warning');
     await share.waitFor();
-    assert.ok(await share.isDisabled());
-    assert.match(await phone.locator('#screen-hint').textContent(),/محدودیت از مرورگر است، نه اجازهٔ کلاس/);
+    assert.ok(await share.isEnabled());
+    assert.equal(await warning.isVisible(),false);
+    await share.click();
+    assert.match(await warning.textContent(),/محدودیت از مرورگر است، نه اجازهٔ کلاس/);
     assert.deepEqual(await phone.evaluate(()=>window.screenFixture.clicks),[]);
+    assert.ok(!requests.some(r=>r.input.action==='screen-access'),'no lease reserved by an unsupported teacher');
     await phone.close();
     const [teacher,deputy,student]=await Promise.all([open('/teacher'),open('/admin'),open('/pupil',320)]);
     const btn=teacher.locator('#record-board-display'), shareBtn=teacher.locator('#record-screen-display');
@@ -545,5 +562,103 @@ test('manager-led board restores real upload, zoom and grants; the arriving teac
     const writes=requests.filter(({identity,input})=>identity==='student-1' && !['status','board-sync','ticket'].includes(input.action));
     assert.deepEqual(writes.map(({input})=>input.strokes[0].tool),['pen','erase-stroke']);
     assert.ok(!requests.some(({identity,input})=>identity==='student-1' && input.view));
+    assert.deepEqual(errors,[]);
+});
+
+test('packaged mobile board keeps touch tools accessible and opens only the full pupil chat notice', {skip, timeout:34000}, async t => {
+    const fixture=packaged(t), html=fixture.render('teacher',true), pdf=twoPageBoardPDF();
+    const lesson='mobile-lesson', epoch='mobile-epoch', sid='PA_teacher-1';
+    const doc={id:'a'.repeat(32),mime:'application/pdf',name:'تختهٔ آزمایشی.pdf',bytes:pdf.length,pages:2};
+    let rev=1, pageNumber=1, profiles={'student-1':{name:'احسانی'}};
+    const chat=[{n:1,author:'student-1',by:'احسانی',recent:true,text:'پیام قبلی'}];
+    const {browser,origin}=await serveBrowser(t,async (req,res,url)=>{
+        if (url.pathname==='/teacher') return send(res,'text/html; charset=UTF-8',html);
+        if (url.pathname==='/fixture.js') return send(res,'text/javascript',`(${fakeMedia})('teacher-1','student-1',false);`);
+        if (url.searchParams.get('route')==='content') return send(res,doc.mime,pdf);
+        if (url.searchParams.get('route')==='api') {
+            let content=''; for await (const chunk of req) content+=chunk;
+            const input=JSON.parse(content), admitted=input.sid===sid && input.epoch===epoch && input.lesson===lesson;
+            const board=()=>({rev,cursor:0,write:true,navigate:true,owner:'a'.repeat(16),ops:[],
+                ...(input.board===rev?{}:{reset:true,doc,page:pageNumber,docs:[doc]})});
+            let reply={ok:true};
+            if (input.action==='ticket') Object.assign(reply,{lesson,epoch,url:'wss://fixture.invalid',token:'fixture'});
+            else if (input.action==='status') {
+                Object.assign(reply,{lesson,epoch,phase:'live',ready:true,joinable:true,slot:11,admitted});
+                if (admitted) Object.assign(reply,{profiles,chat:chat.filter(row=>row.n>input.chat),board:board(),wakeMode:'system',wakeControl:true});
+            } else {
+                assert.ok(admitted);
+                if (input.action==='board-sync') reply.board=board();
+                else if (input.action==='board-page') { pageNumber=input.page; reply.boardRev=++rev; }
+                else assert.fail(`unexpected mobile board action ${input.action}`);
+            }
+            return send(res,'application/json',JSON.stringify(reply));
+        }
+        if (!fixture.serve(url,res)) res.writeHead(404).end();
+    });
+    const page=await browser.newPage({viewport:{width:320,height:650},isMobile:true,hasTouch:true});
+    const errors=[];
+    page.on('pageerror',error=>errors.push(error.message));
+    page.setDefaultTimeout(7200);
+    await page.goto(origin+'/teacher');
+    await page.locator('#page-next:enabled').waitFor();
+    await page.getByText('پیام قبلی',{exact:true}).waitFor();
+    const expand=page.locator('#board-expand'), info=page.locator('#board-join-toast'), preview=page.locator('#board-chat-preview');
+    const detail=page.locator('#board-chat-detail'), message=page.locator('#board-chat-full');
+    async function toolsFit(width) {
+        const geometry=await page.locator('.board-toolbar').evaluate(toolbar=>{
+            const tools=[...toolbar.querySelectorAll('button,summary,input')].filter(node=>node.getClientRects().length);
+            return {width:document.documentElement.scrollWidth,
+                tools:tools.map(node=>{ const r=node.getBoundingClientRect(); return [node.id||node.localName,r.left,r.right,r.height]; })};
+        });
+        assert.ok(geometry.width<=width,'no page overflow');
+        for (const [id,left,right,height] of geometry.tools) {
+            assert.ok(left>=0 && right<=width && height>=44,`${id} should fit horizontally and have a 44px touch target`);
+        }
+    }
+    await toolsFit(320);
+    await page.locator('#eraser').tap();
+    assert.equal(await page.locator('#eraser').getAttribute('aria-pressed'),'true');
+    await page.locator('#page-next').tap();
+    await page.waitForFunction(()=>document.getElementById('board-page-label').textContent==='۲');
+    await expand.tap();
+    assert.equal(await expand.getAttribute('aria-pressed'),'true');
+    await toolsFit(320);
+    assert.equal(await preview.isVisible(),false,'chat history is not a new notice');
+    assert.equal(await info.isVisible(),false,'the initial roster is not announced');
+    await page.locator('#board-zoom-in').tap();
+    assert.notEqual(await page.locator('#board-zoom').textContent(),'۱۰۰٪');
+
+    const whole='الف'.repeat(66)+'\nمتن کامل <em>به‌صورت نوشته</em> — '+('ادامهٔ همان پیام دانش‌آموز. '.repeat(16));
+    profiles={...profiles,'student-2':{name:'صادقی'}};
+    chat.push({n:2,author:'student-1',by:'احسانی',recent:true,text:whole});
+    await preview.waitFor();
+    assert.equal(await page.locator('#board-chat-snippet').textContent(),'احسانی: '+whole.slice(0,59)+'…');
+    assert.equal(await info.textContent(),'صادقی وارد کلاس شد');
+    // The join announcement lets board input through; it has no button or detail action.
+    assert.equal(await info.evaluate(node=>getComputedStyle(node).pointerEvents),'none');
+    await preview.tap();
+    assert.equal(await detail.isVisible(),true);
+    assert.equal(await message.textContent(),whole);
+    assert.equal(await message.locator('em').count(),0);
+    await message.tap(); assert.equal(await detail.isVisible(),true);
+    await info.waitFor({state:'hidden'});
+    await page.locator('.board-heading h2').tap();
+    assert.equal(await detail.isVisible(),false,'an outside tap closes the message, not the board');
+    assert.equal(await expand.getAttribute('aria-pressed'),'true');
+    chat.push({n:3,author:'student-1',by:'احسانی',recent:true,text:'پیام دوم'});
+    await preview.tap();
+    assert.equal(await message.textContent(),'پیام دوم');
+    const close=page.getByRole('button',{name:'بستن پیام'});
+    assert.equal(await close.locator('svg.icon-close').count(),1);
+    await close.tap(); assert.equal(await detail.isVisible(),false);
+
+    await page.setViewportSize({width:390,height:740});
+    await toolsFit(390);
+    await page.setViewportSize({width:650,height:320});
+    await toolsFit(650);
+    assert.ok((await page.locator('#board-scroll').boundingBox()).height>=125,'expanded landscape leaves room to draw');
+    await page.locator('#page-prev').tap();
+    await page.waitForFunction(()=>document.getElementById('board-page-label').textContent==='۱');
+    await expand.tap(); assert.equal(await expand.getAttribute('aria-pressed'),'false');
     assert.deepEqual(errors,[]);
 });
