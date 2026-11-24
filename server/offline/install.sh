@@ -1,5 +1,5 @@
 #!/usr/bin/bash
-# Stage verified release files privately. Run from the directory containing the two TLS inputs.
+# Stage verified release files privately. ACME is independent of the offline package installation.
 set -euo pipefail
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C
 unset BASH_ENV ENV CDPATH PYTHONPATH PYTHONHOME APT_CONFIG
@@ -12,7 +12,10 @@ Fresh, dedicated Ubuntu 24.04 LTS amd64 VPS only. Read START-HERE-fa.md first.
   sudo bash baci-classroom-vps-offline/install.sh --check
 Inputs are prompted if omitted: --site https://school.example.ir[/school]
   --media media.example.ir --ipv4 PUBLIC_IPV4
-  --cert ./fullchain.pem --key ./privkey.pem
+TLS: no PEM files -> automatic Let’s Encrypt (direct A record and open TCP 443).
+  --tls auto     force automatic HTTPS; no certificate files required
+  --tls files    no ACME or Internet; defaults to ./fullchain.pem and ./privkey.pem
+  --cert PATH --key PATH   optional paths in files mode
 After install: sudo baci-vps doctor [--online] or sudo baci-vps export
 HELP
     exit
@@ -43,18 +46,22 @@ cp -R -- "$here/." "$work/"
         && sha256sum --strict --check --quiet SHA256SUMS
 ) || fail 'Bundle integrity check failed. Verify the archive, extract again, and keep TLS and other files OUTSIDE its folder.'
 
-# On official VPS images Python is normally installed by cloud-init. In a base
-# without Python, install only its bundled closure before running the full preflight.
-# Serialize that bootstrap with the installer itself.
-exec 9>/run/baci-vps-install.lock
-flock -n 9 || fail 'Another Baci VPS installer is already running.'
+# On official VPS images Python is normally installed by cloud-init. A full
+# install can bootstrap the local Python closure under the same application lock.
+check_only=false
+for arg in "$@"; do
+    if [[ "$arg" == --check ]]; then check_only=true; fi
+done
+if [[ "$check_only" == false ]]; then
+    exec 9>/run/baci-vps-install.lock
+    flock -n 9 || fail 'Another Baci VPS installer is already running.'
+fi
 if [[ ! -x /usr/bin/python3 ]]; then
-    # The full Python preflight runs again before the runtime packages are touched.
+    [[ "$check_only" == false ]] || fail 'Read-only preflight requires the Ubuntu base Python; full install can bootstrap it offline.'
     for path in /opt/school-classroom* /etc/school-classroom* /var/lib/school-classroom* \
         /etc/systemd/system/school-classroom* /usr/local/sbin/baci-vps; do
         [[ ! -e "$path" && ! -L "$path" ]] || fail 'Existing classroom installation found; nothing was overwritten.'
     done
-    for arg in "$@"; do [[ "$arg" != --check ]] || fail 'Read-only preflight requires the Ubuntu base Python; full install can bootstrap it offline.'; done
     /bin/bash "$work/apt-local.sh" "$work" python3
 fi
 /usr/bin/python3 -IB "$work/setup.py" "$@"

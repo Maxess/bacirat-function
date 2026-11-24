@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Install a fresh dedicated classroom VPS from local artifacts, or diagnose it."""
+"""Install a fresh classroom VPS from local packages, with optional automatic public HTTPS."""
 import argparse
 import contextlib
 import grp
@@ -23,13 +23,14 @@ import tarfile
 import tempfile
 import time
 from urllib.parse import urlsplit
+from urllib.request import HTTPSHandler, ProxyHandler, Request, build_opener
 from zipfile import BadZipFile, ZipFile
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))  # python -I: only the verified staging or root-owned install directory.
 import vps_media as media
 
-VERSION = '1.0.0'
+VERSION = '1.1.0'
 APP, CFG, SYSTEMD = media.APP, media.CFG, media.SYSTEMD
 REC = Path('/opt/school-classroom-recorder')
 REC_CFG = Path('/etc/school-classroom-recorder.json')
@@ -41,6 +42,9 @@ STATE = CFG / 'offline-vps.json'
 PAIR = CFG / 'site-pairing.json'
 PAIR_NAME = 'Baci-VPS-pairing.json'
 TLS = CFG / 'tls'
+TRUST_ROOTS = Path('/etc/ssl/certs/ca-certificates.crt')
+ACME_DIRECTORY = 'https://acme-v02.api.letsencrypt.org/directory'
+ACME_WAIT = 150
 SFU = media.SFU_SERVICE
 GATE = 'school-classroom-admission.service'
 HTTPS = 'school-classroom-https.service'
@@ -48,6 +52,7 @@ RECORDER = 'school-classroom-recorder.service'
 RENDERER = 'school-classroom-postprocess.service'
 UNITS = (SFU, GATE, HTTPS, RECORDER, RENDERER)
 ENABLED = UNITS[:-1]  # Renderer only starts as a dependency of Recorder.
+PROGRAM_UNITS = (SFU, GATE, RECORDER, RENDERER)
 REC_PROGRAM = REC / 'releases/0.4.23'
 PATCH = REC_PROGRAM.with_name('0.4.23-renderer-r1')
 RENDER_SOCKET = Path('/run/school-classroom-postprocess/render.sock')
@@ -216,6 +221,55 @@ def fresh_preflight():
              [(APP.parent, 2), (SPOOL.parent, 5), (HERE, 1)]), 'Not enough free space; allow at least 8 GiB free on the system disk.')
 
 
+def tls_selection(mode, cert, key):
+    """Keep existing two-file installs offline, and never fall back from broken inputs to ACME."""
+    if mode == 'auto':
+        need(cert is None and key is None, '--tls auto cannot be combined with --cert or --key.')
+        return 'auto', None, None
+    use_files = mode == 'files' or cert is not None or key is not None
+    cert = cert if cert is not None else Path('fullchain.pem')
+    key = key if key is not None else Path('privkey.pem')
+    present = tuple(os.path.lexists(path) for path in (cert, key))
+    if use_files or any(present):
+        need(all(present), 'TLS files are incomplete. Supply both PEM files, or explicitly choose --tls auto for a new certificate.')
+        return 'files', cert, key
+    return 'auto', None, None
+
+
+def check_media_dns(config):
+    try:
+        found = {entry[4][0] for entry in socket.getaddrinfo(config['media'], 443, type=socket.SOCK_STREAM)}
+    except OSError:
+        found = set()
+    need(found == {config['ipv4']},
+         f"Media DNS is not ready: {config['media']} must point only to {config['ipv4']} "
+         '(one A record, no AAAA or CDN proxy). Wait for DNS, then retry.')
+
+
+def tls_context():
+    context = ssl.create_default_context(cafile=str(TRUST_ROOTS))
+    context.hostname_checks_common_name = False
+    return context
+
+
+def check_acme_access():
+    # A bounded, certificate-verified GET. No account, challenge or certificate order is created here.
+    try:
+        opener = build_opener(ProxyHandler({}), media.NoRedirect(), HTTPSHandler(context=tls_context()))
+        req = Request(ACME_DIRECTORY, headers={'Accept': 'application/json', 'User-Agent': 'Baci-VPS-Setup/' + VERSION})
+        with opener.open(req, timeout=7) as response:
+            raw = response.read(16385)
+            valid = response.status == 200 and len(raw) <= 16384 and response.headers.get_content_type() == 'application/json'
+        directory = json.loads(raw) if valid else None
+        valid = isinstance(directory, dict) and all(
+            isinstance(directory.get(key), str) and directory[key].startswith('https://')
+            for key in ('newNonce', 'newAccount', 'newOrder'))
+    except (OSError, ValueError, http.client.HTTPException):
+        valid = False
+    need(valid, 'Cannot reach the trusted Let’s Encrypt ACME directory. Check VPS outbound HTTPS, DNS and system time, '
+         'or run --tls files with a valid fullchain.pem and privkey.pem for fully offline installation.')
+
+
 def cert_inputs(cert, key):
     chain = read_limited(cert)
     key_data = read_limited(key, private=True)
@@ -235,7 +289,7 @@ def validate_cert(host, chain, key):
         write(fullchain, chain, 0o600)
         write(privkey, key, 0o600)
         label = 'Media TLS certificate (hostname, trust chain, system time or expiration)'
-        run('openssl', 'verify', '-no-CApath', '-no-CAstore', '-CAfile', '/etc/ssl/certs/ca-certificates.crt',
+        run('openssl', 'verify', '-no-CApath', '-no-CAstore', '-CAfile', TRUST_ROOTS,
             '-untrusted', fullchain, '-verify_hostname', host, '-purpose', 'sslserver', fullchain, label=label)
         run('openssl', 'x509', '-in', fullchain, '-noout', '-checkend', '86400', label=label)
         san = run('openssl', 'x509', '-in', fullchain, '-noout', '-ext', 'subjectAltName', output=True, label=label)
@@ -255,15 +309,26 @@ def pairing(config):
 def edge_config(config):
     site = media.caddy_config(config['media'], config['origin'])
     domain, rules = site.split(' {\n', 1)
-    return ('{\n    admin off\n    auto_https off\n    ocsp_stapling off\n    servers {\n        protocols h1 h2\n    }\n}\n\n'
-            f'{domain} {{\n    bind 0.0.0.0\n    tls {TLS}/fullchain.pem {TLS}/privkey.pem\n' + rules)
+    if config.get('tls_mode', 'files') == 'auto':
+        # Direct IPv4 TLS-ALPN-01 on the same 443 port as the application. No port 80,
+        # DNS plugin, provider credential, or ACME client download is needed.
+        automatic = 'disable_redirects'
+        tls = ('    tls {\n        issuer acme {\n'
+               f'            dir {ACME_DIRECTORY}\n'
+               '            disable_http_challenge\n        }\n    }\n')
+    else:
+        automatic = 'off'
+        tls = f'    tls {TLS}/fullchain.pem {TLS}/privkey.pem\n'
+    return (f'{{\n    admin off\n    auto_https {automatic}\n    ocsp_stapling off\n'
+            '    servers {\n        protocols h1 h2\n    }\n}\n\n'
+            f'{domain} {{\n    bind 0.0.0.0\n' + tls + rules)
 
 
 def edge_unit():
-    return media.unit('Baci classroom HTTPS edge (local certificate)',
+    return media.unit('Baci classroom HTTPS edge',
                       f'{APP}/caddy run --config {CFG}/Caddyfile --adapter caddyfile',
                       environment=f'Environment=XDG_DATA_HOME={HTTPS_STATE}\n'
-                                  'UnsetEnvironment=HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy\n'
+                                  'UnsetEnvironment=HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy SSL_CERT_FILE SSL_CERT_DIR\n'
                                   'StateDirectory=school-classroom-https\nStateDirectoryMode=0700\n'
                                   'AmbientCapabilities=CAP_NET_BIND_SERVICE\n'
                                   'LimitCORE=0\n').replace(
@@ -272,7 +337,7 @@ def edge_unit():
 
 
 def deb_install():
-    print('1/4  Installing local Ubuntu packages (no Internet)…', flush=True)
+    print('۱/۴  نصب پیش‌نیازها از خود بسته، بدون دانلود…', flush=True)
     run('/bin/bash', HERE / 'apt-local.sh', HERE, show=True, timeout=900, label='Offline APT (no package removal or downgrade)')
 
 
@@ -362,16 +427,26 @@ def profile_text():
     return f'abi <abi/4.0>,\ninclude <tunables/global>\n\nprofile school-classroom-chromium {CHROME} flags=(unconfined) {{\n    userns,\n}}\n'
 
 
-def probe_edge(config, path, *, method='GET', headers=None, body=b''):
-    # SNI, normal certificate verification and real HTTPS, but never DNS in local checks.
-    host = config['media']
+@contextlib.contextmanager
+def edge_tls(config):
+    # Standard hostname and trust-chain verification, with no DNS in local checks.
     with socket.create_connection(('127.0.0.1', 443), timeout=4) as conn:
-        with ssl.create_default_context().wrap_socket(conn, server_hostname=host) as tls:
-            fields = {'Host': host, 'Connection': 'close', 'Content-Length': str(len(body)), **(headers or {})}
-            tls.sendall((f'{method} {path} HTTP/1.1\r\n' + ''.join(f'{k}: {v}\r\n' for k, v in fields.items()) + '\r\n').encode() + body)
-            with http.client.HTTPResponse(tls) as response:
-                response.begin()
-                return response.status, response.headers, response.read(16385)
+        with tls_context().wrap_socket(conn, server_hostname=config['media']) as tls:
+            yield tls
+
+
+def probe_edge(config, path, *, method='GET', headers=None, body=b''):
+    with edge_tls(config) as tls:
+        fields = {'Host': config['media'], 'Connection': 'close', 'Content-Length': str(len(body)), **(headers or {})}
+        tls.sendall((f'{method} {path} HTTP/1.1\r\n' + ''.join(f'{k}: {v}\r\n' for k, v in fields.items()) + '\r\n').encode() + body)
+        with http.client.HTTPResponse(tls) as response:
+            response.begin()
+            return response.status, response.headers, response.read(16385)
+
+
+def edge_certificate(config):
+    with edge_tls(config) as tls:
+        return tls.getpeercert()['notAfter']
 
 
 def probe_renderer(test=False):
@@ -389,9 +464,22 @@ def probe_renderer(test=False):
          'Sandboxed renderer check failed (Chromium or FFmpeg).')
 
 
-def local_checks(config, *, fresh=False):
-    for name in UNITS:
+def program_checks(*, fresh=False):
+    for name in PROGRAM_UNITS:
         need(info('-p', 'SubState', name) == 'running', f'{name} is not running.')
+    if fresh:
+        need(run(REC_PROGRAM / 'baci-native-receiver', '--check', output=True) == b'baci-rtp/2\n',
+             'Native Recorder failed its compatibility check.')
+        # Verify the private media API early, before submitting a public certificate order.
+        need(not media.local_rooms(media.pilot_deployment()), 'A fresh LiveKit must not already have rooms.')
+    worker = json_file(SPOOL / 'worker.json')['id']
+    need(isinstance(worker, str) and re.fullmatch(r'[a-f0-9]{32}', worker), 'Native Recorder has no valid local identity.')
+    probe_renderer()
+
+
+def local_checks(config):
+    program_checks()
+    need(info('-p', 'SubState', HTTPS) == 'running', f'{HTTPS} is not running.')
     code, _, _ = probe_edge(config, '/healthz')
     need(code == 200, 'HTTPS /healthz did not reach LiveKit.')
     code, _, _ = probe_edge(config, '/rtc')
@@ -402,27 +490,28 @@ def local_checks(config, *, fresh=False):
     code, _, raw = probe_edge(config, '/twirp/livekit.RoomService/ListRooms', method='POST', body=b'{}', headers={
         'Authorization': 'Bearer ' + media.jwt(deployment, video={'roomList': True}), 'Content-Type': 'application/json'})
     need(code == 200 and isinstance(json.loads(raw).get('rooms', []), list), 'Signed local media API check failed.')
-    if fresh:
-        need(run(REC_PROGRAM / 'baci-native-receiver', '--check', output=True) == b'baci-rtp/2\n',
-             'Native Recorder failed its compatibility check.')
-    worker = json_file(SPOOL / 'worker.json')['id']
-    need(isinstance(worker, str) and re.fullmatch(r'[a-f0-9]{32}', worker), 'Native Recorder has no valid local identity.')
-    probe_renderer()
 
 
-def wait_local(config):
-    deadline = time.monotonic() + 28
-    last = 'Local services did not become ready.'
+def wait_ready(check, seconds, message):
+    deadline, last = time.monotonic() + seconds, message
     while time.monotonic() < deadline:
         try:
-            local_checks(config, fresh=True)
-            return
+            return check()
         except Refused as error:
             last = str(error)
-        except (OSError, ValueError, http.client.HTTPException):
-            last = 'Local HTTPS or Recorder readiness check failed.'
+        except (OSError, ValueError, KeyError, http.client.HTTPException):
+            last = message
         time.sleep(1)
     raise Refused(last)
+
+
+def wait_edge(config):
+    automatic = config['tls_mode'] == 'auto'
+    return wait_ready(lambda: edge_certificate(config), ACME_WAIT if automatic else 28,
+                      ('Automatic TLS did not obtain a browser-trusted certificate. '
+                       'Check the public A record, TCP 443 to this VPS, outbound access to Let’s Encrypt and any CAA restrictions. '
+                       'Do not retry repeatedly; see START-HERE-fa.md.')
+                      if automatic else 'Caddy did not serve the supplied trusted certificate on TCP 443.')
 
 
 def safe_remove(path):
@@ -455,7 +544,6 @@ class Fresh:
             run('systemctl', 'disable', *ENABLED)
         if self.starting:
             run('systemctl', 'stop', *UNITS)
-            safe_remove(HTTPS_STATE)
         if self.profile:
             run('apparmor_parser', '-R', PROFILE)
         for path in reversed(self.paths):
@@ -468,7 +556,7 @@ class Fresh:
                 grp.getgrnam(name)
                 run('groupdel', name)
 
-    def apply(self, config, chain, key):
+    def apply(self, config, cert_files):
         keys = pairing(config)
         for name in ACCOUNTS:
             run('useradd', '--system', '--user-group', '--no-create-home', '--home-dir', '/nonexistent', '--shell', '/usr/sbin/nologin', name)
@@ -478,9 +566,12 @@ class Fresh:
         self.folder(CFG)
         self.folder(REC)
         self.folder(SPOOL, mode=0o700, uid=recorder.pw_uid, gid=recorder.pw_gid)
-        mkdir(TLS, 0o750, gid=tls.pw_gid)
-        write(TLS / 'fullchain.pem', chain, 0o640, gid=tls.pw_gid)
-        write(TLS / 'privkey.pem', key, 0o640, gid=tls.pw_gid)
+        self.folder(HTTPS_STATE, mode=0o700, uid=tls.pw_uid, gid=tls.pw_gid)
+        if cert_files is not None:
+            chain, key = cert_files
+            mkdir(TLS, 0o750, gid=tls.pw_gid)
+            write(TLS / 'fullchain.pem', chain, 0o640, gid=tls.pw_gid)
+            write(TLS / 'privkey.pem', key, 0o640, gid=tls.pw_gid)
         media.extract_binary(HERE / 'payload' / media.ASSET, APP / 'livekit-server')
         with tarfile.open(HERE / 'payload' / CADDY_ASSET, 'r:gz') as archive:
             with archive.extractfile('caddy') as source, (APP / 'caddy').open('xb') as out:
@@ -517,15 +608,19 @@ class Fresh:
             label='Caddy local TLS configuration')
         self.starting = True
         run('systemctl', 'daemon-reload')
-        print('3/4  Starting dedicated services and checking local HTTPS and signed media API…', flush=True)
-        run('systemctl', 'start', *ENABLED, timeout=125, label='systemd classroom service startup')
-        wait_local(config)
-        print('4/4  Testing sandboxed Chromium and a real H.264/AAC MP4, without network…', flush=True)
+        print('۳/۴  آزمون رسانه، مرورگر sandbox و ساخت واقعی MP4…', flush=True)
+        run('systemctl', 'start', SFU, GATE, RECORDER, timeout=125, label='systemd classroom service startup')
+        wait_ready(lambda: program_checks(fresh=True), 28, 'Local media or Recorder did not become ready.')
         probe_renderer(test=True)
+        print('۴/۴  ' + ('دریافت و نصب خودکار گواهی عمومی از Let’s Encrypt؛ کمی صبر کن…'
+                        if config['tls_mode'] == 'auto' else 'آزمون HTTPS با گواهی آماده، بدون اینترنت…'), flush=True)
+        run('systemctl', 'start', HTTPS, label='systemd HTTPS service startup')
+        expires = wait_edge(config)
         local_checks(config)
         self.enabling = True
         run('systemctl', 'enable', *ENABLED)
         save_json(STATE, config)
+        print(f"tls={config['tls_mode']} expires={expires}", flush=True)
 
 
 def export_pair():
@@ -550,15 +645,16 @@ def export_pair():
 def doctor(config, online):
     try:
         local_checks(config)
+        expires = edge_certificate(config)
     except (OSError, ValueError, http.client.HTTPException):
         raise Refused('Local readiness check failed (HTTPS, certificate, or Recorder).') from None
     print('local=ok https=ok admission=ok media_api=ok recorder=ok renderer=ok')
+    print(f"tls={config.get('tls_mode', 'files')} expires={expires}")
     if not online:
         return True
     ok = True
     try:
-        ips = {entry[4][0] for entry in socket.getaddrinfo(config['media'], 443, type=socket.SOCK_STREAM)}
-        need(ips == {config['ipv4']}, 'Media DNS must resolve only to the chosen VPS IPv4 (A, no AAAA/proxy).')
+        check_media_dns(config)
         print('media_dns=ok')
     except (Refused, OSError):
         print('media_dns=not_verified (check A record, remove AAAA/proxy, wait for propagation)')
@@ -588,7 +684,7 @@ def doctor(config, online):
 
 def main(argv=None):
     installed = HERE == APP
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     if installed:
         sub = parser.add_subparsers(dest='action', required=True)
         sub.add_parser('doctor', help='local read-only checks').add_argument('--online', action='store_true', help='also verify DNS and the school endpoints')
@@ -597,8 +693,9 @@ def main(argv=None):
         parser.add_argument('--site')
         parser.add_argument('--media')
         parser.add_argument('--ipv4')
-        parser.add_argument('--cert', type=Path, default=Path('fullchain.pem'))
-        parser.add_argument('--key', type=Path, default=Path('privkey.pem'))
+        parser.add_argument('--tls', choices=('auto', 'files'), help='automatic Let’s Encrypt, or fully offline with two PEM files')
+        parser.add_argument('--cert', type=Path, help='in files mode: default ./fullchain.pem')
+        parser.add_argument('--key', type=Path, help='in files mode: default ./privkey.pem, mode 0600')
         parser.add_argument('--check', action='store_true', help='read-only fresh VPS, bundle and TLS preflight')
     args = parser.parse_args(argv)
     os.umask(0o077)
@@ -615,25 +712,45 @@ def main(argv=None):
         need(not installed, 'No completed offline installation was found.')
         fresh_preflight()
         verify_payloads()
-        config = names(prompt(args.site, 'School website (HTTPS; include any subfolder)'),
-                       prompt(args.media, 'Media DNS name (e.g. media.example.ir)'),
-                       prompt(args.ipv4, 'VPS public IPv4'))
-        chain, key = cert_inputs(args.cert, args.key)
-        if Path('/usr/bin/openssl').is_file() and Path('/etc/ssl/certs/ca-certificates.crt').is_file():
-            validate_cert(config['media'], chain, key)
-        elif args.check:
-            raise Refused('Ubuntu base has no OpenSSL/trust store; full install supplies both offline.')
+        config = names(prompt(args.site, 'نشانی HTTPS خودِ سایت مدرسه، با زیرپوشه اگر دارد (نمونه: https://school.example.ir/baci)'),
+                       prompt(args.media, 'نام زیردامنهٔ رسانه بدون https (نمونه: class.example.ir)'),
+                       prompt(args.ipv4, 'IPv4 عمومی VPS جدید از پنل ارائه‌دهنده'))
+        mode, cert, key = tls_selection(args.tls, args.cert, args.key)
+        config['tls_mode'] = mode
+        cert_files = None
+        have_trust = TRUST_ROOTS.is_file()
+        if mode == 'files':
+            cert_files = cert_inputs(cert, key)
+            if Path('/usr/bin/openssl').is_file() and have_trust:
+                validate_cert(config['media'], *cert_files)
+            elif args.check:
+                raise Refused('Ubuntu base has no OpenSSL/trust store; full install supplies both offline.')
+        else:
+            print('حالت SSL خودکار: بررسی DNS و دسترسی HTTPS به Let’s Encrypt…', flush=True)
+            check_media_dns(config)
+            if have_trust:
+                check_acme_access()
+            elif args.check:
+                raise Refused('The Ubuntu base has no trust store; full install supplies it before ACME.')
         if args.check:
-            print('preflight=ok (local only; DNS, provider firewall and school pairing are separate)')
+            suffix = ('DNS and ACME directory reachable; no certificate was ordered; check incoming TCP 443 in the provider panel'
+                      if mode == 'auto' else 'local files only; DNS, firewall and pairing are separate')
+            print(f'preflight=ok tls={mode} ({suffix})')
             return 0
         deb_install()
-        validate_cert(config['media'], chain, key)
+        if mode == 'files':
+            validate_cert(config['media'], *cert_files)
+        else:
+            # Recheck after apt, before creating users, files or any certificate order.
+            check_media_dns(config)
+            if not have_trust:
+                check_acme_access()
         fresh_preflight()
-        print('2/4  Installing verified LiveKit, HTTPS edge and Recorder runtimes…', flush=True)
+        print('۲/۴  نصب سرویس‌های کلاس، ضبط و HTTPS…', flush=True)
         txn = Fresh()
-        txn.apply(config, chain, key)
+        txn.apply(config, cert_files)
         txn = None  # The durable install is complete; do not undo it if exporting fails.
-        print('installation=ok local_https=ok renderer_mp4=ok. School pairing and public DNS/firewall still need confirmation.')
+        print(f"installation=ok tls={mode} local_https=ok renderer_mp4=ok. فایل اتصال را فقط در پنل مدرسه بارگذاری کن.")
         return 0 if export_pair() else 1
     except (Refused, OSError, ValueError, KeyboardInterrupt, EOFError, KeyError, http.client.HTTPException, sp.SubprocessError, tarfile.TarError, BadZipFile) as error:
         if txn:

@@ -1,4 +1,4 @@
-name: Publish verified offline VPS
+name: Publish verified classroom VPS
 on:
   push:
     paths:
@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           persist-credentials: false
-      - name: Publish only the bytes from the successful isolated VM rehearsal
+      - name: Publish only the bytes from the successful isolated VM rehearsals
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

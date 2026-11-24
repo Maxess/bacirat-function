@@ -1,4 +1,4 @@
-name: Offline classroom VPS
+name: Classroom VPS installer
 on:
   push:
     paths:
@@ -12,14 +12,15 @@ on:
       - plugin-manager/plugins/school-plugins.php
       - tests/*vps*offline*
       - tests/fixtures/vps-offline-peer.py
+      - tests/fixtures/vps-acme-gateway.py
       - tests/plugin-manager.php
       - artifacts/*pairing*.zip
 permissions:
   contents: read
 jobs:
-  ubuntu-noble-offline:
+  ubuntu-noble-installer:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -66,13 +67,15 @@ jobs:
           trap 'while IFS= read -r line; do echo "::error title=Bundle build::$line"; done < <(tail -20 "$log")' ERR
           python3 -u scripts/build-vps-offline.py "$RUNNER_TEMP/vps-release" 2>&1 | tee "$log"
           grep -E '^Ubuntu dependency inventory:|^[0-9a-f]{64}  ' "$log" | while IFS= read -r line; do echo "::notice title=Bundle manifest::$line"; done
-      - name: Rehearse the delivered bundle in a fresh Ubuntu VM without Internet
+      - name: Rehearse the exact deliverable in two fresh Ubuntu VMs (offline PEM and real ACME)
         run: |
           set -euo pipefail
-          log="$RUNNER_TEMP/vps-rehearsal.log"
-          trap 'while IFS= read -r line; do echo "::error title=VPS rehearsal::$line"; done < <(grep -E "Baci VPS:|^VM rehearsal|^Error|failed|not found|^Traceback|sha256sum|^.*line [0-9]+" "$log" | tail -22)' ERR
-          bash scripts/test-vps-offline-vm.sh "$RUNNER_TEMP"/vps-release/*amd64.tar.gz 2>&1 | tee "$log"
-          grep -E '^VM passed:|^VM baseline|^No VM Internet' "$log" | while IFS= read -r line; do echo "::notice title=Isolated VPS test::$line"; done
+          for mode in files auto; do
+            log="$RUNNER_TEMP/vps-rehearsal-$mode.log"
+            trap 'while IFS= read -r line; do echo "::error title=VPS $mode rehearsal::$line"; done < <(tail -32 "$log")' ERR
+            bash scripts/test-vps-offline-vm.sh "$RUNNER_TEMP"/vps-release/*amd64.tar.gz "$mode" 2>&1 | tee "$log"
+            grep -E '^VM passed:|^VM baseline|^No VM Internet|^Real ACME' "$log" | while IFS= read -r line; do echo "::notice title=Isolated VPS $mode test::$line"; done
+          done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: classroom-vps-offline-verified

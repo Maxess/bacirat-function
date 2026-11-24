@@ -1,12 +1,14 @@
 """Pure checks for the installer/pairing release; distinct from the disconnected VM rehearsal."""
+from contextlib import ExitStack, redirect_stdout, redirect_stderr
+from email.message import Message
 from hashlib import sha256
 import importlib.util
-from io import BytesIO
+from io import BytesIO, StringIO
 from pathlib import Path
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from zipfile import ZipFile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -98,6 +100,110 @@ class OfflineSetupTest(unittest.TestCase):
             self.assertIn('PrivateNetwork=true', renderer)
             self.assertIn('InaccessiblePaths=-/etc/school-classroom-recorder.json', renderer)
             self.assertIn(b"'chromium_sandbox':True", recorder.read('postprocess.py'))
+
+    def test_auto_tls_preserves_routing_and_limits_issuance_to_acme_on_443(self):
+        config = setup.names('https://school.example.ir/sub', 'new.example.ir', '192.0.0.9') | {'tls_mode': 'auto'}
+        caddy = setup.edge_config(config)
+        for line in ('admin off', 'auto_https disable_redirects', 'issuer acme {', 'disable_http_challenge',
+                     f'dir {setup.ACME_DIRECTORY}', 'bind 0.0.0.0', 'protocols h1 h2'):
+            self.assertIn(line, caddy)
+        for line in ('fullchain.pem', 'tls internal', 'on_demand', 'disable_tlsalpn_challenge', 'auto_https off'):
+            self.assertNotIn(line, caddy)
+        self.assertIn('StateDirectory=school-classroom-https\nStateDirectoryMode=0700', setup.edge_unit())
+        self.assertIn(f'XDG_DATA_HOME={setup.HTTPS_STATE}', setup.edge_unit())
+        self.assertEqual(caddy[caddy.index('    @classroomPreflight'):],
+                         setup.media.caddy_config(config['media'], config['origin']).split(' {\n', 1)[1])
+
+    def test_explicit_and_inferred_tls_modes_never_mix(self):
+        for files in (set(), {'fullchain.pem'}, {'fullchain.pem', 'privkey.pem'}):
+            with self.subTest(files=files), patch.object(setup.os.path, 'lexists', side_effect=lambda p: str(p) in files):
+                self.assertEqual(setup.tls_selection('auto', None, None), ('auto', None, None))
+                if not files:
+                    self.assertEqual(setup.tls_selection(None, None, None), ('auto', None, None))
+                elif len(files) == 2:
+                    self.assertEqual(setup.tls_selection(None, None, None), ('files', Path('fullchain.pem'), Path('privkey.pem')))
+                else:
+                    with self.assertRaisesRegex(setup.Refused, 'incomplete'):
+                        setup.tls_selection(None, None, None)
+        with patch.object(setup.os.path, 'lexists', return_value=False), self.assertRaisesRegex(setup.Refused, 'incomplete'):
+            setup.tls_selection('files', None, None)
+        with self.assertRaisesRegex(setup.Refused, 'cannot be combined'):
+            setup.tls_selection('auto', Path('cert.pem'), None)
+        with patch.object(setup.os.path, 'lexists', return_value=True):
+            self.assertEqual(setup.tls_selection(None, Path('cert.pem'), None), ('files', Path('cert.pem'), Path('privkey.pem')))
+
+    def test_media_dns_requires_exact_single_ipv4(self):
+        config = {'media': 'new.example.ir', 'ipv4': '192.0.0.9'}
+        def record(address):
+            return (None, None, None, '', (address, 443))
+        with patch.object(setup.socket, 'getaddrinfo', return_value=[record('192.0.0.9')] * 2):
+            setup.check_media_dns(config)
+        for addresses in [[], ['192.0.0.10'], ['192.0.0.9', '2001:db8::1'], ['192.0.0.9', '192.0.0.10']]:
+            with self.subTest(addresses=addresses), self.assertRaisesRegex(setup.Refused, 'Media DNS is not ready'), \
+                    patch.object(setup.socket, 'getaddrinfo', return_value=[record(ip) for ip in addresses]):
+                setup.check_media_dns(config)
+        with patch.object(setup.socket, 'getaddrinfo', side_effect=OSError), self.assertRaises(setup.Refused):
+            setup.check_media_dns(config)
+
+    def test_acme_preflight_is_a_bounded_verified_directory_get(self):
+        headers = Message()
+        headers['Content-Type'] = 'application/json'
+        response = Mock(status=200, headers=headers)
+        response.read.return_value = b'{"newNonce":"https://a.local/n","newAccount":"https://a.local/a","newOrder":"https://a.local/o"}'
+        for body, exception in [(response.read.return_value, False), (b'{}', True), (b'{' * 16385, True)]:
+            response.read.return_value = body
+            with patch.object(setup, 'tls_context') as ctx, patch.object(setup, 'build_opener') as factory:
+                opener = factory.return_value
+                opener.open.return_value.__enter__.return_value = response
+                if exception:
+                    with self.assertRaisesRegex(setup.Refused, 'Cannot reach the trusted'):
+                        setup.check_acme_access()
+                else:
+                    setup.check_acme_access()
+                self.assertEqual(factory.call_args.args[0].proxies, {})
+                self.assertIsInstance(factory.call_args.args[1], setup.media.NoRedirect)
+                self.assertIs(factory.call_args.args[2]._context, ctx.return_value)
+                request = opener.open.call_args.args[0]
+                self.assertEqual((request.full_url, request.get_method(), request.data), (setup.ACME_DIRECTORY, 'GET', None))
+                self.assertEqual(opener.open.call_args.kwargs, {'timeout': 7})
+                response.read.assert_called_with(16385)
+
+    def test_check_never_writes_and_tls_failure_never_exports_a_pair(self):
+        flags = ['--site', 'https://school.example.ir/sub', '--media', 'new.example.ir', '--ipv4', '192.0.0.9']
+        for mode in ('auto', 'files'):
+            with self.subTest(mode=mode), ExitStack() as stack:
+                mocks = {attr: stack.enter_context(patch.object(setup, attr)) for attr in (
+                    'system_preflight', 'fresh_preflight', 'verify_payloads', 'tls_selection', 'STATE', 'TRUST_ROOTS',
+                    'check_media_dns', 'check_acme_access', 'deb_install', 'Fresh', 'export_pair', 'cert_inputs', 'validate_cert')}
+                stack.enter_context(patch.object(setup.Path, 'is_file', return_value=True))
+                stack.enter_context(patch.object(setup.os, 'umask'))
+                out = stack.enter_context(redirect_stdout(StringIO()))
+                err = stack.enter_context(redirect_stderr(StringIO()))
+                mocks['STATE'].is_file.return_value = False
+                mocks['TRUST_ROOTS'].is_file.return_value = True
+                supplied = (b'certificate', b'key') if mode == 'files' else None
+                mocks['cert_inputs'].return_value = supplied
+                mocks['tls_selection'].return_value = (mode, 'cert.pem', 'key.pem')
+                self.assertEqual(setup.main(flags + ['--check', '--tls', mode]), 0)
+                self.assertIn(f'preflight=ok tls={mode}', out.getvalue())
+                for name in ('deb_install', 'Fresh', 'export_pair'):
+                    mocks[name].assert_not_called()
+                if mode == 'files':
+                    mocks['check_media_dns'].assert_not_called()
+                    mocks['check_acme_access'].assert_not_called()
+                    mocks['validate_cert'].assert_called_once_with('new.example.ir', *supplied)
+                else:
+                    mocks['check_acme_access'].assert_called_once()
+                    mocks['cert_inputs'].assert_not_called()
+                txn = mocks['Fresh'].return_value
+                txn.apply.side_effect = setup.Refused('untrusted media TLS')
+                self.assertEqual(setup.main(flags + ['--tls', mode]), 1)
+                config, actual = txn.apply.call_args.args
+                self.assertEqual((config['tls_mode'], actual), (mode, supplied))
+                self.assertNotIn('installation=ok', out.getvalue())
+                self.assertIn('untrusted media TLS', err.getvalue())
+                txn.cleanup.assert_called_once()
+                mocks['export_pair'].assert_not_called()
 
     def test_fresh_conflict_and_rerun_do_not_migrate(self):
         with tempfile.TemporaryDirectory() as path:

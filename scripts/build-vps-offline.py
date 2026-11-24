@@ -195,6 +195,7 @@ def main():
         shutil.copyfile(site, out / SITE)
         (bundle / 'BUILD.json').write_text(json.dumps({'version': setup.VERSION, 'ubuntu': '24.04', 'arch': 'amd64',
             'git': run('git', 'rev-parse', 'HEAD', cwd=ROOT, text=True, capture_output=True).strip(),
+            'tls_modes': ['auto', 'files'],
             'deb_count': count, 'apt_origin': ARCHIVE, 'pinned_payload_sha256': setup.PAYLOAD, 'payload_origins': origins},
             indent=2, sort_keys=True) + '\n')
         (bundle / 'SHA256SUMS').write_text(checksums((p for p in bundle.rglob('*') if p.is_file()), bundle))
@@ -202,7 +203,7 @@ def main():
         tar(root, source_folder.name, out / f'{NAME}-ubuntu-source.tar', gzip=False)
         (out / f'{NAME}-SHA256SUMS.txt').write_text(checksums(out.iterdir(), out))
         print((out / f'{NAME}-SHA256SUMS.txt').read_text(), end='')
-        print('Build complete; do not publish before the isolated systemd VPS rehearsal.')
+        print('Build complete; do not publish before the isolated Ubuntu rehearsals of both TLS modes.')
 
 
 if __name__ == '__main__':

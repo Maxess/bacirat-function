@@ -8,7 +8,8 @@ version=$(jq -er '.version' "$manifest")
 run=$(jq -er '.run_id' "$manifest")
 commit=$(jq -er '.commit' "$manifest")
 checksums=$(jq -er '.checksums_sha256' "$manifest")
-[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$run" =~ ^[0-9]+$ && "$commit" =~ ^[a-f0-9]{40}$ && "$checksums" =~ ^[a-f0-9]{64}$ ]]
+installer=$(jq -er '.installer_sha256' "$manifest")
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$run" =~ ^[0-9]+$ && "$commit" =~ ^[a-f0-9]{40}$ && "$checksums" =~ ^[a-f0-9]{64}$ && "$installer" =~ ^[a-f0-9]{64}$ ]]
 name="baci-classroom-vps-offline-v$version-ubuntu24.04-amd64"
 tag="vps-offline-v$version"
 base="https://github.com/$repo/actions/runs/$run"
@@ -30,8 +31,10 @@ stage=check-published-inventory
     cmp <(printf '%s\n' "$name.tar.gz" "$name-ubuntu-source.tar" 'baci-classroom-site-pairing-v0.1.31.zip' | sort) \
         <(cut -c67- "$sha_file" | sort)
     sha256sum --check --strict "$sha_file"
+    grep -Fxq "$installer  $name.tar.gz" "$sha_file"
     BUILD=$(tar -xOf "$name.tar.gz" baci-classroom-vps-offline/BUILD.json)
-    jq -e --arg sha "$commit" --arg ver "$version" '.git == $sha and .version == $ver and .arch == "amd64" and .ubuntu == "24.04"' <<< "$BUILD" >/dev/null
+    jq -e --arg sha "$commit" --arg ver "$version" '.git == $sha and .version == $ver and .arch == "amd64" and .ubuntu == "24.04"
+        and .tls_modes == ["auto", "files"]' <<< "$BUILD" >/dev/null
 )
 stage=prepare-corresponding-source-assets
 # GitHub Releases cap a single asset at 2 GiB. The corresponding source for
@@ -64,18 +67,18 @@ if gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
     exit 1
 fi
 cat > "$work/notes.md" <<EOF_NOTES
-## نصب آفلاین VPS تازه — Ubuntu 24.04 LTS amd64
+## نصب VPS تازه با SSL خودکار یا کاملاً آفلاین — Ubuntu 24.04 LTS amd64
 
 - **برای نصب روی VPS** فقط \`$name.tar.gz\` را بگیر. \`START-HERE-fa.md\` داخل آرشیو و [راهنمای فارسی](https://github.com/$repo/blob/$commit/server/offline/README-fa.md) مراحل را توضیح می‌دهند.
-- **برای پنل مدرسه** ZIP کوچک \`baci-classroom-site-pairing-v0.1.31.zip\` را روی رایانه باز کن. اگر کلاس ۰٫۴٫۲۴ از قبل نصب است فقط مدیر ۰٫۱٫۳۱ لازم است.
+- **برای سایت تازهٔ مدرسه** در همان راهنما از نصب Baci روی هاست PHP/MySQL شروع کن. ZIP کوچک \`baci-classroom-site-pairing-v0.1.31.zip\` را روی رایانه باز کن؛ مدیر ۰٫۱٫۳۱ و کلاس ۰٫۴٫۲۴ هستند. بستهٔ کامل سایت پایه را از منبع اصلی بگیر.
 - \`*-ubuntu-source.tar\` یا بخش‌های \`*.tar.part-*\` کد منبع متناظر بسته‌های Ubuntu هستند؛ **روی VPS لازم نیستند**. اگر کد منبع را می‌خواهی، بعد از دریافت بخش‌ها و بررسی SHA-256، آن‌ها را با \`cat *-ubuntu-source.tar.part-* > $source_tar\` به هم بچسبان و SHA-256 فایل بازسازی‌شده را هم بررسی کن.
 
-این بسته دانلود در زمان نصب ندارد. DNS، فایروال ارائه‌دهنده و گواهی HTTPS عمومی از پیش آماده لازم‌اند. برای اتصال واقعی به سایت و دستگاه‌ها شبکه لازم است. برای ارتقای VPS قبلی استفاده نشود.
+پیش‌نیازهای نرم‌افزاری از خود بسته نصب می‌شوند. با \`--tls auto\` و رکورد A مستقیم و TCP 443 باز، Caddy گواهی عمومی Let’s Encrypt را می‌گیرد، نصب و تمدید می‌کند؛ به گواهی قبلی یا پورت 80 نیازی نیست. اگر صدور آنلاین ممکن نیست، \`--tls files\` از گواهی آماده استفاده می‌کند و کاملاً آفلاین نصب می‌شود. این نسخه برای ارتقای VPS موجود نیست.
 
-[آزمون همین بایت‌ها روی Ubuntu تازه با خروجی اینترنت بسته]($base) — نصب و اجرای دوباره، TLS و API امضاشده، وب‌هوک، ضربان ضبط، MP4 sandbox‌شده و راه‌اندازی پس از reboot. روی مدرسه، گوشی یا VPS تولید نصب نشده است.
+[آزمون همین بایت‌ها روی دو Ubuntu تازه]($base) — نصب آفلاین با PEM و صدور واقعی TLS-ALPN-01 با CA آزمایشی، HTTPS معتبر، API و وب‌هوک امضاشده، ضربان ضبط، MP4 sandbox‌شده و حفظ گواهی بعد از reboot. صدور زندهٔ Let’s Encrypt و کلاس با گوشی/هاست واقعی به آزمون خودت در محیط مقصد نیاز دارند.
 EOF_NOTES
 gh release create "$tag" "${files[@]}" \
-    --repo "$repo" --target "$commit" --title "Offline classroom VPS v$version · Ubuntu 24.04 amd64" \
+    --repo "$repo" --target "$commit" --title "Classroom VPS v$version · Automatic TLS · Ubuntu 24.04 amd64" \
     --draft --latest=false --notes-file "$work/notes.md"
 stage=verify-github-asset-sha256
 # The REST release id works for both old and new gh CLI versions. The tag
