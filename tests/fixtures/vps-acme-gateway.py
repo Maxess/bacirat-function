@@ -3,6 +3,7 @@
 Runs inside the disposable VM's isolated CA namespace. No test override is shipped
 in the production installer; only the fixture's transport root is trusted in QA.
 """
+from contextlib import closing
 from http.client import HTTPSConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import socket
@@ -38,7 +39,7 @@ class Gateway(BaseHTTPRequestHandler):
             return
         url = '/dir' if self.path == '/directory' and self.command == 'GET' else self.path
         headers = {name: self.headers[name] for name in ('Content-Type', 'User-Agent') if name in self.headers}
-        with Pebble(HOST, timeout=8) as req:
+        with closing(Pebble(HOST, timeout=8)) as req:
             req.request(self.command, url, self.rfile.read(count) if count else None, {'Host': HOST, **headers})
             with req.getresponse() as response:
                 raw = response.read(128 * 1024)
