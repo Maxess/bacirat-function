@@ -47,7 +47,6 @@ class SiteReleaseTest(unittest.TestCase):
             manifest = json.loads(raw)
             previous = json.loads(old.read('plugin.json'))
             manager = update.read(GATEWAY)
-            self.assertEqual(manager, (ROOT / 'plugin-manager' / GATEWAY).read_bytes())
             self.assertIn(b"const MPM_VERSION = '0.1.30';", manager)
             self.assertIn(f"'0.4.24' => '{sha256(raw).hexdigest()}'".encode('ascii'), manager)
             for name in update.namelist():

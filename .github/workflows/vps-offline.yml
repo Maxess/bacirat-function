@@ -4,26 +4,64 @@ on:
     paths:
       - .github/workflows/vps-offline.yml
       - server/offline/**
+      - server/install.py
+      - server/admission.py
       - scripts/build-vps-offline.py
       - scripts/test-vps-offline-vm.sh
+      - scripts/build-managed-school.py
+      - plugin-manager/plugins/school-plugins.php
+      - tests/*vps*offline*
+      - tests/fixtures/vps-offline-peer.py
+      - tests/plugin-manager.php
+      - artifacts/*pairing*.zip
 permissions:
   contents: read
 jobs:
-  verify-upstream-inputs:
+  ubuntu-noble-offline:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
-      - name: Check the exact Playwright browser and Ubuntu VM inputs
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Prepare the CI/VM harness (not part of VPS installation)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -qy --no-install-recommends qemu-system-x86 qemu-utils cloud-image-utils php8.3-cli php8.3-sqlite3 php8.3-zip php8.3-curl
+          if test -c /dev/kvm; then sudo chmod a+rw /dev/kvm; fi
+      - name: Test the site pairing and unchanged school logic
         run: |
           set -euo pipefail
-          cd "$RUNNER_TEMP"
-          curl -fSsL --retry 3 -o headless.zip https://storage.googleapis.com/chrome-for-testing-public/148.0.7778.96/linux64/chrome-headless-shell-linux64.zip
-          echo "::notice title=Browser SHA-256::$(sha256sum headless.zip)"
-          unzip -p headless.zip '*/LICENSE.headless_shell' > license.txt
-          test -s license.txt
-          echo "::notice title=Browser license::$(head -n 1 license.txt)"
-          test -z "$(unzip -Z1 headless.zip | grep -i widevine || true)"
-          image=$(curl -fSsL --retry 3 https://cloud-images.ubuntu.com/minimal/releases/noble/release/SHA256SUMS | grep 'minimal-cloudimg-amd64.img$')
-          echo "::notice title=Ubuntu image::$image"
-          if test -c /dev/kvm; then echo '::notice title=KVM::available'; fi
-          df -h "$RUNNER_TEMP"
+          log="$RUNNER_TEMP/site-tests.log"
+          trap 'while IFS= read -r line; do echo "::error title=Site test::$line"; done < <(tail -14 "$log")' ERR
+          (
+            php8.3 -l plugin-manager/plugins/school-plugins.php
+            php8.3 tests/plugin-manager.php
+            php8.3 tests/classroom-lessons.php
+            php8.3 tests/classroom-recording.php
+            python3 -m unittest discover -s tests -p 'test*.py'
+            python3 scripts/build-managed-school.py --pairing-manager --output-dir "$RUNNER_TEMP/site"
+            cmp "$RUNNER_TEMP/site/baci-classroom-site-pairing-v0.1.31.zip" artifacts/baci-classroom-site-pairing-v0.1.31.zip
+            cmp "$RUNNER_TEMP/site/baci-plugin-manager-update-v0.1.31.zip" artifacts/baci-plugin-manager-update-v0.1.31.zip
+          ) 2>&1 | tee "$log"
+      - name: Build offline installer and matching Ubuntu source archives
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/vps-build.log"
+          trap 'while IFS= read -r line; do echo "::error title=Bundle build::$line"; done < <(tail -20 "$log")' ERR
+          python3 -u scripts/build-vps-offline.py "$RUNNER_TEMP/vps-release" 2>&1 | tee "$log"
+          grep -E '^Ubuntu dependency inventory:|^[0-9a-f]{64}  ' "$log" | while IFS= read -r line; do echo "::notice title=Bundle manifest::$line"; done
+      - name: Rehearse the delivered bundle in a fresh Ubuntu VM without Internet
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/vps-rehearsal.log"
+          trap 'while IFS= read -r line; do echo "::error title=VPS rehearsal::$line"; done < <(grep -E "Baci VPS:|^VM rehearsal|^Error|failed|not found|^Traceback|sha256sum|^.*line [0-9]+" "$log" | tail -22)' ERR
+          bash scripts/test-vps-offline-vm.sh "$RUNNER_TEMP"/vps-release/*amd64.tar.gz 2>&1 | tee "$log"
+          grep -E '^VM passed:|^VM baseline|^No VM Internet' "$log" | while IFS= read -r line; do echo "::notice title=Isolated VPS test::$line"; done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: classroom-vps-offline-verified
+          path: ${{ runner.temp }}/vps-release/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7

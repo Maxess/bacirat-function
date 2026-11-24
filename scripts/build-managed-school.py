@@ -17,7 +17,9 @@ SRC = ROOT / 'school-addon/upload/online-classroom'
 LEGACY = ARTIFACTS / 'school-classroom-pilot-v0.1.0.zip'
 LEGACY_SHA = 'bebc35a02f57346880373a034ee493b757a8017a12812a133ab957358d9de161'
 VERSION = '0.4.24'
-MANAGER_VERSION = '0.1.30'
+MANAGER_VERSION = '0.1.30'  # Published with the unchanged .24 site bundle.
+PAIRING_MANAGER_VERSION = '0.1.31'
+PUBLISHED_MANAGER_SHA = '385e475accd7583efceb9d1decd509c64d126835a3531dcb9c5bded32e2c13bc'
 # Reuse byte-verified SDK/PDF assets; ship the same board implementation as the site.
 RECORDER_BASE = 'baci-classroom-recorder-v0.4.21.zip'
 RECORDER_BASE_SHA = 'ca64a9057dfbb758502f5ca89850fb9256f4a4c30266a7f8dd09864d08612cfe'
@@ -245,6 +247,31 @@ def recorder_release(output_dir, native_build):
     return path
 
 
+def pairing_manager(output_dir):
+    gateway = 'plugins/school-plugins.php'
+    previous = ARTIFACTS / f'baci-plugin-manager-update-v{MANAGER_VERSION}.zip'
+    if hashlib.sha256(previous.read_bytes()).hexdigest() != PUBLISHED_MANAGER_SHA:
+        raise ValueError('Expected the exact previously reviewed Manager updater')
+    with ZipFile(previous) as archive:
+        files = {name: archive.read(name) for name in archive.namelist()}
+    files[gateway] = (HOST / gateway).read_bytes()
+    if f"const MPM_VERSION = '{PAIRING_MANAGER_VERSION}';".encode() not in files[gateway]:
+        raise ValueError('Pairing Manager source and package versions differ')
+    classroom = f'school-classroom-plugin-v{VERSION}.zip'
+    with ZipFile(ARTIFACTS / classroom) as archive:
+        pin = hashlib.sha256(archive.read('plugin.json')).hexdigest()
+        if f"'{VERSION}' => '{pin}'".encode() not in files[gateway]:
+            raise ValueError('Pairing Manager must trust the published Classroom ZIP')
+    output_dir.mkdir(parents=True, exist_ok=True)
+    upgrade = f'baci-plugin-manager-update-v{PAIRING_MANAGER_VERSION}.zip'
+    write_zip(output_dir / upgrade, files)
+    companion = {upgrade: (output_dir / upgrade).read_bytes(), classroom: (ARTIFACTS / classroom).read_bytes(),
+                 'START-HERE-fa.txt': (ROOT / 'server/offline/SITE-PAIRING-fa.txt').read_bytes()}
+    companion['SHA256SUMS.txt'] = ''.join(f'{hashlib.sha256(data).hexdigest()}  {name}\n'
+                                        for name, data in sorted(companion.items())).encode('ascii')
+    write_zip(output_dir / f'baci-classroom-site-pairing-v{PAIRING_MANAGER_VERSION}.zip', companion)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output-dir', type=Path)
@@ -252,6 +279,7 @@ def main():
     mode.add_argument('--recorder-only', action='store_true', help='rebuild the unchanged standalone VPS release')
     mode.add_argument('--renderer-candidate', action='store_true', help='build an offline test ZIP, not a production upgrade')
     mode.add_argument('--renderer-repair', action='store_true', help='rebuild the pinned renderer-only r1 repair ZIP')
+    mode.add_argument('--pairing-manager', action='store_true', help='build Manager with the VPS pairing form from the frozen .24 site release')
     parser.add_argument('--approve-reviewed-manifest', action='store_true', help='replace the trusted manifest pin after reviewing the payload')
     parser.add_argument('--pdf-archive', type=Path, help='use a local copy of the same pinned PDF.js npm archive')
     parser.add_argument('--native-build', type=Path, help='output of scripts/build-recorder-native.py (Linux x86-64)')
@@ -262,6 +290,11 @@ def main():
         (renderer_repair if opts.renderer_repair else renderer_candidate)(opts.output_dir)
         return
     opts.output_dir = opts.output_dir or ARTIFACTS
+    if opts.pairing_manager:
+        if opts.approve_reviewed_manifest or opts.pdf_archive or opts.native_build:
+            parser.error('the pairing updater does not rebuild the published site or VPS programs')
+        pairing_manager(opts.output_dir)
+        return
     if opts.recorder_only:
         if not opts.native_build or opts.approve_reviewed_manifest or opts.pdf_archive:
             parser.error('Recorder rebuilds need --native-build and no site build options')
@@ -273,8 +306,6 @@ def main():
     expected = hashlib.sha256(entries['plugin.json']).hexdigest()
     manager = HOST / 'plugins/school-plugins.php'
     code = manager.read_text(encoding='utf-8')
-    if f"const MPM_VERSION = '{MANAGER_VERSION}';" not in code:
-        raise ValueError('Manager source and archive versions differ')
     pattern = rf"('{re.escape(VERSION)}' => ')([0-9a-f]{{64}}|CATALOG_SHA256_PLACEHOLDER)(')"
     matches = list(re.finditer(pattern, code))
     if len(matches) != 1:
@@ -285,28 +316,16 @@ def main():
             raise ValueError('Managed package differs from approved catalog; review before publishing')
         code = code[:match.start(2)] + expected + code[match.end(2):]
         manager.write_text(code, encoding='utf-8')
-    # Old mtagbot other-settings.php bypassed the Baci hub. Restore the pinned
-    # native entrypoint and footer along with the integrated hub and gateway.
-    update = {'plugins/school-plugins.php': manager.read_bytes(),
-              'includes/classroom-calendar.php': entries['calendar.php'],
-              **{name: (BACI / name).read_bytes() for name in BACI_FILES}}
-    upstream = json.loads((BACI / 'UPSTREAM.json').read_text())
-    for name in ('other-settings.php', 'includes/footer.php'):
-        if hashlib.sha256(update[name]).hexdigest() != upstream['original_files'][name]:
-            raise ValueError(f'Expected the original Baci release file: {name}')
     opts.output_dir.mkdir(parents=True, exist_ok=True)
     classroom = f'school-classroom-plugin-v{VERSION}.zip'
     upgrade = f'baci-plugin-manager-update-v{MANAGER_VERSION}.zip'
-    write_zip(opts.output_dir / classroom, entries)
-    write_zip(opts.output_dir / upgrade, update)
     full_manager = f'baci-plugin-manager-v{MANAGER_VERSION}.zip'
-    write_zip(opts.output_dir / full_manager, {
-        **update, 'README-fa.md': (HOST / 'README-fa.md').read_bytes(),
-        'UPSTREAM.json': (BACI / 'UPSTREAM.json').read_bytes(),
-        **{f'media/{name}': (ROOT / 'server' / name).read_bytes()
-           for name in ('README-fa.md', 'WEBHOOK-fa.md', 'install.py', 'admission.py')},
-        f'patches/{BACI_PATCH}': (HOST / 'patches' / BACI_PATCH).read_bytes(),
-    })
+    write_zip(opts.output_dir / classroom, entries)
+    for name in (upgrade, full_manager):
+        frozen = (ARTIFACTS / name).read_bytes()
+        if name == upgrade and hashlib.sha256(frozen).hexdigest() != PUBLISHED_MANAGER_SHA:
+            raise ValueError('Previously published Manager updater changed')
+        (opts.output_dir / name).write_bytes(frozen)
     # This site-only update must not carry a VPS installer or payload. Existing
     # Recorder 0.4.23 / Renderer r1 services keep the same HTTP protocol and files.
     outer = f'baci-classroom-site-upgrade-v{VERSION}.zip'

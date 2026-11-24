@@ -613,7 +613,7 @@ try {
     submit($db,$site,'prepare-update');
     expect(mpm_install($db,$dir,__DIR__ . '/../artifacts/school-classroom-plugin-v0.4.24.zip'), 'upgrade .23 to the reviewed site-only release');
     $row = mpm_row($db,$slug);
-    expect(MPM_VERSION === '0.1.30' && $row['version'] === '0.4.24' && mpm_owned_row($db,$row)['settings'] === $beforeV24
+    expect(MPM_VERSION === '0.1.31' && $row['version'] === '0.4.24' && mpm_owned_row($db,$row)['settings'] === $beforeV24
         && mpm_settings($db,$dir,$row) === $schoolSettings && mpm_check_store($db,$row) === $store && $row['owner'] === $oldRow['owner']
         && mpm_query($db,"SELECT payload FROM `$store` WHERE bucket='lesson' AND item=?",[$oldId])->fetchColumn() === $finishedBefore
         && mpm_query($db,"SELECT payload FROM `$store` WHERE bucket='record-links' AND item=?",['1404/1405:22'])->fetchColumn() === $linkedGroup
@@ -629,6 +629,39 @@ try {
     $savedAttendance = mpm_settings($db,$dir,$row);
     expect($savedAttendance['attendance_min_minutes'] === 5 && $savedAttendance == ($schoolSettings + ['attendance_min_minutes'=>5]),
         'store an integer threshold along with the existing options');
+    // Pairing changes only the four credentials/endpoint fields, in-place and encrypted.
+    $pairManifest = mpm_manifest_for($dir,$row);
+    $pair = ['format'=>'baci-vps-pairing/1','site'=>$origin . '/school-test','signal_url'=>'wss://new-media.example.ir',
+        'api_key'=>str_repeat('a',24),'api_secret'=>str_repeat('b',64),'recording_secret'=>str_repeat('c',64)];
+    $pairRaw = json_encode($pair, JSON_THROW_ON_ERROR);
+    $GLOBALS['MPM_CLI_SITE_PATH'] = '/school-test';
+    $savedBeforePair = mpm_owned_row($db,$row)['settings'];
+    foreach ([['site'=>$origin], ['site'=>'https://other.example.ir/school-test'], ['signal_url'=>'wss://127.0.0.1'],
+        ['signal_url'=>'wss://test-school.example.ir'], ['signal_url'=>'wss://new-media.example.ir:443'], ['recording_secret'=>$pair['api_secret']],
+        ['api_key'=>[]], ['unexpected'=>true], ['format'=>'baci-vps-pairing/2']] as $bad) {
+        denied(fn()=>mpm_apply_vps_pair($db,$dir,$row,$pairManifest,$origin,json_encode(array_replace($pair,$bad), JSON_THROW_ON_ERROR)));
+    }
+    denied(fn()=>mpm_apply_vps_pair($db,$dir,$row,$pairManifest,$origin,str_repeat('!',4097)));
+    denied(fn()=>mpm_apply_vps_pair($db,$dir,$row,$pairManifest,$origin,'not json'));
+    denied(fn()=>mpm_apply_vps_pair($db,$dir,array_replace($row,['state'=>'enabled']),$pairManifest,$origin,$pairRaw));
+    denied(fn()=>submit($db,$site,'pair-vps',['confirm_vps'=>'yes'])); // No real multipart upload.
+    foreach (['active','record-pending','record-slot','host-pending','host-outbox'] as $bucket) {
+        mpm_query($db,"INSERT INTO `$store` (bucket,item,payload) VALUES (?,'current','{}')",[$bucket]);
+        denied(fn()=>mpm_apply_vps_pair($db,$dir,$row,$pairManifest,$origin,$pairRaw));
+        expect(mpm_query($db,"SELECT payload FROM `$store` WHERE bucket=? AND item='current'",[$bucket])->fetchColumn() === '{}', 'pairing must not delete pending work');
+        mpm_query($db,"DELETE FROM `$store` WHERE bucket=? AND item='current'",[$bucket]);
+    }
+    expect(mpm_owned_row($db,$row)['settings'] === $savedBeforePair, 'no rejected pairing changes settings');
+    expect(str_contains($attendanceUI,'name="vps_pair"') && !str_contains($attendanceUI,$pair['api_secret']), 'show private upload only, no rendered secrets');
+    expect(mpm_apply_vps_pair($db,$dir,$row,$pairManifest,$origin,$pairRaw), 'valid pairing must save');
+    $paired = mpm_owned_row($db,$row)['settings'];
+    expect(!str_contains($paired,$pair['api_secret']) && mpm_settings($db,$dir,$row) === array_replace($savedAttendance,
+        array_intersect_key($pair,array_flip(['signal_url','api_key','api_secret','recording_secret'])))
+        && mpm_row($db,$slug)['state'] === 'disabled', 'encrypt, preserve school settings, and leave explicit activation to the admin');
+    expect(!mpm_apply_vps_pair($db,$dir,$row,$pairManifest,$origin,$pairRaw) && mpm_owned_row($db,$row)['settings'] === $paired,
+        'same pairing is idempotent and does not rotate or rewrite');
+    mpm_write_settings($db,$dir,$row,$savedAttendance);
+    unset($GLOBALS['MPM_CLI_SITE_PATH']);
     submit($db,$site,'enable');
     denied(fn()=>mpm_dispatch($db,$site,$slug,'job'));
     expect(http_response_code()===404, 'attendance recovery remains internal and is not a public job endpoint');

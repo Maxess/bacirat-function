@@ -4,7 +4,9 @@ declare(strict_types=1);
 use BaciClassroom\Calendar;
 
 // School plugin runtime and gateway. Settings are exposed by the reviewed host overlay.
-const MPM_VERSION = '0.1.30';
+const MPM_VERSION = '0.1.31';
+const MPM_VPS_PAIR_MIN = '0.4.24';
+const MPM_VPS_PAIR_LIMIT = 4096;
 const MPM_CLASSROOM_NATIVE = '0.4.0';
 const MPM_CLASSROOM_PUPIL_TRIAL = '0.4.3';
 const MPM_REGISTRY = 'mtg_plugin_registry';
@@ -690,6 +692,65 @@ function mpm_write_settings(PDO $db, string $dir, array $row, array $settings): 
     mpm_query($db, "UPDATE `$table` SET settings=? WHERE id=1 AND owner=?", [base64_encode($iv . $tag . $cipher), $row['owner']]);
 }
 
+function mpm_require_classroom_idle(PDO $db, array $row): void
+{
+    // The exclusive manager lock prevents any classroom route from opening a
+    // lesson or changing the queues between this check and the write.
+    $table = mpm_check_store($db, $row);
+    if (mpm_query($db, "SELECT 1 FROM `$table` WHERE bucket IN ('active','record-pending') OR (bucket='record-slot' AND item='current') LIMIT 1")->fetchColumn() !== false) {
+        throw new MpmNotice('زنگ باز یا ضبط در صف است. صبر کن تا زنگ، ساخت، ارسال و ثبت رسید تمام شود.');
+    }
+    if (mpm_query($db, "SELECT 1 FROM `$table` WHERE bucket IN ('host-pending','host-outbox') LIMIT 1")->fetchColumn() !== false) {
+        throw new MpmNotice('اعلان حضور هنوز در صف است. تا تخلیهٔ صف با Cron هاست صبر کن؛ غیرفعال‌سازی معمولی نزن.');
+    }
+}
+
+function mpm_vps_pair_supported(array $row, array $manifest): bool
+{
+    return mpm_native_release($row) && version_compare($row['version'], MPM_VPS_PAIR_MIN, '>=')
+        && isset($manifest['routes']['events'], $manifest['routes']['recording'])
+        && mpm_has_setting($manifest, 'signal_url', 'wss') && mpm_has_setting($manifest, 'api_key', 'token')
+        && mpm_has_setting($manifest, 'api_secret', 'secret') && mpm_has_setting($manifest, 'recording_secret', 'secret');
+}
+
+function mpm_parse_vps_pair(string $raw, string $siteBase, string $origin): array
+{
+    $invalid = 'فایل اتصال VPS معتبر نیست. فایل JSON اصلی نصب‌گر را بدون ویرایش انتخاب کن.';
+    if ($raw === '' || strlen($raw) > MPM_VPS_PAIR_LIMIT) throw new MpmNotice($invalid);
+    try { $file = json_decode($raw, true, 6, JSON_THROW_ON_ERROR); }
+    catch (JsonException $error) { throw new MpmNotice($invalid); }
+    $schema = ['format','site','signal_url','api_key','api_secret','recording_secret'];
+    if (!is_array($file) || array_diff($schema, array_keys($file)) || count($file) !== count($schema)) throw new MpmNotice($invalid);
+    foreach ($file as $value) if (!is_string($value)) throw new MpmNotice($invalid);
+    // Only installer-generated hex credentials and exact HTTPS site/subpath are accepted.
+    // This POST never contacts the imported hostname or exposes the secrets in a response.
+    if ($file['format'] !== 'baci-vps-pairing/1' || !str_starts_with($file['signal_url'], 'wss://')
+        || !mpm_hostname(substr($file['signal_url'], 6)) || substr($file['signal_url'], 6) === substr($origin, 8)
+        || !preg_match('/^[a-f0-9]{24}$/D', $file['api_key']) || !preg_match('/^[a-f0-9]{64}$/D', $file['api_secret'])
+        || !preg_match('/^[a-f0-9]{64}$/D', $file['recording_secret']) || hash_equals($file['api_secret'], $file['recording_secret'])) {
+        throw new MpmNotice($invalid);
+    }
+    if (!hash_equals($siteBase, $file['site'])) {
+        throw new MpmNotice('این فایل برای نشانی یا زیرپوشهٔ دیگری ساخته شده؛ اتصال فعلی دست‌نخورده ماند.');
+    }
+    unset($file['format'], $file['site']);
+    return $file;
+}
+
+function mpm_apply_vps_pair(PDO $db, string $dir, array $row, array $manifest, string $origin, string $raw): bool
+{
+    if (!mpm_vps_pair_supported($row, $manifest)) throw new MpmNotice('برای اتصال خودکار کلاس ۰٫۴٫۲۴ یا نسخهٔ سازگار لازم است.');
+    if ($row['state'] !== 'disabled') throw new MpmNotice('اول «آماده‌سازی ارتقا (حفظ داده و کنترل صف)» را در زمان بیکاری بزن.');
+    if (mpm_owned_row($db, $row)['runtime'] !== null) throw new MpmNotice('اتاق قبلی هنوز بسته نشده است. برای حفظ داده‌ها اتصال تغییر نکرد.');
+    mpm_require_classroom_idle($db, $row);
+    $link = mpm_parse_vps_pair($raw, mpm_site_base($origin), $origin);
+    $old = mpm_settings($db, $dir, $row);
+    $new = array_replace($old, $link);  // Only the four connection values; not recording consent or delivery switches.
+    if ($new === $old) return false;
+    mpm_write_settings($db, $dir, $row, $new);
+    return true;
+}
+
 function mpm_state(PDO $db, array $row, string $target): void
 {
     mpm_query($db, 'UPDATE ' . MPM_REGISTRY . ' SET state=? WHERE slug=? AND owner=?', [$target, $row['slug'], $row['owner']]);
@@ -1108,19 +1169,25 @@ function mpm_post(PDO $db, ?array $site, string $origin, string $csrf): string
         if ($action === 'disable' || $action === 'prepare-update') {
             if ($action === 'prepare-update') {
                 if (!mpm_native_release($row) || $row['state'] !== 'enabled') throw new MpmNotice('افزونه برای آماده‌سازی ارتقا باید فعال باشد.');
-                // Same exclusive manager lock as disable. No recording route can add a job between this check and deactivation.
-                $table = mpm_check_store($db, $row);
-                if (mpm_query($db, "SELECT 1 FROM `$table` WHERE bucket IN ('active','record-pending') OR (bucket='record-slot' AND item='current') LIMIT 1")->fetchColumn() !== false) {
-                    throw new MpmNotice('زنگ باز یا ضبط در صف است. برای ارتقا صبر کن تا زنگ، ساخت، ارسال و ثبت رسید تمام شود.');
-                }
-                if (mpm_query($db, "SELECT 1 FROM `$table` WHERE bucket IN ('host-pending','host-outbox') LIMIT 1")->fetchColumn() !== false) {
-                    throw new MpmNotice('اعلان حضور هنوز در صف است. تا تخلیهٔ صف با Cron هاست صبر کن؛ برای ارتقا غیرفعال‌سازی معمولی نزن.');
-                }
+                mpm_require_classroom_idle($db, $row);
             }
             mpm_state($db, $row, 'disabled');
             return 'غیرفعال شد؛ داده‌ها و فایل‌ها حفظ شدند.' . mpm_deactivate($db, $site, $dir, $row);
         }
         $manifest = mpm_manifest_for($dir, $row);
+        if ($action === 'pair-vps') {
+            if (($_POST['confirm_vps'] ?? null) !== 'yes') throw new MpmNotice('تغییر اتصال به VPS جدید را تأیید کن.');
+            $upload = $_FILES['vps_pair'] ?? [];
+            $temp = $upload['tmp_name'] ?? null;
+            if (($upload['error'] ?? -1) !== UPLOAD_ERR_OK || !is_string($temp) || !is_uploaded_file($temp)) {
+                throw new MpmNotice('فایل اتصال خصوصی دریافت نشد.');
+            }
+            $raw = @file_get_contents($temp, false, null, 0, MPM_VPS_PAIR_LIMIT + 1);
+            if (!is_string($raw)) throw new MpmNotice('فایل اتصال قابل خواندن نیست.');
+            $changed = mpm_apply_vps_pair($db, $dir, $row, $manifest, $site['origin'], $raw);
+            return ($changed ? 'اتصال خصوصی VPS ذخیره شد. ' : 'همین اتصال از قبل ذخیره شده بود. ')
+                . 'کلاس هنوز غیرفعال است؛ وقتی DNS و VPS آماده‌اند فعالش کن. تنظیمات ضبط و اعلان‌ها تغییر نکردند.';
+        }
         if ($action === 'bell-hours' && mpm_native_release($row) && mpm_has_setting($manifest, 'bell_hours', 'bell-hours')) {
             // The manager lock serializes this update with room requests. Active lessons retain their saved deadline.
             $hours = mpm_bell_hours($_POST['bell_hours'] ?? null);
@@ -1333,6 +1400,15 @@ function mpm_render_settings(PDO $db, ?array $site, string $csrf, string $notice
         echo '<section class="card mb-3"><h2>' . mpm_html($manifest['title'] ?? $slug) . '</h2><p>نسخهٔ ' . mpm_html($row['version']) . ' · ' . mpm_html($labels[$row['state']] ?? 'نامعتبر') . '</p>';
         $compatible = mpm_native_release($row);
         if ($manifest && $compatible && $row['state'] === 'disabled' && $runtime === null) {
+            if (mpm_vps_pair_supported($row, $manifest)) {
+                echo '<form class="mb-3" method="post" enctype="multipart/form-data" action="' . $action . '">';
+                mpm_hidden($csrf, 'pair-vps', $slug);
+                echo '<fieldset><legend>اتصال یک‌مرحله‌ای VPS جدید</legend><p>اگر نصب‌گر آفلاین را اجرا کرده‌ای، فقط فایل خصوصی '
+                    . '<bdi>Baci-VPS-pairing.json</bdi> را انتخاب کن. نیازی به تایپ کلیدها نیست. تنظیمات مدرسه و ارسال‌ها دست‌نخورده می‌مانند.</p>'
+                    . '<label>فایل اتصال <input type="file" name="vps_pair" accept=".json,application/json" required></label>'
+                    . '<label><input type="checkbox" name="confirm_vps" value="yes" required> می‌خواهم اتصال رسانه و ضبط به همین VPS تغییر کند.</label>'
+                    . '<button class="btn btn-primary" type="submit">ذخیرهٔ اتصال VPS</button></fieldset></form>';
+            }
             echo '<form class="mb-3" method="post" action="' . $action . '">';
             mpm_hidden($csrf, 'settings', $slug);
             $group = null;
