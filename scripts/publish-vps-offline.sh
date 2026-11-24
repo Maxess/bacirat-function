@@ -78,7 +78,10 @@ gh release create "$tag" "${files[@]}" \
     --repo "$repo" --target "$commit" --title "Offline classroom VPS v$version · Ubuntu 24.04 amd64" \
     --draft --latest=false --notes-file "$work/notes.md"
 stage=verify-github-asset-sha256
-id=$(gh release view "$tag" --repo "$repo" --json databaseId --jq '.databaseId')
+# The REST release id works for both old and new gh CLI versions. The tag
+# itself may not exist as a Git ref while this release is still a draft.
+id=$(gh api "repos/$repo/releases" --paginate --jq ".[] | select(.tag_name == \"$tag\" and .draft == true) | .id")
+[[ "$id" =~ ^[0-9]+$ ]]
 gh api "repos/$repo/releases/$id/assets" --jq '.[] | [.name,.size,.digest] | @tsv' > "$work/github-assets.tsv"
 for asset in "${assets[@]}"; do
     size=$(stat -c %s "$work/$asset")
