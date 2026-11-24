@@ -1,0 +1,23 @@
+name: Publish verified offline VPS
+on:
+  push:
+    paths:
+      - docs/vps-offline-release.json
+permissions:
+  actions: read
+  contents: write
+jobs:
+  publish:
+    # Explicit checked-in release intent, never on a normal code push or PR.
+    if: startsWith(github.event.head_commit.message, 'Publish offline VPS v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Publish only the bytes from the successful isolated VM rehearsal
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          scripts/publish-vps-offline.sh docs/vps-offline-release.json
