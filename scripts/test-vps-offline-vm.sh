@@ -15,9 +15,9 @@ cleanup() {
     trap - EXIT
     if (( rc != 0 )); then
         echo 'VM rehearsal failed. Diagnostic tail (synthetic environment only):' >&2
-        tail -35 "$work/serial.log" 2>/dev/null || true
+        tail -20 "$work/serial.log" 2>/dev/null || true
         if [[ -n "$vm_pid" ]]; then
-            vm 'sudo journalctl --no-pager -n 45 -u "school-classroom-*" -u "baci-qa-*" -o cat' || true
+            vm 'tail -6 rejected.log preflight.log 2>/dev/null || true; sudo journalctl --no-pager -n 16 -u "school-classroom-*" -o cat; sudo journalctl --no-pager -n 12 -u baci-qa-acme -o cat; sudo journalctl --no-pager -n 8 -u baci-qa-pebble -o cat' || true
         fi
     fi
     if [[ -n "$vm_pid" ]]; then
@@ -107,7 +107,8 @@ else
     send "$work/pebble" "$work/pebble-challtestsrv" "$work/acme.pem" "$work/acme.key" "$root/tests/fixtures/vps-acme-gateway.py"
 fi
 vm "ARCHIVE=$(basename "$archive") MODE=$mode bash -s" <<'GUEST'
-set -euo pipefail
+set -Eeuo pipefail
+trap 'echo "VM guest failure at line $LINENO: $BASH_COMMAND" >&2' ERR
 python3 - <<'PY'
 import socket
 try:
@@ -168,20 +169,27 @@ ACME
     sudo systemd-run --quiet --unit=baci-qa-acme --property=WorkingDirectory="$PWD" "$ip_bin" netns exec schoolqa \
         /usr/bin/python3 "$PWD/vps-acme-gateway.py" qa.crt acme.pem acme.key
     python3 - <<'PY_QA'
-import ssl, time, urllib.request
+import json, ssl, time, urllib.request
 from pathlib import Path
 ctx = ssl.create_default_context(cafile='qa.crt')
-for attempt in range(20):
+client = urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=ctx))
+endpoint = 'https://acme-v02.api.letsencrypt.org'
+for attempt in range(18):
     try:
-        with urllib.request.urlopen('https://acme-v02.api.letsencrypt.org:15000/roots/0', context=ctx, timeout=2) as reply:
+        # Wait for both listeners; one becoming ready does not imply the other is ready.
+        with client.open(endpoint + ':15000/roots/0', timeout=2) as reply:
             data = reply.read(8192)
+        with client.open(endpoint + '/directory', timeout=2) as reply:
+            directory = json.load(reply)
         assert data.startswith(b'-----BEGIN CERTIFICATE-----')
+        assert directory['newOrder'].startswith(endpoint + '/')
         Path('pebble-issuer.crt').write_bytes(data)
+        print('Test-only ACME directory and issuer root are ready.')
         break
-    except OSError:
+    except (OSError, ValueError) as error:
+        if attempt == 17:
+            raise SystemExit('Test CA did not become ready: ' + str(error))
         time.sleep(1)
-else:
-    raise SystemExit('Test CA did not become ready.')
 PY_QA
     sudo install -m 0644 pebble-issuer.crt /usr/local/share/ca-certificates/baci-qa-acme-issuer.crt
     sudo update-ca-certificates >/dev/null
