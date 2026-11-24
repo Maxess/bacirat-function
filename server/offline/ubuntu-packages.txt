@@ -1,0 +1,34 @@
+# Runtime goals; the builder includes their Depends and Pre-Depends closure.
+# Ubuntu Noble amd64 only. No Xvfb: Chromium runs with the headless shell.
+apparmor
+ca-certificates
+ffmpeg
+fontconfig
+fonts-liberation
+fonts-noto-core
+fonts-noto-color-emoji
+openssl
+python3
+python3-venv
+# Playwright 1.60's Ubuntu 24.04 Chromium system dependencies.
+libasound2t64
+libatk-bridge2.0-0t64
+libatk1.0-0t64
+libatspi2.0-0t64
+libcairo2
+libcups2t64
+libdbus-1-3
+libdrm2
+libgbm1
+libglib2.0-0t64
+libnspr4
+libnss3
+libpango-1.0-0
+libx11-6
+libxcb1
+libxcomposite1
+libxdamage1
+libxext6
+libxfixes3
+libxkbcommon0
+libxrandr2

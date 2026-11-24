@@ -1,0 +1,26 @@
+name: Offline classroom VPS
+on:
+  push:
+    paths:
+      - .github/workflows/vps-offline.yml
+      - server/offline/**
+      - scripts/build-vps-offline.py
+      - scripts/test-vps-offline-vm.sh
+permissions:
+  contents: read
+jobs:
+  verify-upstream-inputs:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check the exact Playwright browser and Ubuntu VM inputs
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fSsL --retry 3 -o headless.zip https://storage.googleapis.com/chrome-for-testing-public/148.0.7778.96/linux64/chrome-headless-shell-linux64.zip
+          sha256sum headless.zip
+          unzip -p headless.zip '*/LICENSE.headless_shell' | sed -n '1,23p'
+          test -z "$(unzip -Z1 headless.zip | grep -i widevine || true)"
+          curl -fSsL --retry 3 https://cloud-images.ubuntu.com/minimal/releases/noble/release/SHA256SUMS | grep 'minimal-cloudimg-amd64.img$'
+          ls -l /dev/kvm || true
+          df -h "$RUNNER_TEMP"
