@@ -5,6 +5,7 @@ from hashlib import sha256
 import importlib.util
 from io import BytesIO, StringIO
 from pathlib import Path
+import runpy
 import subprocess
 import tempfile
 import unittest
@@ -48,6 +49,22 @@ class OfflineSetupTest(unittest.TestCase):
             setup.install_profile('compact', setup.COMPACT_RAM_KIB - 1)
         with self.assertRaisesRegex(setup.Refused, 'use --profile live'):
             setup.install_profile('full', 469200)
+
+    def test_compact_encoder_preserves_r1_streams_and_segment_rules(self):
+        compact = runpy.run_path(str(OFFLINE / 'compact-ffmpeg.py'))['command']
+        old = ['-thread_queue_size', '8', '-f', 'matroska', '-threads', '2', '-i', 'pipe:0',
+               '-map', '0:v:0', '-map', '0:a:0', '-c:v', 'libx264', '-threads', '2', '-filter_threads', '1',
+               '-pix_fmt', 'yuv420p', '-maxrate', '640k', '-c:a', 'aac', '-f', 'segment', '-segment_time', '450',
+               '-segment_format', 'mp4', '-segment_format_options', 'movflags=+faststart', 'clip-000-%03d.mp4']
+        new = compact(old)
+        self.assertEqual(new[0], '/usr/bin/ffmpeg')
+        self.assertEqual(new[1:3], ['-thread_queue_size', '2'])
+        self.assertEqual([new[i+1] for i, arg in enumerate(new) if arg == '-threads'], ['1', '1'])
+        self.assertEqual(new[new.index('-tune')+1], 'zerolatency')
+        self.assertEqual(new[new.index('-pix_fmt'):], old[old.index('-pix_fmt'):])
+        self.assertEqual(old[1], '8')
+        with self.assertRaises(ValueError):
+            compact([*old, '-threads', '5'])
 
     def test_live_apt_and_readiness_do_not_touch_recorder_components(self):
         with patch.object(setup, 'run') as run, redirect_stdout(StringIO()):

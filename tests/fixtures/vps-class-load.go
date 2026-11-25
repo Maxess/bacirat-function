@@ -23,7 +23,7 @@ import (
 	"github.com/pion/webrtc/v4/pkg/media/ivfreader"
 )
 
-const roomName = "test-aaaaaaaaaaaaaaaaaaaa-v4-c15-bbbbbbbbbbbbbbbbbbbbbbbb"
+const roomPrefix = "test-aaaaaaaaaaaaaaaaaaaa-v4-c15-"
 const pupilCount = 10
 const interval = 20 * time.Millisecond
 
@@ -139,11 +139,23 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	var tickets map[string]string
-	err = json.NewDecoder(ticketFile).Decode(&tickets)
+	var bell struct {
+		Room    string            `json:"room"`
+		Tickets map[string]string `json:"tickets"`
+	}
+	err = json.NewDecoder(ticketFile).Decode(&bell)
 	_ = ticketFile.Close()
-	if err != nil || len(tickets) != pupilCount+1 {
-		return fmt.Errorf("expected one school join ticket per peer")
+	if err != nil || len(bell.Tickets) != pupilCount+1 {
+		return fmt.Errorf("expected one school-issued join ticket per peer")
+	}
+	var windows int
+	switch bell.Room {
+	case roomPrefix + "bbbbbbbbbbbbbbbbbbbbbbbb":
+		windows = 7
+	case roomPrefix + "dddddddddddddddddddddddd", roomPrefix + "eeeeeeeeeeeeeeeeeeeeeeee":
+		windows = 4 // Still allow a real capture before refusal/revocation.
+	default:
+		return fmt.Errorf("unexpected synthetic room")
 	}
 	cam, err := movie(os.Args[2])
 	if err != nil {
@@ -172,14 +184,14 @@ func run() error {
 	ctx, stop := context.WithTimeout(context.Background(), 115*time.Second)
 	defer stop()
 	api := lksdk.NewRoomServiceClient(pair.URL, pair.Key, pair.Secret)
-	room, err := api.CreateRoom(ctx, &livekit.CreateRoomRequest{Name: roomName, EmptyTimeout: 60, MaxParticipants: pupilCount + 1})
+	room, err := api.CreateRoom(ctx, &livekit.CreateRoomRequest{Name: bell.Room, EmptyTimeout: 60, MaxParticipants: pupilCount + 1})
 	if err != nil || room == nil || room.MaxParticipants != pupilCount+1 {
 		return fmt.Errorf("configure real room cap for teacher plus %d pupils: %v", pupilCount, err)
 	}
 	defer func() {
 		done, finish := context.WithTimeout(context.Background(), 4*time.Second)
 		defer finish()
-		_, _ = api.DeleteRoom(done, &livekit.DeleteRoomRequest{Room: roomName})
+		_, _ = api.DeleteRoom(done, &livekit.DeleteRoomRequest{Room: bell.Room})
 	}()
 	var rooms [pupilCount + 1]*lksdk.Room
 	var errors [pupilCount + 1]error
@@ -187,7 +199,7 @@ func run() error {
 	for start := 0; start <= pupilCount; start += 3 {
 		var group sync.WaitGroup
 		for i := start; i < start+3 && i <= pupilCount; i++ {
-			group.Go(func() { rooms[i], errors[i] = connect(pair, i, tickets[name(i)], streams, &counters) })
+			group.Go(func() { rooms[i], errors[i] = connect(pair, i, bell.Tickets[name(i)], streams, &counters) })
 		}
 		group.Wait()
 		for i := start; i < start+3 && i <= pupilCount; i++ {
@@ -205,7 +217,7 @@ func run() error {
 			allowed = append(allowed, livekit.TrackSource_CAMERA, livekit.TrackSource_SCREEN_SHARE)
 		}
 		if _, err := api.UpdateParticipant(ctx, &livekit.UpdateParticipantRequest{
-			Room: roomName, Identity: name(i), Permission: &livekit.ParticipantPermission{
+			Room: bell.Room, Identity: name(i), Permission: &livekit.ParticipantPermission{
 				CanSubscribe: true, CanPublish: true, CanPublishSources: allowed,
 			},
 		}); err != nil {
@@ -230,7 +242,7 @@ func run() error {
 	defer tick.Stop()
 	var previous, sent [4]uint64
 	var old [pupilCount + 1][4]uint64
-	for step := 0; step <= 3500; step++ {
+	for step := 0; step <= 500*windows; step++ {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -281,7 +293,27 @@ func run() error {
 			}
 		}
 	}
-	return nil
+	// Keep the real peers connected until the school's authenticated close
+	// retires the room. The deferred DeleteRoom exists only for cleanup.
+	if err := os.WriteFile(os.Args[6]+".done", nil, 0600); err != nil {
+		return err
+	}
+	closing, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	poll := time.NewTicker(300 * time.Millisecond)
+	defer poll.Stop()
+	for {
+		select {
+		case <-closing.Done():
+			return fmt.Errorf("school did not retire the occupied room")
+		case <-poll.C:
+			listed, err := api.ListRooms(closing, &livekit.ListRoomsRequest{Names: []string{bell.Room}})
+			if err == nil && len(listed.GetRooms()) == 0 {
+				fmt.Println("QA_LOAD school retired the occupied room")
+				return nil
+			}
+		}
+	}
 }
 
 func main() {

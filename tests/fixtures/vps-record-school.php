@@ -4,8 +4,12 @@
 declare(strict_types=1);
 require __DIR__ . '/../../school-addon/upload/online-classroom/events.php';
 
-const QA_JOB = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
-const QA_ROOM = 'test-aaaaaaaaaaaaaaaaaaaa-v4-c15-bbbbbbbbbbbbbbbbbbbbbbbb';
+const QA_BELLS = [
+    'approve'=>'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    'refuse'=>'dddddddddddddddddddddddddddddddd',
+    'revoke'=>'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+];
+const QA_ROOM_PREFIX = 'test-aaaaaaaaaaaaaaaaaaaa-v4-c15-';
 const QA_DOC = 'cccccccccccccccccccccccccccccccc';
 const QA_GROUP = '-100321';
 const QA_PREFIX = 'https://school.example.test/fixture-bot/';
@@ -36,8 +40,9 @@ $provider = static fn(string $url, array $data) => match (basename($url)) {
     'getChatMember' => ['ok'=>true,'result'=>['status'=>'member','user'=>['id'=>9]]],
     default => throw new RuntimeException('unexpected provider action'),
 };
-$rpc = static function (string $method, string $room, array $data) use ($cfg): array {
-    qa_need($method === 'DeleteRoom' && $room === QA_ROOM, 'only fixture room may be closed');
+$rooms = array_map(static fn(string $id): string => QA_ROOM_PREFIX . substr($id, -24), QA_BELLS);
+$rpc = static function (string $method, string $room, array $data) use ($cfg, $rooms): array {
+    qa_need($method === 'DeleteRoom' && in_array($room, $rooms, true), 'only fixture rooms may be closed');
     return cl_rpc($cfg, $room, $method, $data);
 };
 $now = time();
@@ -45,6 +50,9 @@ $now = time();
 try {
     if (PHP_SAPI === 'cli') {
         $cmd = $argv[1] ?? '';
+        $case = $argv[2] ?? 'approve';
+        $id = QA_BELLS[$case] ?? throw new RuntimeException('unknown fixture bell');
+        $room = $rooms[$case];
         if ($cmd === 'init') {
             $db->exec("CREATE TABLE `$table` (bucket TEXT,item TEXT,payload TEXT,PRIMARY KEY(bucket,item));
                 CREATE TABLE academic_years (year_name TEXT,status INT,is_default INT);
@@ -58,49 +66,62 @@ try {
             cl_rec_set_link($s, $cfg, cl_classes($db, '1405/1406')[15], 'telegram:' . QA_GROUP, $provider);
         } elseif ($cmd === 'tickets') {
             // Use the same grants and five-second nbf allowance as the real site.
-            $tickets = ['teacher-7'=>cl_join_ticket($cfg, QA_ROOM, $teacher)];
+            $tickets = ['teacher-7'=>cl_join_ticket($cfg, $room, $teacher)];
             for ($i = 1; $i <= 10; $i++) {
                 $actor = ['identity'=>'student-' . $i,'name'=>'پژوهشگر آزمایشی ' . $i];
-                $tickets[$actor['identity']] = cl_join_ticket($cfg, QA_ROOM, $actor);
+                $tickets[$actor['identity']] = cl_join_ticket($cfg, $room, $actor);
             }
-            echo json_encode($tickets, JSON_THROW_ON_ERROR), "\n";
+            echo json_encode(['room'=>$room, 'tickets'=>$tickets], JSON_THROW_ON_ERROR), "\n";
         } elseif ($cmd === 'start') {
             $state = json_decode(file_get_contents($dir . '/live.json'), true, 4, JSON_THROW_ON_ERROR);
+            qa_need(cl_active($s, 15) === null, 'only one live bell at a time');
             $sid = $state['teacherSID'];
             qa_need(cl_sid($sid) && cl_sid($state['screenSID']) && str_starts_with($state['screenSID'], 'TR_'), 'actual SFU SIDs required');
             $class = cl_classes($db, '1405/1406')[15];
-            $live = ['id'=>QA_JOB, 'class_id'=>15, 'class_name'=>$class['name'], 'year'=>$class['year'], 'teacher'=>7,
+            $live = ['id'=>$id, 'class_id'=>15, 'class_name'=>$class['name'], 'year'=>$class['year'], 'teacher'=>7,
                 'slot'=>1,'subject'=>'ریاضی','period'=>'زنگ ۱','date'=>cl_day($now)->format('Y-m-d'), 'phase'=>'live',
-                'sample'=>$now,'room'=>QA_ROOM,'started'=>$now-10,'created'=>$now-11,'deadline'=>$now+120,
+                'sample'=>$now,'room'=>$room,'started'=>$now-10,'created'=>$now-11,'deadline'=>$now+120,
                 'staff'=>['teacher-7'=>$sid],'active_seconds'=>10,'pulses'=>['teacher-7'=>['sid'=>$sid,'at'=>$now]],
                 'seen'=>['teacher-7'=>$sid], 'screen'=>['identity'=>'teacher-7','sid'=>$sid,'until'=>$now+120]];
-            $s->put('lesson', QA_JOB, $live);
-            $s->put('active', '15', ['id'=>QA_JOB]);
+            $s->put('lesson', $id, $live);
+            $s->put('active', '15', ['id'=>$id]);
             qa_need(cl_rec_start($s, $cfg, $class, $live, $teacher, $now)['recording']['notice'] === 'preparing', 'start did not show recording notice');
             $file = $dir . '/board.pdf';
-            qa_need(is_file($file) && copy($file, cl_lesson_dir(QA_JOB, true) . '/' . QA_DOC), 'synthetic board PDF required');
-            $board = cl_activity($s, QA_JOB);
+            qa_need(is_file($file) && copy($file, cl_lesson_dir($id, true) . '/' . QA_DOC), 'synthetic board PDF required');
+            $board = cl_activity($s, $id);
             $board['doc'] = QA_DOC;
             $board['docs'][QA_DOC] = ['id'=>QA_DOC,'mime'=>'application/pdf','bytes'=>filesize($file),'name'=>'Test.pdf','pages'=>1];
-            $s->put('activity', QA_JOB, $board);
+            $s->put('activity', $id, $board);
             echo "QA_RECORD teacher started a normal bell recording; five-second notice honored by site policy\n";
         } elseif ($cmd === 'layout') {
             $live = cl_active($s, 15);
             $state = json_decode(file_get_contents($dir . '/live.json'), true, 4, JSON_THROW_ON_ERROR);
-            $scoped = ['lesson'=>QA_JOB,'epoch'=>cl_epoch($live),'sid'=>$state['teacherSID'],'enabled'=>true];
+            $scoped = ['lesson'=>$id,'epoch'=>cl_epoch($live),'sid'=>$state['teacherSID'],'enabled'=>true];
             cl_rec_set_source($s, $cfg, $live, $teacher, $scoped + ['source'=>'board'], $now);
         } elseif ($cmd === 'close') {
             $live = cl_active($s, 15);
-            qa_need(cl_rec_close_choice($s, $cfg, $live, $teacher, ['recording'=>QA_JOB,'sendRecording'=>true], $now) === 'queued', 'teacher consent did not queue');
-            $live['recording_consent'] = true;
+            qa_need($live && $live['id'] === $id, 'unexpected active bell');
+            $choice = $case !== 'refuse';
+            $decision = cl_rec_close_choice($s, $cfg, $live, $teacher, ['recording'=>$id,'sendRecording'=>$choice], $now);
+            qa_need($decision === ($choice ? 'queued' : 'discarded'), 'teacher choice was not honored');
+            $live['recording_consent'] = $choice;
             cl_close_lesson($s, $cfg, $live, $now, $rpc);
-            $job = $s->get('recording', QA_JOB);
-            qa_need($job['state'] === 'queued' && $job['not_before'] === $now+60 && $job['total'] === 0, 'must defer after verified closure');
-            echo "QA_RECORD confirmed closure, approving delivery only after the school's delay\n";
+            $job = $s->get('recording', $id);
+            qa_need($job['state'] === $decision && ($choice ? $job['not_before'] === $now+60 : !isset($job['not_before']))
+                && $job['total'] === 0, 'must defer or discard after verified closure');
+            if ($case === 'revoke') {
+                cl_rec_set_link($s, $cfg, cl_classes($db, '1405/1406')[15], '', $provider);
+                echo "QA_RECORD destination revoked after closure but before eligibility\n";
+            } elseif ($choice) echo "QA_RECORD confirmed closure, approving delivery only after the school's delay\n";
+            else echo "QA_RECORD confirmed closure with explicit refusal\n";
+        } elseif ($cmd === 'id') {
+            echo $id, "\n";
         } elseif ($cmd === 'status') {
-            $job = $s->get('recording', QA_JOB);
+            $job = $s->get('recording', $id);
             echo json_encode(['state'=>$job['state'] ?? 'idle', 'reason'=>$job['reason'] ?? '', 'live'=>$job['live'] ?? false,
-                'layout'=>$job['layout_capable'] ?? false, 'sent'=>$job['sent'] ?? 0,
+                'layout'=>$job['layout_capable'] ?? false, 'sent'=>$job['sent'] ?? 0, 'total'=>$job['total'] ?? 0,
+                'not_before'=>$job['not_before'] ?? null, 'rendered_at'=>$job['rendered_at'] ?? null,
+                'cleaned'=>isset($job['cleaned']),
                 'delivered'=>(($job['state'] ?? '') === 'delivered' && ($job['last']['message'] ?? '') === '321')], JSON_THROW_ON_ERROR), "\n";
         } else throw new RuntimeException('unknown QA command');
         exit;
@@ -116,7 +137,7 @@ try {
     if (($lesson = cl_active($s, 15)) && $lesson['phase'] === 'live') {
         $lesson['sample'] = $now;
         $lesson['pulses']['teacher-7']['at'] = $now;
-        $s->put('lesson', QA_JOB, $lesson);
+        $s->put('lesson', $lesson['id'], $lesson);
     }
     $result = cl_rec_worker($s, $cfg, $input, $now, $rpc, $provider);
     if (isset($result['file'])) {

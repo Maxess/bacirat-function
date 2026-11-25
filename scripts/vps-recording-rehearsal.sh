@@ -4,7 +4,7 @@
 run_recording_rehearsal() (
     set -Eeuo pipefail
     trap 'echo "QA_STAGE rehearsal failed at line $LINENO: $BASH_COMMAND" >&2' ERR
-    local q="$work/recording" client=$1 net=baci-vps-recording
+    local q="$work/recording" client=$1 net=baci-vps-recording bell=approve spool=/var/lib/school-classroom-recorder
     mkdir -m 700 "$q"
     cp "$work/qa.crt" "$work/school.pem" "$work/school.key" "$q/"
     vm 'sudo cat /etc/school-classroom/site-pairing.json' > "$q/pair.json"
@@ -21,7 +21,7 @@ run_recording_rehearsal() (
                 if [[ -f "$file" ]]; then tail -8 "$file" | sed "s#^#QA_STAGE $(basename "$file"): #"; fi
             done
             vm 'sudo journalctl --no-pager -n 12 -u school-classroom-recorder -u school-classroom-postprocess -o cat' || true
-            school status || true
+            school status "$bell" || true
         fi
         local pids
         pids=$(sudo ip netns pids "$net")
@@ -48,42 +48,94 @@ GUEST
     # Wait for the new site's heartbeat before opening a normal bell.
     vm 'for n in $(seq 1 24); do if sudo baci-vps doctor --online 2>&1 | grep -q "^school_recorder=ready"; then exit; fi; sleep 1; done; exit 1'
     vm 'sudo systemd-run --quiet --unit=baci-qa-sample /bin/bash -c '\''while true; do grep -E "^MemAvailable:|^SwapTotal:|^SwapFree:" /proc/meminfo | xargs; sleep 1; done'\'''
-    echo "QA_STAGE clocks guest=$(vm 'date -u +%s.%N') runner=$(date -u +%s.%N)"
-    ( umask 077; school tickets > "$q/tickets.json" )
-    as_runner timeout 125 env GOMAXPROCS=3 "$client" --fixture "$q/camera.ivf" "$q/screen.ivf" \
-        "$q/teacher.opus" "$q/pupil.opus" "$q/live.json" "$q/tickets.json" < "$q/pair.json" > "$q/load.log" 2>&1 &
-    load_pid=$!
-    for n in $(seq 1 70); do
-        if [[ -s "$q/live.json" ]]; then break; fi
-        kill -0 "$load_pid" && sleep 1
-    done
-    test -s "$q/live.json"
-    echo "QA_STAGE real RTP warm-up passed; requesting teacher recording"
-    school start
-    for n in $(seq 1 30); do
-        if school status | grep -Fq '"live":true'; then break; fi
-        sleep 1
-    done
-    school status | grep -Fq '"live":true'
-    school layout
-    vm "sudo test -s /var/lib/school-classroom-recorder/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/doc-cccccccccccccccccccccccccccccccc.pdf || sleep 2; sudo test -s /var/lib/school-classroom-recorder/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/doc-cccccccccccccccccccccccccccccccc.pdf"
-    # Rendering must not occur while the ten pupils are receiving A/V.
-    vm 'test -z "$(sudo find /var/lib/school-classroom-recorder -type f -name "*.mp4" -print -quit)"; ! pgrep -u school-recorder -x chrome-headless >/dev/null'
-    wait "$load_pid"
-    cat "$q/load.log"
-    test "$(grep -c '^QA_LOAD window_end_s=' "$q/load.log")" -eq 7
-    school close
+    expect_no_browser() {
+        vm 'set -e; films=$(sudo find /var/lib/school-classroom-recorder \( -name "*.mp4" -o -name ".render" \) -print -quit); test -z "$films"; ! pgrep -u school-recorder -x chrome-headless >/dev/null'
+    }
+    run_bell() {
+        local id load_pid n windows=$2
+        bell=$1
+        id=$(school id "$bell")
+        [[ "$id" =~ ^[a-f0-9]{32}$ ]]
+        rm -f "$q/live.json" "$q/live.json.done"
+        echo "QA_STAGE $bell clocks guest=$(vm 'date -u +%s.%N') runner=$(date -u +%s.%N)"
+        ( umask 077; school tickets "$bell" > "$q/tickets.json" )
+        as_runner timeout 125 env GOMAXPROCS=3 "$client" --fixture "$q/camera.ivf" "$q/screen.ivf" \
+            "$q/teacher.opus" "$q/pupil.opus" "$q/live.json" "$q/tickets.json" < "$q/pair.json" > "$q/load.log" 2>&1 &
+        load_pid=$!
+        for n in $(seq 1 60); do
+            if [[ -s "$q/live.json" ]]; then break; fi
+            if ! kill -0 "$load_pid"; then wait "$load_pid"; break; fi
+            sleep 1
+        done
+        test -s "$q/live.json"
+        echo "QA_STAGE $bell real RTP warm-up passed; requesting teacher recording"
+        school start "$bell"
+        for n in $(seq 1 22); do
+            if school status "$bell" | grep -Fq '"live":true'; then break; fi
+            sleep 1
+        done
+        school status "$bell" | grep -Fq '"live":true'
+        vm "sudo test -f '$spool/$id/.capturing'"
+        if [[ "$bell" == approve ]]; then
+            school layout "$bell"
+            vm "for n in \$(seq 1 8); do if sudo test -s '$spool/$id/doc-cccccccccccccccccccccccccccccccc.pdf'; then exit; fi; sleep 1; done; exit 1"
+        fi
+        # No MP4 or compositor while pupils are still receiving A/V.
+        expect_no_browser
+        for n in $(seq 1 70); do
+            if [[ -f "$q/live.json.done" ]]; then break; fi
+            if ! kill -0 "$load_pid"; then wait "$load_pid"; break; fi
+            sleep 1
+        done
+        test -f "$q/live.json.done"
+        test "$(grep -c '^QA_LOAD window_end_s=' "$q/load.log")" -eq "$windows"
+        if [[ "$bell" == approve ]]; then grep '^QA_LOAD window_end_s=' "$q/load.log"; fi
+        school close "$bell"
+        wait "$load_pid"
+        grep '^QA_LOAD school retired' "$q/load.log"
+    }
+    wait_purged() {
+        local n status id=$1 reason=$2
+        for n in $(seq 1 70); do
+            status=$(school status "$bell")
+            if grep -Fq '"cleaned":true' <<<"$status"; then break; fi
+            sleep 2
+        done
+        python3 -c 'import json,sys; j=json.loads(sys.argv[1]); assert (j["state"],j["reason"],j["sent"],j["total"],j["rendered_at"],j["cleaned"]) == ("discarded",sys.argv[2],0,0,None,True), j' "$status" "$reason"
+        vm "for n in \$(seq 1 8); do if sudo test ! -d '$spool/$id'; then exit; fi; sleep 1; done; exit 1"
+        test "$(wc -l < "$q/uploads.log")" -eq 1
+        expect_no_browser
+        echo "QA_RECORD $bell: no film/upload; the worker acknowledged purging the captured media."
+    }
+    run_bell approve 7
     test ! -e "$q/received.mp4"
-    # The school clock is real: a one-minute delay after confirmed closure.
+    expect_no_browser
+    # Use the real site clock and require the render commit and provider receipt
+    # to occur no earlier than the pinned minute after confirmed closure.
     for n in $(seq 1 220); do
-        status=$(school status)
+        status=$(school status approve)
         if grep -Fq '"delivered":true' <<<"$status"; then break; fi
         if grep -Eq '"state":"(failed|discarded|uncertain)"' <<<"$status"; then echo "QA_RECORD $status" >&2; exit 1; fi
         sleep 2
     done
-    school status | grep -Fq '"delivered":true'
+    python3 - "$status" "$q/received.mp4" <<'PY_RECEIPT'
+import json, sys
+from pathlib import Path
+job = json.loads(sys.argv[1])
+receipt = int(Path(sys.argv[2]).stat().st_mtime)
+assert job['delivered'] and job['sent'] == job['total'] == 1
+assert job['not_before'] <= job['rendered_at'] <= receipt
+print(f"QA_RECORD approved MP4 after the one-minute delay: render_after_eligible_s={job['rendered_at'] - job['not_before']} receipt_after_eligible_s={receipt - job['not_before']}")
+PY_RECEIPT
     # Decode received bytes, not the check_encoder MP4 or a filesystem-only export.
     python3 "$root/tests/fixtures/vps-record-verify.py" "$q/received.mp4"
+    test "$(wc -l < "$q/uploads.log")" -eq 1
+    if [[ "$scenario" == compact ]]; then
+        run_bell refuse 4
+        wait_purged "$(school id refuse)" ''
+        run_bell revoke 4
+        wait_purged "$(school id revoke)" destination
+    fi
     vm "sudo systemctl stop baci-qa-sample; sudo journalctl -u baci-qa-sample --no-pager -o cat" \
         | awk -v swap_mib="$swap_mib" '$1=="MemAvailable:" { if (!min || $2 < min) min=$2; if ($5-$8 > used) used=$5-$8; max_swap=$5; n++ }
             END { print "QA_RAM samples=" n " minimum_MemAvailable_KiB=" min " SwapTotal_KiB=" max_swap " peak_SwapUsed_KiB=" used+0;

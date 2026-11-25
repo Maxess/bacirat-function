@@ -33,6 +33,8 @@ class Peer(BaseHTTPRequestHandler):
             assert len(body) == length
             content = self.headers['Content-Type']
             if self.path == '/fixture-bot/sendVideo':
+                with (self.server.directory / 'uploads.log').open('ab') as log:
+                    log.write(b'upload\n')
                 assert content.startswith('multipart/form-data; boundary=')
                 msg = BytesParser(policy=policy.default).parsebytes(b'Content-Type: ' + content.encode() + b'\r\n\r\n' + body)
                 fields = {section.get_param('name', header='content-disposition'): section.get_payload(decode=True)

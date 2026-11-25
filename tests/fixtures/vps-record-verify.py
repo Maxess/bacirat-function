@@ -9,7 +9,9 @@ import sys
 
 video = Path(sys.argv[1])
 meta = json.loads(subprocess.check_output(['ffprobe', '-v', 'error', '-show_format', '-show_streams', '-of', 'json', video], timeout=15))
-assert {t['codec_name'] for t in meta['streams']} == {'h264', 'aac'}
+assert sorted(t['codec_name'] for t in meta['streams']) == ['aac', 'h264']
+track = next(t for t in meta['streams'] if t['codec_name'] == 'h264')
+assert (track['width'], track['height']) == (1280, 720)
 length = float(meta['format']['duration'])
 assert 30 <= length <= 61, f'Unexpected capture length: {length:.2f}s'
 
@@ -23,12 +25,26 @@ raw = decode('-an', '-vf', f'fps=1,scale={width}:{height}', '-pix_fmt', 'rgb24',
 frames = list(range(0, len(raw), width * height * 3))
 assert len(frames) >= 30
 
-def colors(frame):
-    return {tuple(raw[i:i+3]) for i in range(frame, frame+width*height*3, 3)}
+def pane(frame, x, y, w, h):
+    return b''.join(raw[p:p+3*w] for p in (frame+(line*width+x)*3 for line in range(y,y+h)))
 
-# Gold and blue come from the test PDF, together with multiple different boards/video frames.
-assert len({raw[i:i+width*height*3] for i in frames}) >= 10, 'movie has no usable moving picture'
-assert any(sum(r > 165 and 85 < g < 200 and b < 70 for r, g, b in colors(i)) >= 5 for i in frames[5:]), 'PDF colors missing'
+
+# Sample the right content pane, not the labels or the test camera's
+# multicolored pixels on the left. Require both large PDF color fields.
+def pdf_visible(frame):
+    rgb = pane(frame, 81, 15, 75, 68)
+    gold = blue = 0
+    for r, g, b in zip(rgb[0::3], rgb[1::3], rgb[2::3]):
+        gold += r > 170 and 105 < g < 198 and b < 70
+        blue += r < 75 and 24 < g < 95 and b > 132
+    return gold > 420 and blue > 260
+
+
+visible = [index for index in frames[5:] if pdf_visible(index)]
+assert len(visible) >= 8, 'two-color PDF missing from the right panel'
+# Detect actual content changes rather than timestamps, labels, or H.264 noise.
+left = [pane(i, 5, 24, 72, 35) for i in visible]
+assert sum(sum(abs(a-b) for a,b in zip(x,y)) > 2.0*len(x) for x,y in zip(left,left[1:])) >= 5, 'left video pane is static'
 sound = array('h', decode('-vn', '-ac', '1', '-ar', '8000', '-f', 's16le'))
 if sys.byteorder != 'little':
     sound.byteswap()
