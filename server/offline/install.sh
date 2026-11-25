@@ -18,7 +18,7 @@ TLS: no PEM files -> automatic Let’s Encrypt (direct A record and open TCP 443
   --cert PATH --key PATH   optional paths in files mode
 Profile: auto (default) selects live on low-RAM VPSes and full when there is room for recording.
   --profile live  LiveKit, admission and HTTPS only. Suitable for a 512 MiB VPS; no local recording.
-  --profile compact  Local recording and MP4 for one small room; lower memory.
+  --profile compact  Local recording/MP4; a 512 MiB VPS also needs 512 MiB active swap.
   --profile full  Also install the Recorder and sandboxed MP4 renderer, with additional RAM.
 Existing idle v1.2.0 live install: use this new bundle with --add-recorder [--check].
 After install: sudo baci-vps doctor [--online] or sudo baci-vps export

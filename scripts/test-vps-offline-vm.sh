@@ -9,6 +9,8 @@ ram=${3:-4096}
 scenario=${5:-default}
 capacity=${6:-}
 original=${7:-}
+swap_mib=${8:-0}
+[[ "$swap_mib" == 0 || "$swap_mib" == 512 ]]
 [[ "$scenario" == default || "$scenario" == compact || "$scenario" == upgrade ]]
 if [[ "$scenario" == upgrade ]]; then original=$(realpath "$original"); fi
 if [[ -n "$capacity" ]]; then capacity=$(realpath "$capacity"); fi
@@ -182,14 +184,22 @@ else
     done
     send "$work/pebble" "$work/pebble-challtestsrv" "$work/acme.pem" "$work/acme.key" "$root/tests/fixtures/vps-acme-gateway.py"
 fi
-vm "ARCHIVE=$(basename "$archive") MODE=$mode RAM=$ram PROFILE=$profile SCENARIO=$scenario bash -s" <<'GUEST'
+vm "ARCHIVE=$(basename "$archive") MODE=$mode RAM=$ram PROFILE=$profile SCENARIO=$scenario QA_SWAP_MIB=$swap_mib bash -s" <<'GUEST'
 set -Eeuo pipefail
 trap 'echo "VM guest failure at line $LINENO: $BASH_COMMAND" >&2' ERR
+if (( QA_SWAP_MIB )); then
+    sudo install -m 0600 /dev/null /var/tmp/baci-qa.swap
+    sudo fallocate -l "${QA_SWAP_MIB}M" /var/tmp/baci-qa.swap
+    sudo mkswap /var/tmp/baci-qa.swap >/dev/null
+    sudo swapon /var/tmp/baci-qa.swap
+    echo '/var/tmp/baci-qa.swap none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null
+fi
+sysctl -n vm.overcommit_memory > overcommit.before
 read -r total swap < <(awk '/^MemTotal:/{m=$2} /^SwapTotal:/{s=$2} END {print m,s}' /proc/meminfo)
 printf 'VM memory: provisioned=%s MiB visible=%s KiB swap=%s KiB\n' "$RAM" "$total" "$swap"
 if [[ "$RAM" != 4096 ]]; then
     test "$total" -le "$((RAM * 1024))"
-    test "$swap" -eq 0
+    if (( QA_SWAP_MIB )); then test "$swap" -ge 512000; else test "$swap" -eq 0; fi
 fi
 awk '$1 == "oom_kill" {print $2}' /proc/vmstat > oom.before
 test "$(cat oom.before)" = 0
@@ -424,8 +434,9 @@ for unit in "${units[@]}"; do
     printf 'VM service %s %s\n' "$unit" "$(systemctl show -p MemoryCurrent -p MemoryPeak "$unit" | paste -sd ' ')"
 done
 awk '$1 == "oom_kill" {print $2}' /proc/vmstat | cmp oom.before -
+sysctl -n vm.overcommit_memory | cmp overcommit.before -
 if [[ "$RAM" != 4096 ]]; then
-    awk '/^SwapTotal:/ {exit ($2 != 0)}' /proc/meminfo
+    awk -v expected="$swap" '/^SwapTotal:/ {exit ($2 != expected)}' /proc/meminfo
 fi
 printf 'VM before reboot: OOM kills=0; %s\n' "$(grep '^MemAvailable:' /proc/meminfo)"
 # Model a provider's persistent assigned address after reboot. The first

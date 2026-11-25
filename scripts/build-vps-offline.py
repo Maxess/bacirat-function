@@ -197,7 +197,8 @@ def main():
             'git': run('git', 'rev-parse', 'HEAD', cwd=ROOT, text=True, capture_output=True).strip(),
             'tls_modes': ['auto', 'files'], 'minimum_visible_ram_kib': setup.MIN_RAM_KIB,
             'install_profiles': list(setup.PROFILES), 'full_visible_ram_kib': setup.FULL_RAM_KIB,
-            'compact_visible_ram_kib': setup.COMPACT_RAM_KIB,
+            'compact_visible_ram_kib': setup.COMPACT_RAM_KIB, 'compact_swap_kib': setup.COMPACT_SWAP_KIB,
+            'compact_no_swap_visible_ram_kib': setup.COMPACT_NOSWAP_RAM_KIB,
             'deb_count': count, 'apt_origin': ARCHIVE, 'pinned_payload_sha256': setup.PAYLOAD, 'payload_origins': origins},
             indent=2, sort_keys=True) + '\n')
         (bundle / 'SHA256SUMS').write_text(checksums((p for p in bundle.rglob('*') if p.is_file()), bundle))

@@ -81,6 +81,8 @@ GIB = 1024**3
 MIN_RAM_KIB = 384 * 1024
 FULL_RAM_KIB = 1792 * 1024
 COMPACT_RAM_KIB = 448 * 1024
+COMPACT_NOSWAP_RAM_KIB = 896 * 1024
+COMPACT_SWAP_KIB = 500 * 1024  # A nominal 512 MiB swapfile loses a small header.
 PROFILES = ('live', 'compact', 'full')
 LIVE_DEBS = ('ca-certificates', 'openssl', 'python3')
 
@@ -203,7 +205,12 @@ def check_memory(meminfo):
     return total_kib
 
 
-def install_profile(requested, total_kib):
+def swap_size(meminfo):
+    match = re.search(r'^SwapTotal:[ \t]+([0-9]+)[ \t]+kB$', meminfo, re.M)
+    return int(match[1]) if match else 0
+
+
+def install_profile(requested, total_kib, swap_kib=0):
     need(requested == 'auto' or requested in PROFILES, 'Unknown VPS installation profile.')
     profile = ('full' if total_kib >= FULL_RAM_KIB else 'live') if requested == 'auto' else requested
     if profile == 'full':
@@ -211,6 +218,12 @@ def install_profile(requested, total_kib):
              'Full recording and film rendering need a larger VPS; use --profile live for live classes without local recording.')
     if profile == 'compact':
         need(total_kib >= COMPACT_RAM_KIB, f'Linux sees {total_kib} KiB of RAM; the compact recording profile needs at least {COMPACT_RAM_KIB} KiB visible, not swap.')
+        # x86-64 V8 needs an accounted virtual CodeRange larger than the
+        # usable RAM of a nominal 512 MiB guest. Stock Linux can admit the
+        # mapping with enabled swap, without changing global overcommit.
+        need(total_kib >= COMPACT_NOSWAP_RAM_KIB or swap_kib >= COMPACT_SWAP_KIB,
+             'Compact recording below 896 MiB visible RAM requires 512 MiB of active swap. '
+             'The installer does not create swap or change the kernel overcommit policy.')
     return profile
 
 
@@ -243,8 +256,9 @@ def fresh_preflight(requested='auto'):
                 sock.bind(('0.0.0.0', port))
         except OSError:
             raise Refused(f'Port {port}/{"UDP" if kind == socket.SOCK_DGRAM else "TCP"} is already in use. No service was stopped.') from None
-    total_kib = check_memory(Path('/proc/meminfo').read_text())
-    profile = install_profile(requested, total_kib)
+    meminfo = Path('/proc/meminfo').read_text()
+    total_kib = check_memory(meminfo)
+    profile = install_profile(requested, total_kib, swap_size(meminfo))
     need(all(shutil.disk_usage(path).free >= size * GIB for path, size in
              [(APP.parent, 2), (SPOOL.parent, 5), (HERE, 1)]), 'Not enough free space; allow at least 8 GiB free on the system disk.')
     return total_kib, profile
@@ -631,7 +645,7 @@ class Fresh:
             write(program, (HERE / program.name).read_bytes())
             units[RENDERER + '.d/80-compact.conf'] = ('[Service]\nExecStart=\n'
                 f'ExecStart={REC}/venv/bin/python -Esu {program}\nEnvironment=XDG_CACHE_HOME=/tmp/baci-font-cache\n'
-                'CPUQuota=100%\nMemoryHigh=288M\nMemoryMax=336M\nMemorySwapMax=0\n')
+                'CPUQuota=100%\nMemoryHigh=310M\nMemoryMax=336M\nMemorySwapMax=0\n')
             units[RECORDER + '.d/80-compact.conf'] = '[Service]\nMemoryHigh=112M\nMemoryMax=160M\nMemorySwapMax=0\n'
         browser_files()
         venv_install()
@@ -740,9 +754,10 @@ def replacement(path, data, mode):
 def addition_preflight(config, requested, worker):
     need(config.get('version') in ('1.2.0', VERSION) and config.get('profile') == 'live' and config.get('tls_mode') in ('files','auto'),
          'This add-on is only for a completed Baci offline live install (v1.2.0 or this release).')
-    total_kib = check_memory(Path('/proc/meminfo').read_text())
+    meminfo = Path('/proc/meminfo').read_text()
+    total_kib = check_memory(meminfo)
     selected = ('full' if total_kib >= FULL_RAM_KIB else 'compact') if requested == 'auto' else requested
-    profile = install_profile(selected, total_kib)
+    profile = install_profile(selected, total_kib, swap_size(meminfo))
     need(profile != 'live', 'Use a recording profile with --add-recorder.')
     for path in (APP, CFG, SYSTEMD, REC.parent, SPOOL.parent, PROFILE.parent):
         if path == PROFILE.parent and not path.exists():

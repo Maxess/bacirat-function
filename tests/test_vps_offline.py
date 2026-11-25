@@ -40,7 +40,10 @@ class OfflineSetupTest(unittest.TestCase):
         self.assertEqual(setup.install_profile('auto', setup.FULL_RAM_KIB), 'full')
         self.assertEqual(setup.install_profile('full', 4194304), 'full')
         self.assertEqual(setup.install_profile('live', 4194304), 'live')
-        self.assertEqual(setup.install_profile('compact', 469200), 'compact')
+        self.assertEqual(setup.install_profile('compact', 469200, 524284), 'compact')
+        self.assertEqual(setup.install_profile('compact', 984744), 'compact')
+        with self.assertRaisesRegex(setup.Refused, '512 MiB of active swap'):
+            setup.install_profile('compact', 469200, setup.COMPACT_SWAP_KIB - 1)
         with self.assertRaisesRegex(setup.Refused, 'not swap'):
             setup.install_profile('compact', setup.COMPACT_RAM_KIB - 1)
         with self.assertRaisesRegex(setup.Refused, 'use --profile live'):

@@ -43,7 +43,7 @@ GUEST
     in_net python3 "$root/tests/fixtures/vps-record-tls.py" "$q" > "$q/tls.log" 2>&1 &
     # Wait for the new site's heartbeat before opening a normal bell.
     vm 'for n in $(seq 1 24); do if sudo baci-vps doctor --online 2>&1 | grep -q "^school_recorder=ready"; then exit; fi; sleep 1; done; exit 1'
-    vm 'sudo systemd-run --quiet --unit=baci-qa-sample /bin/bash -c '\''while true; do grep -E "^MemAvailable:|^SwapTotal:" /proc/meminfo | xargs; sleep 1; done'\'''
+    vm 'sudo systemd-run --quiet --unit=baci-qa-sample /bin/bash -c '\''while true; do grep -E "^MemAvailable:|^SwapTotal:|^SwapFree:" /proc/meminfo | xargs; sleep 1; done'\'''
     as_runner timeout 125 env GOMAXPROCS=3 "$client" --fixture "$q/camera.ivf" "$q/screen.ivf" \
         "$q/teacher.opus" "$q/pupil.opus" "$q/live.json" < "$q/pair.json" > "$q/load.log" 2>&1 &
     load_pid=$!
@@ -77,7 +77,10 @@ GUEST
     school status | grep -Fq '"delivered":true'
     # Decode received bytes, not the check_encoder MP4 or a filesystem-only export.
     python3 "$root/tests/fixtures/vps-record-verify.py" "$q/received.mp4"
-    vm 'sudo systemctl stop baci-qa-sample; sudo journalctl -u baci-qa-sample --no-pager -o cat | awk '\''$1=="MemAvailable:" { if (!min || $2 < min) min=$2; if ($5 != 0) bad=1; n++ } END { print "QA_RAM samples=" n " minimum_MemAvailable_KiB=" min " swap_KiB=0"; if (n < 60 || min < 32768 || bad) exit 1 }'\'''
+    vm "sudo systemctl stop baci-qa-sample; sudo journalctl -u baci-qa-sample --no-pager -o cat" \
+        | awk -v swap_mib="$swap_mib" '$1=="MemAvailable:" { if (!min || $2 < min) min=$2; if ($5-$8 > used) used=$5-$8; max_swap=$5; n++ }
+            END { print "QA_RAM samples=" n " minimum_MemAvailable_KiB=" min " SwapTotal_KiB=" max_swap " peak_SwapUsed_KiB=" used+0;
+                  if (n < 60 || min < 32768 || (swap_mib ? max_swap < 512000 : max_swap != 0)) exit 1 }'
     vm 'for u in school-classroom-{sfu,admission,https,recorder,postprocess}; do
         path=/sys/fs/cgroup/system.slice/$u.service
         awk "\$1 ~ /^oom/ && \$2 != 0 {exit 1}" "$path/memory.events" || exit
