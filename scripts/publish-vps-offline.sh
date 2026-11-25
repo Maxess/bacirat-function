@@ -9,7 +9,9 @@ run=$(jq -er '.run_id' "$manifest")
 commit=$(jq -er '.commit' "$manifest")
 checksums=$(jq -er '.checksums_sha256' "$manifest")
 installer=$(jq -er '.installer_sha256' "$manifest")
-[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$run" =~ ^[0-9]+$ && "$commit" =~ ^[a-f0-9]{40}$ && "$checksums" =~ ^[a-f0-9]{64}$ && "$installer" =~ ^[a-f0-9]{64}$ ]]
+artifact_sha=$(jq -er '.artifact_sha256' "$manifest")
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$run" =~ ^[0-9]+$ && "$commit" =~ ^[a-f0-9]{40}$ \
+    && "$checksums" =~ ^[a-f0-9]{64}$ && "$installer" =~ ^[a-f0-9]{64}$ && "$artifact_sha" =~ ^[a-f0-9]{64}$ ]]
 name="baci-classroom-vps-offline-v$version-ubuntu24.04-amd64"
 tag="vps-offline-v$version"
 base="https://github.com/$repo/actions/runs/$run"
@@ -21,6 +23,10 @@ trap 'echo "::error title=VPS release::Failed at $stage; public release not conf
 gh api "repos/$repo/actions/runs/$run" | jq -e --arg sha "$commit" --arg branch "$branch" '
     .status == "completed" and .conclusion == "success" and .head_sha == $sha and .head_branch == $branch
     and (.path | split("@")[0]) == ".github/workflows/vps-offline.yml"' >/dev/null
+stage=verify-ci-artifact
+gh api "repos/$repo/actions/runs/$run/artifacts" | jq -e --arg digest "sha256:$artifact_sha" '
+    [.artifacts[] | select(.name == "classroom-vps-offline-verified")]
+    | length == 1 and .[0].expired == false and .[0].digest == $digest' >/dev/null
 stage=download-verified-build
 gh run download "$run" --repo "$repo" --name classroom-vps-offline-verified --dir "$work"
 sha_file="$name-SHA256SUMS.txt"

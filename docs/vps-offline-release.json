@@ -3,5 +3,6 @@
   "run_id": 45513547747,
   "commit": "b60dc6911a56c959519e796fab6c96ba72beabed",
   "checksums_sha256": "9608e7c0df6636c283d414edc3c1f67d2c3781cbfb560e39ad287250075c2d8e",
-  "installer_sha256": "10faa75003f631be462468afae318daf077de5f71a7eb10dd07e3d97d733f0a3"
+  "installer_sha256": "10faa75003f631be462468afae318daf077de5f71a7eb10dd07e3d97d733f0a3",
+  "artifact_sha256": "9ceb064fa1fccf4b101f1f2712b66626c18b0747e95e17b7bc5bc4a76a70ccba"
 }
