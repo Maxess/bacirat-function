@@ -4,11 +4,11 @@
 
 ## نصب از صفر: سایت مدرسه و VPS با SSL خودکار
 
-**[راهنمای فارسی از هاست خالی تا اولین کلاس](server/offline/README-fa.md)** · [بستهٔ VPS Ubuntu 24.04 LTS amd64، نسخهٔ ۱٫۱٫۰](https://github.com/Maxess/bacirat-function/releases/tag/vps-offline-v1.1.0) · [ZIP اتصال سایت (مدیر ۰٫۱٫۳۱ و کلاس ۰٫۴٫۲۴)](artifacts/baci-classroom-site-pairing-v0.1.31.zip).
+**[راهنمای فارسی از هاست خالی تا اولین کلاس](server/offline/README-fa.md)** · [بستهٔ VPS Ubuntu 24.04 LTS amd64، نسخهٔ ۱٫۲٫۰](https://github.com/Maxess/bacirat-function/releases/tag/vps-offline-v1.2.0) · [ZIP اتصال سایت (مدیر ۰٫۱٫۳۱ و کلاس ۰٫۴٫۲۴)](artifacts/baci-classroom-site-pairing-v0.1.31.zip).
 
-روی VPS تازه، LiveKit، درگاه ورود، Caddy، ضبط و پیش‌نیازها از خود بسته نصب می‌شوند. با `--tls auto`، Caddy برای نام رسانهٔ تازه از Let’s Encrypt روی TCP 443 گواهی می‌گیرد، نصب و خودکار تمدید می‌کند. برای VPS بدون دسترسی به مرجع صدور، `--tls files` با PEM آماده کاملاً آفلاین است. راهنما ساخت سایت Baci روی PHP/MySQL، فایل اتصال خصوصی، Cron هاست و آزمون دو دستگاه را هم پوشش می‌دهد. این نصب‌گر برای ارتقای VPS موجود نیست. [نسخهٔ قدیمی ۱٫۰٫۰](https://github.com/Maxess/bacirat-function/releases/tag/vps-offline-v1.0.0) فقط گواهی آماده می‌پذیرد.
+روی VPS تازه، حالت **`--profile live`** با **۵۱۲ MiB RAM**، LiveKit، درگاه ورود و Caddy را بدون ضبط یا ساخت فیلم نصب می‌کند. حالت **`--profile full`** ضبط و رندر را هم دارد و RAM بیشتری می‌خواهد. با `--tls auto`، Caddy برای نام رسانهٔ تازه از Let’s Encrypt روی TCP 443 گواهی می‌گیرد، نصب و خودکار تمدید می‌کند. برای VPS بدون دسترسی به مرجع صدور، `--tls files` با PEM آماده کاملاً آفلاین است. راهنما ساخت سایت Baci روی PHP/MySQL، فایل اتصال خصوصی، Cron هاست و آزمون دو دستگاه را هم پوشش می‌دهد. این نصب‌گر برای ارتقای VPS موجود نیست. [نسخهٔ قدیمی ۱٫۰٫۰](https://github.com/Maxess/bacirat-function/releases/tag/vps-offline-v1.0.0) فقط گواهی آماده می‌پذیرد.
 
-**VPS به اینترنت دسترسی دارد؟** [نصب مستقیم از همین مخزن در SSH](docs/install-vps-from-github.fa.md) بدون انتقال آرشیو با FileZilla هم ممکن است. اگر این شاخه را از قبل گرفته‌ای، از ریشهٔ مخزن `bash ./install-vps.sh --tls auto` را بزن.
+**VPS به اینترنت دسترسی دارد؟** [نصب مستقیم از همین مخزن در SSH](docs/install-vps-from-github.fa.md) بدون انتقال آرشیو با FileZilla هم ممکن است. اگر این شاخه را از قبل گرفته‌ای، از ریشهٔ مخزن `bash ./install-vps.sh --profile live --tls auto` را بزن.
 
 ## کلاس مجازی برای سایت آزمایشی Baci
 
