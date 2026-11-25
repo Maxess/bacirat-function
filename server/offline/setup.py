@@ -331,6 +331,25 @@ def pairing(config):
             'api_key': secrets.token_hex(12), 'api_secret': secrets.token_hex(32), 'recording_secret': secrets.token_hex(32)}
 
 
+def local_ipv4(address):
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+        try:
+            probe.bind((address, 0))
+        except OSError:
+            return False  # Provider may forward from a public IPv4 to a private interface.
+    return True
+
+
+def sfu_config(config, keys):
+    address = config['ipv4']
+    text = media.engine_config(address, keys['api_key'], keys['api_secret'])
+    if local_ipv4(address):
+        # With multiple interfaces, the UDP mux may otherwise rewrite identical
+        # candidates to the public address while retaining the wrong UDP socket.
+        text = text.replace('rtc:\n', f'rtc:\n  ips:\n    includes: [{address}/32]\n', 1)
+    return text + media.native_webhook_block(keys['api_key'], media.webhook_url(config['origin'], config['site_path']))
+
+
 def edge_config(config):
     site = media.caddy_config(config['media'], config['origin'])
     domain, rules = site.split(' {\n', 1)
@@ -614,14 +633,13 @@ class Fresh:
         for source, dest in [('vps_media.py', 'vps_media.py'), ('admission.py', 'admission.py'), ('setup.py', 'baci-vps.py')]:
             write(APP / dest, (HERE / source).read_bytes())
         deployment = {k: keys[k] for k in ('api_key', 'api_secret')}
-        callback = media.webhook_url(config['origin'], config['site_path'])
-        write(CFG / 'livekit.yaml', media.engine_config(config['ipv4'], keys['api_key'], keys['api_secret'])
-              + media.native_webhook_block(keys['api_key'], callback), 0o640, gid=sfu.pw_gid)
+        write(CFG / 'livekit.yaml', sfu_config(config, deployment), 0o640, gid=sfu.pw_gid)
         save_json(CFG / 'admission.json', deployment | {'school_origin': config['origin']}, 0o640, gid=sfu.pw_gid)
         save_json(PAIR, keys)
         write(CFG / 'Caddyfile', edge_config(config))
         units = {
-            SFU: media.sfu_unit_config(),
+            SFU: media.sfu_unit_config().replace('After=network.target\n',
+                                                'Wants=network-online.target\nAfter=network-online.target\n', 1),
             GATE: media.unit('School classroom signaling admission', f'/usr/bin/python3 -IB {APP}/admission.py {CFG}/admission.json'),
             HTTPS: edge_unit(),
         }

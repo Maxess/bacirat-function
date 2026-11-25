@@ -90,7 +90,8 @@ jobs:
               trap 'while IFS= read -r line; do echo "::error title=VPS $ram $mode rehearsal::$line"; done < <(grep -E "^VM guest failure|^VM memory|^MemAvailable|^oom_kill|Out of memory|^Test CA|^Baci VPS:|^Traceback|^.*Error:|start request repeated|Failed to |\"error\":|^VM rehearsal|^VM WebRTC" "$log" | tail -14)' ERR
               bash scripts/test-vps-offline-vm.sh "$RUNNER_TEMP"/vps-release/*amd64.tar.gz "$mode" "$ram" "$RUNNER_TEMP/vps-live-media" 2>&1 | tee "$log"
               grep -Fq 'Two live WebRTC peers exchanged bidirectional Opus and teacher VP8' "$log"
-              grep -E '^VM passed:|^VM full test:|^VM baseline|^VM memory|^VM before reboot|^VM service|^No VM Internet|^Real ACME|^Two live WebRTC' "$log" | while IFS= read -r line; do echo "::notice title=Isolated VPS $ram $mode test::$line"; done
+              proof=$(grep -E '^VM passed:|^VM full test:|^VM memory|^VM before reboot|^No VM Internet|^Real ACME|^Two live WebRTC' "$log" | paste -sd ' ')
+              echo "::notice title=Isolated VPS $ram $mode test::$proof"
             done
           done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

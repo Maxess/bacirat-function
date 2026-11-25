@@ -93,6 +93,19 @@ class OfflineSetupTest(unittest.TestCase):
             self.assertNotEqual(first[key], second[key])
         self.assertNotEqual(first['api_secret'], first['recording_secret'])
 
+    def test_assigned_ipv4_uses_one_ice_socket_without_widening_the_http_listener(self):
+        config = setup.names('https://school.example.ir/sub', 'rtc.example.ir', '192.0.0.9')
+        keys = setup.pairing(config)
+        with patch.object(setup, 'local_ipv4', return_value=True):
+            direct = setup.sfu_config(config, keys)
+        with patch.object(setup, 'local_ipv4', return_value=False):
+            forwarded = setup.sfu_config(config, keys)
+        address_filter = '  ips:\n    includes: [192.0.0.9/32]\n'
+        self.assertIn('bind_addresses: [127.0.0.1]', direct)
+        self.assertIn("    - 'https://school.example.ir/sub" + setup.media.EVENT_ROUTE + "'", direct)
+        self.assertIn(address_filter, direct)
+        self.assertEqual(direct.replace(address_filter, ''), forwarded)
+
     def test_cert_reader_rejects_links_pipes_large_files_and_nonprivate_keys(self):
         with tempfile.TemporaryDirectory() as path:
             p = Path(path)

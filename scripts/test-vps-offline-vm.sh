@@ -245,6 +245,8 @@ sudo rm /opt/school-classroom/foreign.txt
 sudo rmdir /opt/school-classroom
 "${installer[@]}" | tee installation.log
 grep -Fq "installation=ok tls=$MODE profile=$PROFILE" installation.log
+sudo grep -Fq 'includes: [192.0.0.9/32]' /etc/school-classroom/livekit.yaml
+ss -Hlnu | grep -F '192.0.0.9:7882' >/dev/null
 sha256sum --check apt.before
 sysctl -n kernel.apparmor_restrict_unprivileged_userns | cmp apparmor.before -
 test "$(stat -c '%a:%U' Baci-VPS-pairing.json)" = 600:vpsqa
@@ -325,11 +327,27 @@ if [[ "$RAM" == 512 ]]; then
     awk '/^SwapTotal:/ {exit ($2 != 0)}' /proc/meminfo
 fi
 printf 'VM before reboot: OOM kills=0; %s\n' "$(grep '^MemAvailable:' /proc/meminfo)"
+# Model a provider's persistent assigned address after reboot. The first
+# test pair resides in an ephemeral namespace that will not be recreated.
+ip_bin=$(command -v ip)
+sudo tee /etc/systemd/system/baci-qa-media-address.service >/dev/null <<UNIT
+[Unit]
+Before=school-classroom-sfu.service
+[Service]
+Type=oneshot
+ExecStart=$ip_bin link add vpsqa0 type veth peer name qa-reboot0
+ExecStart=$ip_bin addr add 192.0.0.9/32 dev vpsqa0
+ExecStart=$ip_bin link set qa-reboot0 up
+ExecStart=$ip_bin link set vpsqa0 up
+[Install]
+WantedBy=multi-user.target
+UNIT
+sudo systemctl enable baci-qa-media-address.service
 cat /proc/sys/kernel/random/boot_id > boot.before
 GUEST
 vm 'sudo reboot' || true
 for attempt in $(seq 1 60); do
-    if vm 'test "$(cat /proc/sys/kernel/random/boot_id)" != "$(cat boot.before)" && grep -Eq "^oom_kill +0$" /proc/vmstat && sudo baci-vps doctor' 2>/dev/null; then
+    if vm 'test "$(cat /proc/sys/kernel/random/boot_id)" != "$(cat boot.before)" && grep -Eq "^oom_kill +0$" /proc/vmstat && ss -Hlnu | grep -F "192.0.0.9:7882" >/dev/null && sudo baci-vps doctor' 2>/dev/null; then
         if [[ "$mode" == auto ]]; then
             vm 'set -o pipefail; media=$(cat qa-media); openssl s_client -connect 127.0.0.1:443 -servername "$media" -verify_hostname "$media" -verify_return_error </dev/null 2>/dev/null | openssl x509 -noout -fingerprint -sha256 | cmp issued.before -'
         fi
