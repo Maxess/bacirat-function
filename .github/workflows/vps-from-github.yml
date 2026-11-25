@@ -19,7 +19,7 @@ jobs:
         run: |
           bash -n install-vps.sh
           python3 -m unittest discover -s tests -p test_vps_github_install.py
-      - name: Fetch the launcher and exact public archive, and run the real installer preflight
+      - name: Fetch the raw launcher and public archive without the Contents API, and run preflight
         run: |
           set -Eeuo pipefail
           umask 077
@@ -36,8 +36,8 @@ jobs:
           trap cleanup EXIT
           trap 'echo "::error title=GitHub install preflight::Failed on line $LINENO: $BASH_COMMAND"; if [[ -s "$log" ]]; then while IFS= read -r line; do echo "::error title=Installer output::$line"; done < <(tail -10 "$log"); fi' ERR
           curl --disable --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
-            --header 'Accept: application/vnd.github.raw+json' --connect-timeout 15 --max-time 45 \
-            "https://api.github.com/repos/Maxess/bacirat-function/contents/install-vps.sh?ref=$GITHUB_SHA" \
+            --connect-timeout 12 --max-time 30 \
+            "https://raw.githubusercontent.com/Maxess/bacirat-function/$GITHUB_SHA/install-vps.sh" \
             --output "$work/install-vps.sh"
           cmp install-vps.sh "$work/install-vps.sh"
           cd "$work"
