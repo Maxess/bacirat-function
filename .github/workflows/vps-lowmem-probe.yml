@@ -1,0 +1,71 @@
+name: Low-memory renderer diagnosis (isolated QA)
+on:
+  push:
+    paths: [.github/workflows/vps-lowmem-probe.yml]
+permissions:
+  contents: read
+jobs:
+  sandboxed-renderer:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - name: Prepare a disposable Ubuntu VM and the pinned baseline release
+        run: |
+          set -euo pipefail
+          sudo apt-get -q update
+          sudo apt-get -qy install --no-install-recommends qemu-system-x86 qemu-utils cloud-image-utils
+          if test -c /dev/kvm; then sudo chmod a+rw /dev/kvm; fi
+          w="$RUNNER_TEMP/lowmem-qa"
+          mkdir "$w"
+          curl --disable -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 15 --max-time 180 \
+            'https://github.com/Maxess/bacirat-function/releases/download/vps-offline-v1.2.0/baci-classroom-vps-offline-v1.2.0-ubuntu24.04-amd64.tar.gz' -o "$w/original.tar.gz"
+          printf '%s  %s\n' 9a79d791d38e2277b5fb29f9d05ae223338bb4c25ae30ab83ffb7c9d148c1cb4 "$w/original.tar.gz" | sha256sum -c --strict
+          tar -xzf "$w/original.tar.gz" -C "$w"
+      - name: Diagnose the baseline Chromium process inside the 512 MiB guest
+        run: |
+          set -euo pipefail
+          w="$RUNNER_TEMP/lowmem-qa"
+          export BUNDLE="$w/baci-classroom-vps-offline"
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+          p = Path(os.environ['BUNDLE']) / 'setup.py'
+          text = p.read_text()
+          assert text.count('FULL_RAM_KIB = 1792 * 1024') == 1
+          text = text.replace('FULL_RAM_KIB = 1792 * 1024', 'FULL_RAM_KIB = 384 * 1024')
+          before = '    return units\n\n\ndef venv_install'
+          assert text.count(before) == 1
+          text = text.replace(before, '    units[RENDERER + ".d/99-ci-debug.conf"] = "[Service]\\nEnvironment=DEBUG=pw:browser\\n"\n    return units\n\n\ndef venv_install')
+          before = '            probe_renderer(test=True)'
+          assert text.count(before) == 1
+          lines = [
+              'try:',
+              '    probe_renderer(test=True)',
+              'finally:',
+              "    sp.run(['systemctl','show','-p','MemoryCurrent','-p','MemoryPeak','-p','TasksCurrent',RENDERER])",
+              "    cg = Path('/sys/fs/cgroup/system.slice') / RENDERER",
+              "    print('Probe cgroup events:', (cg/'memory.events').read_text() if (cg/'memory.events').exists() else 'missing', flush=True)",
+              "    print('Probe MemAvailable:', re.search(r'^MemAvailable:.*', Path('/proc/meminfo').read_text(), re.M)[0], flush=True)",
+          ]
+          text = text.replace(before, '\n'.join(' ' * 12 + x for x in lines))
+          p.write_text(text)
+          v = Path('scripts/.vps-lowmem-probe-ci.sh')
+          text = Path('scripts/test-vps-offline-vm.sh').read_text().replace('cpus=1; profile=live', 'cpus=1; profile=full')
+          v.write_text(text.replace('-n 16 -u "school-classroom-*"', '-n 75 -u "school-classroom-*"'))
+          PY
+          (
+            cd "$BUNDLE"
+            find . -type f ! -name SHA256SUMS -printf '%P\0' | sort -z | xargs -0 sha256sum > SHA256SUMS
+          )
+          tar -C "$w" -cf - baci-classroom-vps-offline | gzip -n -1 > "$w/diagnosis-only.tar.gz"
+          set +e
+          bash scripts/.vps-lowmem-probe-ci.sh "$w/diagnosis-only.tar.gz" files 512 2>&1 | tee "$w/result.log"
+          rc=${PIPESTATUS[0]}
+          set -e
+          grep -Ei '^VM memory|^Memory(Current|Peak)=|^TasksCurrent|^Probe|^oom_kill|\[err\]|^Baci VPS:|self-test failed|^VM passed|^VM guest failure|^VM rehearsal' "$w/result.log" | tail -18 | while IFS= read -r line; do
+            echo "::notice title=512 MiB baseline diagnosis::${line:0:1050}"
+          done
+          exit "$rc"
