@@ -50,7 +50,8 @@ GATE = 'school-classroom-admission.service'
 HTTPS = 'school-classroom-https.service'
 RECORDER = 'school-classroom-recorder.service'
 RENDERER = 'school-classroom-postprocess.service'
-UNITS = (SFU, GATE, HTTPS, RECORDER, RENDERER)
+LIVE_UNITS = (SFU, GATE, HTTPS)
+UNITS = (*LIVE_UNITS, RECORDER, RENDERER)
 ENABLED = UNITS[:-1]  # Renderer only starts as a dependency of Recorder.
 PROGRAM_UNITS = (SFU, GATE, RECORDER, RENDERER)
 REC_PROGRAM = REC / 'releases/0.4.23'
@@ -77,6 +78,9 @@ ENV = {'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LC_ALL': 'C', 'HOME': '/root'}
 GIB = 1024**3
 # A VM provisioned with 512 MiB exposes less to /proc/meminfo after kernel reservations.
 MIN_RAM_KIB = 384 * 1024
+FULL_RAM_KIB = 1792 * 1024
+PROFILES = ('live', 'full')
+LIVE_DEBS = ('ca-certificates', 'openssl', 'python3')
 
 
 class Refused(Exception):
@@ -197,7 +201,16 @@ def check_memory(meminfo):
     return total_kib
 
 
-def fresh_preflight():
+def install_profile(requested, total_kib):
+    need(requested == 'auto' or requested in PROFILES, 'Unknown VPS installation profile.')
+    profile = ('full' if total_kib >= FULL_RAM_KIB else 'live') if requested == 'auto' else requested
+    if profile == 'full':
+        need(total_kib >= FULL_RAM_KIB, f'Linux sees {total_kib} KiB of RAM. '
+             'Full recording and film rendering need a larger VPS; use --profile live for live classes without local recording.')
+    return profile
+
+
+def fresh_preflight(requested='auto'):
     for path in (APP, CFG, REC, REC_CFG, SPOOL, HTTPS_STATE, CLI, PROFILE):
         need(not os.path.lexists(path), f'Existing classroom path {path}; nothing was overwritten.')
     for name in (*UNITS, 'school-classroom-watch.service'):
@@ -227,9 +240,10 @@ def fresh_preflight():
         except OSError:
             raise Refused(f'Port {port}/{"UDP" if kind == socket.SOCK_DGRAM else "TCP"} is already in use. No service was stopped.') from None
     total_kib = check_memory(Path('/proc/meminfo').read_text())
+    profile = install_profile(requested, total_kib)
     need(all(shutil.disk_usage(path).free >= size * GIB for path, size in
              [(APP.parent, 2), (SPOOL.parent, 5), (HERE, 1)]), 'Not enough free space; allow at least 8 GiB free on the system disk.')
-    return total_kib
+    return total_kib, profile
 
 
 def tls_selection(mode, cert, key):
@@ -347,9 +361,10 @@ def edge_unit():
         'CapabilityBoundingSet=\n', 'CapabilityBoundingSet=CAP_NET_BIND_SERVICE\n')
 
 
-def deb_install():
+def deb_install(profile):
     print('۱/۴  نصب پیش‌نیازها از خود بسته، بدون دانلود…', flush=True)
-    run('/bin/bash', HERE / 'apt-local.sh', HERE, show=True, timeout=900, label='Offline APT (no package removal or downgrade)')
+    goals = LIVE_DEBS if profile == 'live' else ()
+    run('/bin/bash', HERE / 'apt-local.sh', HERE, *goals, show=True, timeout=900, label='Offline APT (no package removal or downgrade)')
 
 
 def verify_payloads():
@@ -475,21 +490,28 @@ def probe_renderer(test=False):
          'Sandboxed renderer check failed (Chromium or FFmpeg).')
 
 
-def program_checks(*, fresh=False):
-    for name in PROGRAM_UNITS:
+def with_recording(config):
+    return config.get('profile', 'full') == 'full'  # Installed v1.1.0 state did not name the profile.
+
+
+def program_checks(config, *, fresh=False):
+    full = with_recording(config)
+    for name in (PROGRAM_UNITS if full else (SFU, GATE)):
         need(info('-p', 'SubState', name) == 'running', f'{name} is not running.')
     if fresh:
-        need(run(REC_PROGRAM / 'baci-native-receiver', '--check', output=True) == b'baci-rtp/2\n',
-             'Native Recorder failed its compatibility check.')
         # Verify the private media API early, before submitting a public certificate order.
         need(not media.local_rooms(media.pilot_deployment()), 'A fresh LiveKit must not already have rooms.')
-    worker = json_file(SPOOL / 'worker.json')['id']
-    need(isinstance(worker, str) and re.fullmatch(r'[a-f0-9]{32}', worker), 'Native Recorder has no valid local identity.')
-    probe_renderer()
+        if full:
+            need(run(REC_PROGRAM / 'baci-native-receiver', '--check', output=True) == b'baci-rtp/2\n',
+                 'Native Recorder failed its compatibility check.')
+    if full:
+        worker = json_file(SPOOL / 'worker.json')['id']
+        need(isinstance(worker, str) and re.fullmatch(r'[a-f0-9]{32}', worker), 'Native Recorder has no valid local identity.')
+        probe_renderer()
 
 
 def local_checks(config):
-    program_checks()
+    program_checks(config)
     need(info('-p', 'SubState', HTTPS) == 'running', f'{HTTPS} is not running.')
     code, _, _ = probe_edge(config, '/healthz')
     need(code == 200, 'HTTPS /healthz did not reach LiveKit.')
@@ -534,10 +556,13 @@ def safe_remove(path):
 
 class Fresh:
     """Only roll back paths/accounts this process created before sharing credentials."""
-    def __init__(self):
+    def __init__(self, profile):
+        self.full = profile == 'full'
+        self.units = UNITS if self.full else LIVE_UNITS
+        self.enabled = ENABLED if self.full else LIVE_UNITS
         self.paths = []
         self.users = []
-        self.starting = self.enabling = self.profile = False
+        self.starting = self.enabling = self.apparmor = False
 
     def folder(self, path, **kwargs):
         path.mkdir()
@@ -552,10 +577,10 @@ class Fresh:
     def cleanup(self):
         # If systemd cannot confirm stop/disable, do not remove files under live services.
         if self.enabling:
-            run('systemctl', 'disable', *ENABLED)
+            run('systemctl', 'disable', *self.enabled)
         if self.starting:
-            run('systemctl', 'stop', *UNITS)
-        if self.profile:
+            run('systemctl', 'stop', *self.units)
+        if self.apparmor:
             run('apparmor_parser', '-R', PROFILE)
         for path in reversed(self.paths):
             safe_remove(path)
@@ -569,14 +594,12 @@ class Fresh:
 
     def apply(self, config, cert_files):
         keys = pairing(config)
-        for name in ACCOUNTS:
+        for name in (ACCOUNTS if self.full else ACCOUNTS[:2]):
             run('useradd', '--system', '--user-group', '--no-create-home', '--home-dir', '/nonexistent', '--shell', '/usr/sbin/nologin', name)
             self.users.append(name)
-        sfu, tls, recorder = map(pwd.getpwnam, ACCOUNTS)
+        sfu, tls = map(pwd.getpwnam, ACCOUNTS[:2])
         self.folder(APP)
         self.folder(CFG)
-        self.folder(REC)
-        self.folder(SPOOL, mode=0o700, uid=recorder.pw_uid, gid=recorder.pw_gid)
         self.folder(HTTPS_STATE, mode=0o700, uid=tls.pw_uid, gid=tls.pw_gid)
         if cert_files is not None:
             chain, key = cert_files
@@ -597,18 +620,23 @@ class Fresh:
         save_json(CFG / 'admission.json', deployment | {'school_origin': config['origin']}, 0o640, gid=sfu.pw_gid)
         save_json(PAIR, keys)
         write(CFG / 'Caddyfile', edge_config(config))
-        self.file(REC_CFG, json.dumps({'site': config['school'], 'secret': keys['recording_secret']}) + '\n', 0o600)
-        units = renderer_program() | {
+        units = {
             SFU: media.sfu_unit_config(),
             GATE: media.unit('School classroom signaling admission', f'/usr/bin/python3 -IB {APP}/admission.py {CFG}/admission.json'),
             HTTPS: edge_unit(),
         }
-        browser_files()
-        venv_install()
-        if profile_needed():
-            self.file(PROFILE, profile_text())
-            run('apparmor_parser', '-r', PROFILE, label='Scoped AppArmor Chromium user-namespace profile')
-            self.profile = True
+        if self.full:
+            recorder = pwd.getpwnam(ACCOUNTS[2])
+            self.folder(REC)
+            self.folder(SPOOL, mode=0o700, uid=recorder.pw_uid, gid=recorder.pw_gid)
+            self.file(REC_CFG, json.dumps({'site': config['school'], 'secret': keys['recording_secret']}) + '\n', 0o600)
+            units.update(renderer_program())
+            browser_files()
+            venv_install()
+            if profile_needed():
+                self.file(PROFILE, profile_text())
+                run('apparmor_parser', '-r', PROFILE, label='Scoped AppArmor Chromium user-namespace profile')
+                self.apparmor = True
         for name, data in sorted(units.items()):
             path = SYSTEMD / name
             if path.parent != SYSTEMD and path.parent not in self.paths:
@@ -619,17 +647,19 @@ class Fresh:
             label='Caddy local TLS configuration')
         self.starting = True
         run('systemctl', 'daemon-reload')
-        print('۳/۴  آزمون رسانه، مرورگر sandbox و ساخت واقعی MP4…', flush=True)
-        run('systemctl', 'start', SFU, GATE, RECORDER, timeout=125, label='systemd classroom service startup')
-        wait_ready(lambda: program_checks(fresh=True), 28, 'Local media or Recorder did not become ready.')
-        probe_renderer(test=True)
+        print('۳/۴  ' + ('آزمون رسانه، مرورگر sandbox و ساخت MP4…' if self.full else 'آزمون رسانه و درگاه کلاس زنده…'), flush=True)
+        services = (SFU, GATE, RECORDER) if self.full else (SFU, GATE)
+        run('systemctl', 'start', *services, timeout=125, label='systemd classroom service startup')
+        wait_ready(lambda: program_checks(config, fresh=True), 28, 'Local classroom services did not become ready.')
+        if self.full:
+            probe_renderer(test=True)
         print('۴/۴  ' + ('دریافت و نصب خودکار گواهی عمومی از Let’s Encrypt؛ کمی صبر کن…'
                         if config['tls_mode'] == 'auto' else 'آزمون HTTPS با گواهی آماده، بدون اینترنت…'), flush=True)
         run('systemctl', 'start', HTTPS, label='systemd HTTPS service startup')
         expires = wait_edge(config)
         local_checks(config)
         self.enabling = True
-        run('systemctl', 'enable', *ENABLED)
+        run('systemctl', 'enable', *self.enabled)
         save_json(STATE, config)
         print(f"tls={config['tls_mode']} expires={expires}", flush=True)
 
@@ -653,13 +683,29 @@ def export_pair():
     return True
 
 
+def doctor_recorder(config):
+    try:
+        keys = json_file(PAIR)
+        worker = json_file(SPOOL / 'worker.json')['id']
+        result = media.post_json(config['school'] + media.EVENT_ROUTE.replace('route=events', 'route=recording'),
+                                 json.dumps({'action': 'maintenance', 'protocol': 2, 'worker': worker, 'id': None}).encode(),
+                                 'application/json', 'Bearer ' + keys['recording_secret'], 7)
+        need(result.get('ok') is True and result.get('release') == '0.4.23', 'Unexpected school Recorder response.')
+        print('school_recorder=' + ('ready' if result.get('native_ready') is True else 'paired_waiting_for_heartbeat'))
+    except http.client.HTTPException:
+        print('school_recorder=not_verified')
+    except (Refused, OSError, ValueError):
+        print('school_recorder=not_verified_or_disabled (check the optional recording switch and allow 30 seconds)')
+
+
 def doctor(config, online):
     try:
         local_checks(config)
         expires = edge_certificate(config)
     except (OSError, ValueError, http.client.HTTPException):
-        raise Refused('Local readiness check failed (HTTPS, certificate, or Recorder).') from None
-    print('local=ok https=ok admission=ok media_api=ok recorder=ok renderer=ok')
+        raise Refused('Local readiness check failed (media, HTTPS, or installed Recorder).') from None
+    status = 'profile=full recorder=ok renderer=ok' if with_recording(config) else 'profile=live recorder=not_installed renderer=not_installed'
+    print('local=ok https=ok admission=ok media_api=ok ' + status)
     print(f"tls={config.get('tls_mode', 'files')} expires={expires}")
     if not online:
         return True
@@ -677,18 +723,8 @@ def doctor(config, online):
     except (ValueError, OSError):
         print('school_webhook=not_verified (check the school URL, import, activation, HTTPS and Authorization header)')
         ok = False
-    try:
-        keys = json_file(PAIR)
-        worker = json_file(SPOOL / 'worker.json')['id']
-        result = media.post_json(config['school'] + media.EVENT_ROUTE.replace('route=events', 'route=recording'),
-                                 json.dumps({'action': 'maintenance', 'protocol': 2, 'worker': worker, 'id': None}).encode(),
-                                 'application/json', 'Bearer ' + keys['recording_secret'], 7)
-        need(result.get('ok') is True and result.get('release') == '0.4.23', 'Unexpected school Recorder response.')
-        print('school_recorder=' + ('ready' if result.get('native_ready') is True else 'paired_waiting_for_heartbeat'))
-    except http.client.HTTPException:
-        print('school_recorder=not_verified')
-    except (Refused, OSError, ValueError):
-        print('school_recorder=not_verified_or_disabled (check the optional recording switch and allow 30 seconds)')
+    if with_recording(config):
+        doctor_recorder(config)
     print('Still required: open https://' + config['media'] + '/healthz from another network and try two test devices (real UDP/media).')
     return ok
 
@@ -707,6 +743,8 @@ def main(argv=None):
         parser.add_argument('--tls', choices=('auto', 'files'), help='automatic Let’s Encrypt, or fully offline with two PEM files')
         parser.add_argument('--cert', type=Path, help='in files mode: default ./fullchain.pem')
         parser.add_argument('--key', type=Path, help='in files mode: default ./privkey.pem, mode 0600')
+        parser.add_argument('--profile', choices=('auto', *PROFILES), default='auto',
+                            help='auto selects live for low RAM; live skips local recording; full installs Recorder and MP4 renderer')
         parser.add_argument('--check', action='store_true', help='read-only fresh VPS, bundle and TLS preflight')
     args = parser.parse_args(argv)
     os.umask(0o077)
@@ -721,13 +759,15 @@ def main(argv=None):
                 print('Already installed. No settings, keys or services were changed. Use sudo baci-vps export if needed.')
             return 0 if doctor(config, installed and args.online) else 1
         need(not installed, 'No completed offline installation was found.')
-        total_kib = fresh_preflight()
+        total_kib, profile = fresh_preflight(args.profile)
         verify_payloads()
+        if profile == 'live':
+            print('حالت کلاس زنده: ضبط و ساخت فیلم روی این VPS نصب نمی‌شود.', flush=True)
         config = names(prompt(args.site, 'نشانی HTTPS خودِ سایت مدرسه، با زیرپوشه اگر دارد (نمونه: https://school.example.ir/baci)'),
                        prompt(args.media, 'نام زیردامنهٔ رسانه بدون https (نمونه: class.example.ir)'),
                        prompt(args.ipv4, 'IPv4 عمومی VPS جدید از پنل ارائه‌دهنده'))
         mode, cert, key = tls_selection(args.tls, args.cert, args.key)
-        config['tls_mode'] = mode
+        config.update(tls_mode=mode, profile=profile)
         cert_files = None
         have_trust = TRUST_ROOTS.is_file()
         if mode == 'files':
@@ -746,9 +786,9 @@ def main(argv=None):
         if args.check:
             suffix = ('DNS and ACME directory reachable; no certificate was ordered; check incoming TCP 443 in the provider panel'
                       if mode == 'auto' else 'local files only; DNS, firewall and pairing are separate')
-            print(f'preflight=ok tls={mode} ram_kib={total_kib} ({suffix})')
+            print(f'preflight=ok tls={mode} profile={profile} ram_kib={total_kib} ({suffix})')
             return 0
-        deb_install()
+        deb_install(profile)
         if mode == 'files':
             validate_cert(config['media'], *cert_files)
         else:
@@ -756,12 +796,14 @@ def main(argv=None):
             check_media_dns(config)
             if not have_trust:
                 check_acme_access()
-        fresh_preflight()
-        print('۲/۴  نصب سرویس‌های کلاس، ضبط و HTTPS…', flush=True)
-        txn = Fresh()
+        fresh_preflight(profile)
+        components = 'کلاس، ضبط و HTTPS' if profile == 'full' else 'کلاس زنده و HTTPS'
+        print(f'۲/۴  نصب سرویس‌های {components}…', flush=True)
+        txn = Fresh(profile)
         txn.apply(config, cert_files)
         txn = None  # The durable install is complete; do not undo it if exporting fails.
-        print(f"installation=ok tls={mode} local_https=ok renderer_mp4=ok. فایل اتصال را فقط در پنل مدرسه بارگذاری کن.")
+        recording = 'renderer_mp4=ok' if profile == 'full' else 'recorder=not_installed'
+        print(f"installation=ok tls={mode} profile={profile} local_https=ok {recording}. فایل اتصال را فقط در پنل مدرسه بارگذاری کن.")
         return 0 if export_pair() else 1
     except (Refused, OSError, ValueError, KeyboardInterrupt, EOFError, KeyError, http.client.HTTPException, sp.SubprocessError, tarfile.TarError, BadZipFile) as error:
         if txn:

@@ -9,7 +9,8 @@ ram=${3:-4096}
 [[ "$mode" == files || "$mode" == auto ]]
 [[ "$ram" == 512 || "$ram" == 4096 ]]
 cpus=2
-if [[ "$ram" == 512 ]]; then cpus=1; fi
+profile=full
+if [[ "$ram" == 512 ]]; then cpus=1; profile=live; fi
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 work=$(mktemp -d)
 port=22131
@@ -114,7 +115,7 @@ else
     done
     send "$work/pebble" "$work/pebble-challtestsrv" "$work/acme.pem" "$work/acme.key" "$root/tests/fixtures/vps-acme-gateway.py"
 fi
-vm "ARCHIVE=$(basename "$archive") MODE=$mode RAM=$ram bash -s" <<'GUEST'
+vm "ARCHIVE=$(basename "$archive") MODE=$mode RAM=$ram PROFILE=$profile bash -s" <<'GUEST'
 set -Eeuo pipefail
 trap 'echo "VM guest failure at line $LINENO: $BASH_COMMAND" >&2' ERR
 read -r total swap < <(awk '/^MemTotal:/{m=$2} /^SwapTotal:/{s=$2} END {print m,s}' /proc/meminfo)
@@ -155,6 +156,11 @@ sha256sum /etc/apt/sources.list.d/* > apt.before
 sysctl -n kernel.apparmor_restrict_unprivileged_userns > apparmor.before
 tar xzf "$ARCHIVE"
 installer=(sudo bash baci-classroom-vps-offline/install.sh --site https://school.example.test/campus --media "$media" --ipv4 192.0.0.9)
+if [[ "$PROFILE" == live ]]; then
+    if "${installer[@]}" --check --profile full > rejected.log 2>&1; then exit 1; fi
+    grep -Fq 'use --profile live' rejected.log
+    dpkg-query -W -f='${binary:Package} ${db:Status-Abbrev}\n' ffmpeg python3-venv > render-debs.before 2>/dev/null || true
+fi
 if [[ "$MODE" == files ]]; then
     mv media.pem fullchain.pem
     mv media.key privkey.pem
@@ -211,7 +217,7 @@ PY_QA
     sudo update-ca-certificates >/dev/null
 fi
 "${installer[@]}" --check | tee preflight.log
-grep -Fq "preflight=ok tls=$MODE" preflight.log
+grep -Fq "preflight=ok tls=$MODE profile=$PROFILE ram_kib=$total" preflight.log
 test ! -e /var/lib/school-classroom-https
 if [[ "$MODE" == auto ]] && sudo journalctl --no-pager -u baci-qa-acme -o cat | grep -F '"POST '; then
     echo 'Read-only ACME preflight unexpectedly submitted a write.' >&2
@@ -235,14 +241,32 @@ if "${installer[@]}" > rejected.log 2>&1; then exit 1; fi
 sudo grep -Fq 'do not modify' /opt/school-classroom/foreign.txt
 sudo rm /opt/school-classroom/foreign.txt
 sudo rmdir /opt/school-classroom
-"${installer[@]}"
+"${installer[@]}" | tee installation.log
+grep -Fq "installation=ok tls=$MODE profile=$PROFILE" installation.log
 sha256sum --check apt.before
 sysctl -n kernel.apparmor_restrict_unprivileged_userns | cmp apparmor.before -
 test "$(stat -c '%a:%U' Baci-VPS-pairing.json)" = 600:vpsqa
 test "$(sudo stat -c '%a:%U' /etc/school-classroom/site-pairing.json)" = 600:root
 sudo cmp /etc/school-classroom/site-pairing.json Baci-VPS-pairing.json
-sudo -u school-recorder test ! -r /etc/school-classroom/site-pairing.json
-sudo -u school-recorder test ! -r /etc/school-classroom/tls/privkey.pem
+units=(school-classroom-{sfu,https,admission}.service)
+private=(/etc/school-classroom/{livekit.yaml,admission.json,site-pairing.json,offline-vps.json})
+if [[ "$PROFILE" == full ]]; then
+    grep -Fq renderer_mp4=ok installation.log
+    sudo -u school-recorder test ! -r /etc/school-classroom/site-pairing.json
+    sudo -u school-recorder test ! -r /etc/school-classroom/tls/privkey.pem
+    sudo -u school-classroom-tls test ! -r /etc/school-classroom-recorder.json
+    units+=(school-classroom-recorder.service)
+    private+=(/etc/school-classroom-recorder.json)
+else
+    grep -Fq recorder=not_installed installation.log
+    for path in /opt/school-classroom-recorder /var/lib/school-classroom-recorder /etc/school-classroom-recorder.json \
+        /etc/apparmor.d/school-classroom-chromium /etc/systemd/system/school-classroom-{recorder,postprocess}.service; do
+        sudo test ! -e "$path"
+    done
+    if getent passwd school-recorder >/dev/null; then exit 1; fi
+    dpkg-query -W -f='${binary:Package} ${db:Status-Abbrev}\n' ffmpeg python3-venv > render-debs.after 2>/dev/null || true
+    cmp render-debs.before render-debs.after
+fi
 if [[ "$MODE" == auto ]]; then
     test ! -e fullchain.pem && test ! -e privkey.pem
     test ! -d /etc/school-classroom/tls
@@ -256,8 +280,7 @@ if [[ "$MODE" == auto ]]; then
         | openssl x509 -noout -fingerprint -sha256 > issued.before
     echo 'Real ACME TLS-ALPN-01 challenge on TCP 443 passed without user PEM inputs or TCP 80.'
 fi
-sudo -u school-classroom-tls test ! -r /etc/school-classroom-recorder.json
-sudo sha256sum /etc/school-classroom/{livekit.yaml,admission.json,site-pairing.json} /etc/school-classroom-recorder.json > install.before
+sudo sha256sum "${private[@]}" > install.before
 sudo systemctl show -p InvocationID --value school-classroom-sfu > sfu.before
 "${installer[@]}"
 sudo sha256sum --check install.before
@@ -271,8 +294,14 @@ sudo systemd-run --quiet --unit=baci-fixture-peer --property=WorkingDirectory="$
 sudo /usr/bin/python3 vps-offline-peer.py --exercise
 sudo baci-vps doctor --online | tee online.log
 grep -Fq 'school_webhook=ok' online.log
-grep -Fq 'school_recorder=ready' online.log
-systemctl is-enabled school-classroom-{sfu,https,admission,recorder}.service
+if [[ "$PROFILE" == full ]]; then
+    grep -Fq 'school_recorder=ready' online.log
+    grep -Fq 'profile=full recorder=ok renderer=ok' online.log
+else
+    grep -Fq 'profile=live recorder=not_installed renderer=not_installed' online.log
+    test ! -e /run/baci-fixture-beat.json
+fi
+systemctl is-enabled "${units[@]}"
 if [[ -x ./vps-live-media ]]; then
     if [[ "$MODE" == auto ]]; then
         # After issuance the classroom doesn't need the disposable CA processes.
@@ -284,7 +313,8 @@ if [[ -x ./vps-live-media ]]; then
         | sudo ip netns exec schoolqa timeout 70 ./vps-live-media
     sudo baci-vps doctor
 fi
-for unit in school-classroom-{sfu,https,admission,recorder,postprocess}.service; do
+if [[ "$PROFILE" == full ]]; then units+=(school-classroom-postprocess.service); fi
+for unit in "${units[@]}"; do
     test "$(systemctl show -p NRestarts --value "$unit")" -eq 0
     printf 'VM service %s %s\n' "$unit" "$(systemctl show -p MemoryCurrent -p MemoryPeak "$unit" | paste -sd ' ')"
 done
@@ -300,10 +330,9 @@ for attempt in $(seq 1 60); do
     if vm 'test "$(cat /proc/sys/kernel/random/boot_id)" != "$(cat boot.before)" && grep -Eq "^oom_kill +0$" /proc/vmstat && sudo baci-vps doctor' 2>/dev/null; then
         if [[ "$mode" == auto ]]; then
             vm 'set -o pipefail; media=$(cat qa-media); openssl s_client -connect 127.0.0.1:443 -servername "$media" -verify_hostname "$media" -verify_return_error </dev/null 2>/dev/null | openssl x509 -noout -fingerprint -sha256 | cmp issued.before -'
-            echo 'VM passed: automatic TLS-ALPN-01, no port 80, same trusted certificate after reboot, signed API and webhooks, sandboxed MP4, and Recorder heartbeat.'
-        else
-            echo 'VM passed: offline install, TLS, signed API and native webhooks, sandboxed MP4, Recorder heartbeat, and service recovery after reboot.'
         fi
+        echo "VM passed: ${ram} MiB profile=$profile tls=$mode; trusted HTTPS, signed API/webhooks and reboot recovery."
+        if [[ "$profile" == full ]]; then echo 'VM full test: sandboxed MP4 and Recorder heartbeat passed.'; fi
         exit 0
     fi
     sleep 2

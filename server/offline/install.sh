@@ -16,6 +16,9 @@ TLS: no PEM files -> automatic Let’s Encrypt (direct A record and open TCP 443
   --tls auto     force automatic HTTPS; no certificate files required
   --tls files    no ACME or Internet; defaults to ./fullchain.pem and ./privkey.pem
   --cert PATH --key PATH   optional paths in files mode
+Profile: auto (default) selects live on low-RAM VPSes and full when there is room for recording.
+  --profile live  LiveKit, admission and HTTPS only. Suitable for a 512 MiB VPS; no local recording.
+  --profile full  Also install the Recorder and sandboxed MP4 renderer, with additional RAM.
 After install: sudo baci-vps doctor [--online] or sudo baci-vps export
 HELP
     exit

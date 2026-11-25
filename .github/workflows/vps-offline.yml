@@ -81,15 +81,17 @@ jobs:
           GOTOOLCHAIN: local
         run: |
           go build -mod=readonly -trimpath -ldflags='-s -w' -o "$RUNNER_TEMP/vps-live-media" "$GITHUB_WORKSPACE/tests/fixtures/vps-live-media.go"
-      - name: Verify exact archive, 512 MiB without swap, both TLS modes and two live WebRTC peers
+      - name: Verify 512 MiB live and full installs, both TLS modes and WebRTC
         run: |
           set -euo pipefail
-          for mode in files auto; do
-            log="$RUNNER_TEMP/vps-rehearsal-$mode.log"
-            trap 'while IFS= read -r line; do echo "::error title=VPS $mode rehearsal::$line"; done < <(grep -E "^VM guest failure|^VM memory|^MemAvailable|^oom_kill|Out of memory|^Test CA|^Baci VPS:|^Traceback|^.*Error:|start request repeated|Failed to |\"error\":|^VM rehearsal|^VM WebRTC" "$log" | tail -14)' ERR
-            bash scripts/test-vps-offline-vm.sh "$RUNNER_TEMP"/vps-release/*amd64.tar.gz "$mode" 512 "$RUNNER_TEMP/vps-live-media" 2>&1 | tee "$log"
-            grep -Fq 'Two live WebRTC peers exchanged bidirectional Opus and teacher VP8' "$log"
-            grep -E '^VM passed:|^VM baseline|^VM memory|^VM before reboot|^VM service|^No VM Internet|^Real ACME|^Two live WebRTC' "$log" | while IFS= read -r line; do echo "::notice title=Isolated VPS $mode test::$line"; done
+          for ram in 512 4096; do
+            for mode in files auto; do
+              log="$RUNNER_TEMP/vps-rehearsal-$ram-$mode.log"
+              trap 'while IFS= read -r line; do echo "::error title=VPS $ram $mode rehearsal::$line"; done < <(grep -E "^VM guest failure|^VM memory|^MemAvailable|^oom_kill|Out of memory|^Test CA|^Baci VPS:|^Traceback|^.*Error:|start request repeated|Failed to |\"error\":|^VM rehearsal|^VM WebRTC" "$log" | tail -14)' ERR
+              bash scripts/test-vps-offline-vm.sh "$RUNNER_TEMP"/vps-release/*amd64.tar.gz "$mode" "$ram" "$RUNNER_TEMP/vps-live-media" 2>&1 | tee "$log"
+              grep -Fq 'Two live WebRTC peers exchanged bidirectional Opus and teacher VP8' "$log"
+              grep -E '^VM passed:|^VM full test:|^VM baseline|^VM memory|^VM before reboot|^VM service|^No VM Internet|^Real ACME|^Two live WebRTC' "$log" | while IFS= read -r line; do echo "::notice title=Isolated VPS $ram $mode test::$line"; done
+            done
           done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

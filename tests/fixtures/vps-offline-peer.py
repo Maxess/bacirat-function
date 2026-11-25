@@ -81,10 +81,11 @@ def exercise():
     setup = module_from_spec(spec)
     loader.exec_module(setup)
     config = json.loads(SET.read_text())
-    deadline = time.monotonic() + 40
-    while time.monotonic() < deadline and not BEAT.exists():
-        time.sleep(.5)
-    assert BEAT.exists(), 'Missing real Recorder heartbeat to synthetic site'
+    if config.get('profile', 'full') == 'full':
+        deadline = time.monotonic() + 40
+        while time.monotonic() < deadline and not BEAT.exists():
+            time.sleep(.5)
+        assert BEAT.exists(), 'Missing real Recorder heartbeat to synthetic site'
     deployment = media.pilot_deployment()
     name = 'offline-fixture-only'
     for rpc, data in [('CreateRoom', {'name': name}), ('ListRooms', {}), ('DeleteRoom', {'room': name})]:

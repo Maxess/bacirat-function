@@ -34,6 +34,31 @@ class OfflineSetupTest(unittest.TestCase):
         with self.assertRaisesRegex(setup.Refused, 'Cannot determine the RAM'):
             setup.check_memory('MemAvailable: 600000 kB\n')
 
+    def test_install_profile_is_independent_of_tls(self):
+        self.assertEqual(setup.install_profile('auto', 469200), 'live')
+        self.assertEqual(setup.install_profile('auto', setup.FULL_RAM_KIB - 1), 'live')
+        self.assertEqual(setup.install_profile('auto', setup.FULL_RAM_KIB), 'full')
+        self.assertEqual(setup.install_profile('full', 4194304), 'full')
+        self.assertEqual(setup.install_profile('live', 4194304), 'live')
+        with self.assertRaisesRegex(setup.Refused, 'use --profile live'):
+            setup.install_profile('full', 469200)
+
+    def test_live_apt_and_readiness_do_not_touch_recorder_components(self):
+        with patch.object(setup, 'run') as run, redirect_stdout(StringIO()):
+            setup.deb_install('live')
+            self.assertEqual(run.call_args.args[3:], ('ca-certificates', 'openssl', 'python3'))
+            setup.deb_install('full')
+            self.assertEqual(run.call_args.args[3:], ())
+        with patch.object(setup, 'info', return_value='running') as info, patch.object(setup, 'json_file') as file, \
+                patch.object(setup, 'probe_renderer') as renderer:
+            setup.program_checks({'profile': 'live'})
+            self.assertEqual([call.args[-1] for call in info.call_args_list], [setup.SFU, setup.GATE])
+            file.assert_not_called()
+            renderer.assert_not_called()
+        self.assertTrue(setup.with_recording({}))  # v1.1 installed-state compatibility
+        self.assertEqual(setup.Fresh('live').enabled, setup.LIVE_UNITS)
+        self.assertEqual(setup.Fresh('full').enabled, setup.ENABLED)
+
     def test_school_exact_subpath_and_distinct_endpoints(self):
         link = setup.names('https://TEST-school.example.ir/Campus/secondary/', 'Rtc.Example.ir', '192.0.0.9')
         self.assertEqual(link['school'], 'https://test-school.example.ir/Campus/secondary')
@@ -191,11 +216,12 @@ class OfflineSetupTest(unittest.TestCase):
                 err = stack.enter_context(redirect_stderr(StringIO()))
                 mocks['STATE'].is_file.return_value = False
                 mocks['TRUST_ROOTS'].is_file.return_value = True
+                mocks['fresh_preflight'].return_value = (469200, 'live')
                 supplied = (b'certificate', b'key') if mode == 'files' else None
                 mocks['cert_inputs'].return_value = supplied
                 mocks['tls_selection'].return_value = (mode, 'cert.pem', 'key.pem')
                 self.assertEqual(setup.main(flags + ['--check', '--tls', mode]), 0)
-                self.assertIn(f'preflight=ok tls={mode}', out.getvalue())
+                self.assertIn(f'preflight=ok tls={mode} profile=live ram_kib=469200', out.getvalue())
                 for name in ('deb_install', 'Fresh', 'export_pair'):
                     mocks[name].assert_not_called()
                 if mode == 'files':
@@ -209,7 +235,9 @@ class OfflineSetupTest(unittest.TestCase):
                 txn.apply.side_effect = setup.Refused('untrusted media TLS')
                 self.assertEqual(setup.main(flags + ['--tls', mode]), 1)
                 config, actual = txn.apply.call_args.args
-                self.assertEqual((config['tls_mode'], actual), (mode, supplied))
+                self.assertEqual((config['tls_mode'], config['profile'], actual), (mode, 'live', supplied))
+                mocks['deb_install'].assert_called_once_with('live')
+                mocks['Fresh'].assert_called_once_with('live')
                 self.assertNotIn('installation=ok', out.getvalue())
                 self.assertIn('untrusted media TLS', err.getvalue())
                 txn.cleanup.assert_called_once()
