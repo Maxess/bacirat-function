@@ -1,7 +1,7 @@
 {
-  "version": "1.0.0",
-  "run_id": 45310797443,
-  "commit": "272ba36c1bf9b8185692913755d5df5e4b72d8e4",
-  "checksums_sha256": "0a75c137cb1df6eff0bb041d70dc6c20ea4808c0da99c321462a998eac635c86",
-  "installer_sha256": "7b16f150eda42a1cc7b9fd7015c2bd41f1013533de86b370b116b2881a7c49dc"
+  "version": "1.1.0",
+  "run_id": 45513547747,
+  "commit": "b60dc6911a56c959519e796fab6c96ba72beabed",
+  "checksums_sha256": "9608e7c0df6636c283d414edc3c1f67d2c3781cbfb560e39ad287250075c2d8e",
+  "installer_sha256": "10faa75003f631be462468afae318daf077de5f71a7eb10dd07e3d97d733f0a3"
 }
