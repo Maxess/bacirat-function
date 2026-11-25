@@ -24,6 +24,16 @@ GATEWAY = 'plugins/school-plugins.php'
 
 
 class OfflineSetupTest(unittest.TestCase):
+    def test_fresh_memory_check_accepts_512_mib_vps_after_linux_reservations(self):
+        self.assertEqual(setup.MIN_RAM_KIB, 393216)
+        for total in (setup.MIN_RAM_KIB, 440000, 524288, 4194304):
+            with self.subTest(total=total):
+                self.assertEqual(setup.check_memory(f'MemTotal: {total} kB\nMemAvailable: 32768 kB\nSwapTotal: 0 kB\n'), total)
+        with self.assertRaisesRegex(setup.Refused, 'Linux sees 393215 KiB.*swap does not count'):
+            setup.check_memory('MemTotal: 393215 kB\nSwapTotal: 4194304 kB\n')
+        with self.assertRaisesRegex(setup.Refused, 'Cannot determine the RAM'):
+            setup.check_memory('MemAvailable: 600000 kB\n')
+
     def test_school_exact_subpath_and_distinct_endpoints(self):
         link = setup.names('https://TEST-school.example.ir/Campus/secondary/', 'Rtc.Example.ir', '192.0.0.9')
         self.assertEqual(link['school'], 'https://test-school.example.ir/Campus/secondary')

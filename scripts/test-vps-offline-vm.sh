@@ -87,6 +87,10 @@ for target in "${targets[@]}"; do
 done
 wait_vm
 send "$archive" "$work/qa.crt" "$work/school.pem" "$work/school.key" "$root/tests/fixtures/vps-offline-peer.py"
+if [[ -n ${4:-} ]]; then
+    install -m 0755 "$4" "$work/vps-live-media"
+    send "$work/vps-live-media"
+fi
 if [[ "$mode" == files ]]; then
     send "$work/media.pem" "$work/media.key"
 else
@@ -144,6 +148,7 @@ sudo ip link set vpsqa0 up
 sudo ip netns exec schoolqa ip addr add 172.30.123.2/29 dev schoolqa0
 sudo ip netns exec schoolqa ip link set schoolqa0 up
 sudo ip netns exec schoolqa ip link set lo up
+sudo ip netns exec schoolqa ip route add 192.0.0.9/32 via 172.30.123.1
 printf '172.30.123.2 school.example.test\n' | sudo tee -a /etc/hosts >/dev/null
 chmod 600 school.key
 sha256sum /etc/apt/sources.list.d/* > apt.before
@@ -160,7 +165,6 @@ else
     if "${installer[@]}" --check --ipv4 192.0.0.10 > rejected.log 2>&1; then exit 1; fi
     grep -Fq 'Media DNS is not ready' rejected.log
     sudo ip netns exec schoolqa ip addr add 172.30.123.3/29 dev schoolqa0
-    sudo ip netns exec schoolqa ip route add 192.0.0.9/32 via 172.30.123.1
     printf '172.30.123.3 acme-v02.api.letsencrypt.org\n' | sudo tee -a /etc/hosts >/dev/null
     if "${installer[@]}" --check > rejected.log 2>&1; then exit 1; fi
     grep -Fq 'Cannot reach the trusted Let' rejected.log
@@ -269,15 +273,31 @@ sudo baci-vps doctor --online | tee online.log
 grep -Fq 'school_webhook=ok' online.log
 grep -Fq 'school_recorder=ready' online.log
 systemctl is-enabled school-classroom-{sfu,https,admission,recorder}.service
+if [[ -x ./vps-live-media ]]; then
+    if [[ "$MODE" == auto ]]; then
+        # After issuance the classroom doesn't need the disposable CA processes.
+        sudo systemctl stop baci-qa-acme baci-qa-pebble baci-qa-dns
+    fi
+    # The two test peers cannot fall back to TCP ICE (or use a TURN relay).
+    sudo ip netns exec schoolqa ip rule add ipproto tcp dport 7881 prohibit
+    sudo cat /etc/school-classroom/site-pairing.json \
+        | sudo ip netns exec schoolqa timeout 70 ./vps-live-media
+    sudo baci-vps doctor
+fi
+for unit in school-classroom-{sfu,https,admission,recorder,postprocess}.service; do
+    test "$(systemctl show -p NRestarts --value "$unit")" -eq 0
+    printf 'VM service %s %s\n' "$unit" "$(systemctl show -p MemoryCurrent -p MemoryPeak "$unit" | paste -sd ' ')"
+done
 awk '$1 == "oom_kill" {print $2}' /proc/vmstat | cmp oom.before -
 if [[ "$RAM" == 512 ]]; then
     awk '/^SwapTotal:/ {exit ($2 != 0)}' /proc/meminfo
 fi
+printf 'VM before reboot: OOM kills=0; %s\n' "$(grep '^MemAvailable:' /proc/meminfo)"
 cat /proc/sys/kernel/random/boot_id > boot.before
 GUEST
 vm 'sudo reboot' || true
 for attempt in $(seq 1 60); do
-    if vm 'test "$(cat /proc/sys/kernel/random/boot_id)" != "$(cat boot.before)" && sudo baci-vps doctor' 2>/dev/null; then
+    if vm 'test "$(cat /proc/sys/kernel/random/boot_id)" != "$(cat boot.before)" && grep -Eq "^oom_kill +0$" /proc/vmstat && sudo baci-vps doctor' 2>/dev/null; then
         if [[ "$mode" == auto ]]; then
             vm 'set -o pipefail; media=$(cat qa-media); openssl s_client -connect 127.0.0.1:443 -servername "$media" -verify_hostname "$media" -verify_return_error </dev/null 2>/dev/null | openssl x509 -noout -fingerprint -sha256 | cmp issued.before -'
             echo 'VM passed: automatic TLS-ALPN-01, no port 80, same trusted certificate after reboot, signed API and webhooks, sandboxed MP4, and Recorder heartbeat.'

@@ -188,6 +188,15 @@ def system_preflight():
          'A running systemd with cgroup v2 is required.')
 
 
+def check_memory(meminfo):
+    found = re.search(r'^MemTotal:[ \t]+([0-9]+)[ \t]+kB$', meminfo, re.M)
+    need(found is not None, 'Cannot determine the RAM visible to Linux (/proc/meminfo).')
+    total_kib = int(found[1])
+    need(total_kib >= MIN_RAM_KIB, f'Linux sees {total_kib} KiB of RAM. '
+         f'Use a VPS provisioned with 512 MiB or more (at least {MIN_RAM_KIB // 1024} MiB visible to Linux; swap does not count).')
+    return total_kib
+
+
 def fresh_preflight():
     for path in (APP, CFG, REC, REC_CFG, SPOOL, HTTPS_STATE, CLI, PROFILE):
         need(not os.path.lexists(path), f'Existing classroom path {path}; nothing was overwritten.')
@@ -217,11 +226,10 @@ def fresh_preflight():
                 sock.bind(('0.0.0.0', port))
         except OSError:
             raise Refused(f'Port {port}/{"UDP" if kind == socket.SOCK_DGRAM else "TCP"} is already in use. No service was stopped.') from None
-    total_kib = int(re.search(r'^MemTotal:\s+(\d+)', Path('/proc/meminfo').read_text(), re.M)[1])
-    need(total_kib >= MIN_RAM_KIB, f'Linux sees {total_kib // 1024} MiB of RAM. '
-         'Use a dedicated VPS provisioned with 512 MiB or more (at least 384 MiB visible to Linux).')
+    total_kib = check_memory(Path('/proc/meminfo').read_text())
     need(all(shutil.disk_usage(path).free >= size * GIB for path, size in
              [(APP.parent, 2), (SPOOL.parent, 5), (HERE, 1)]), 'Not enough free space; allow at least 8 GiB free on the system disk.')
+    return total_kib
 
 
 def tls_selection(mode, cert, key):
@@ -713,7 +721,7 @@ def main(argv=None):
                 print('Already installed. No settings, keys or services were changed. Use sudo baci-vps export if needed.')
             return 0 if doctor(config, installed and args.online) else 1
         need(not installed, 'No completed offline installation was found.')
-        fresh_preflight()
+        total_kib = fresh_preflight()
         verify_payloads()
         config = names(prompt(args.site, 'نشانی HTTPS خودِ سایت مدرسه، با زیرپوشه اگر دارد (نمونه: https://school.example.ir/baci)'),
                        prompt(args.media, 'نام زیردامنهٔ رسانه بدون https (نمونه: class.example.ir)'),
@@ -738,7 +746,7 @@ def main(argv=None):
         if args.check:
             suffix = ('DNS and ACME directory reachable; no certificate was ordered; check incoming TCP 443 in the provider panel'
                       if mode == 'auto' else 'local files only; DNS, firewall and pairing are separate')
-            print(f'preflight=ok tls={mode} ({suffix})')
+            print(f'preflight=ok tls={mode} ram_kib={total_kib} ({suffix})')
             return 0
         deb_install()
         if mode == 'files':

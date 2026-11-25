@@ -13,6 +13,9 @@ on:
       - tests/*vps*offline*
       - tests/fixtures/vps-offline-peer.py
       - tests/fixtures/vps-acme-gateway.py
+      - tests/fixtures/vps-live-media.go
+      - server/recorder/native/go.mod
+      - server/recorder/native/go.sum
       - tests/plugin-manager.php
       - artifacts/*pairing*.zip
 permissions:
@@ -67,14 +70,26 @@ jobs:
           trap 'while IFS= read -r line; do echo "::error title=Bundle build::$line"; done < <(tail -20 "$log")' ERR
           python3 -u scripts/build-vps-offline.py "$RUNNER_TEMP/vps-release" 2>&1 | tee "$log"
           grep -E '^Ubuntu dependency inventory:|^[0-9a-f]{64}  ' "$log" | while IFS= read -r line; do echo "::notice title=Bundle manifest::$line"; done
-      - name: Rehearse the exact deliverable on fresh 512 MiB Ubuntu VMs (offline PEM and real ACME)
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version: '1.26.2'
+          cache: false
+      - name: Build the two-peer WebRTC fixture on the runner (not the VPS)
+        working-directory: server/recorder/native
+        env:
+          CGO_ENABLED: '0'
+          GOTOOLCHAIN: local
+        run: |
+          go build -mod=readonly -trimpath -ldflags='-s -w' -o "$RUNNER_TEMP/vps-live-media" "$GITHUB_WORKSPACE/tests/fixtures/vps-live-media.go"
+      - name: Verify exact archive, 512 MiB without swap, both TLS modes and two live WebRTC peers
         run: |
           set -euo pipefail
           for mode in files auto; do
             log="$RUNNER_TEMP/vps-rehearsal-$mode.log"
-            trap 'while IFS= read -r line; do echo "::error title=VPS $mode rehearsal::$line"; done < <(grep -E "^VM guest failure|^VM memory|^MemAvailable|^oom_kill|Out of memory|^Test CA|^Baci VPS:|^Traceback|^.*Error:|start request repeated|Failed to |\"error\":|^VM rehearsal" "$log" | tail -14)' ERR
-            bash scripts/test-vps-offline-vm.sh "$RUNNER_TEMP"/vps-release/*amd64.tar.gz "$mode" 512 2>&1 | tee "$log"
-            grep -E '^VM passed:|^VM baseline|^VM memory|^No VM Internet|^Real ACME' "$log" | while IFS= read -r line; do echo "::notice title=Isolated VPS $mode test::$line"; done
+            trap 'while IFS= read -r line; do echo "::error title=VPS $mode rehearsal::$line"; done < <(grep -E "^VM guest failure|^VM memory|^MemAvailable|^oom_kill|Out of memory|^Test CA|^Baci VPS:|^Traceback|^.*Error:|start request repeated|Failed to |\"error\":|^VM rehearsal|^VM WebRTC" "$log" | tail -14)' ERR
+            bash scripts/test-vps-offline-vm.sh "$RUNNER_TEMP"/vps-release/*amd64.tar.gz "$mode" 512 "$RUNNER_TEMP/vps-live-media" 2>&1 | tee "$log"
+            grep -Fq 'Two live WebRTC peers exchanged bidirectional Opus and teacher VP8' "$log"
+            grep -E '^VM passed:|^VM baseline|^VM memory|^VM before reboot|^VM service|^No VM Internet|^Real ACME|^Two live WebRTC' "$log" | while IFS= read -r line; do echo "::notice title=Isolated VPS $mode test::$line"; done
           done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

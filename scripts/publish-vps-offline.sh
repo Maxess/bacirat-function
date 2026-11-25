@@ -23,6 +23,11 @@ trap 'echo "::error title=VPS release::Failed at $stage; public release not conf
 gh api "repos/$repo/actions/runs/$run" | jq -e --arg sha "$commit" --arg branch "$branch" '
     .status == "completed" and .conclusion == "success" and .head_sha == $sha and .head_branch == $branch
     and (.path | split("@")[0]) == ".github/workflows/vps-offline.yml"' >/dev/null
+stage=verify-low-memory-vm-gate
+gh api "repos/$repo/actions/runs/$run/jobs" | jq -e '
+    any(.jobs[]; .name == "ubuntu-noble-installer" and .conclusion == "success"
+        and any(.steps[]; .name == "Verify exact archive, 512 MiB without swap, both TLS modes and two live WebRTC peers"
+                and .conclusion == "success"))' >/dev/null
 stage=verify-ci-artifact
 gh api "repos/$repo/actions/runs/$run/artifacts" | jq -e --arg digest "sha256:$artifact_sha" '
     [.artifacts[] | select(.name == "classroom-vps-offline-verified")]
@@ -40,7 +45,7 @@ stage=check-published-inventory
     grep -Fxq "$installer  $name.tar.gz" "$sha_file"
     BUILD=$(tar -xOf "$name.tar.gz" baci-classroom-vps-offline/BUILD.json)
     jq -e --arg sha "$commit" --arg ver "$version" '.git == $sha and .version == $ver and .arch == "amd64" and .ubuntu == "24.04"
-        and .tls_modes == ["auto", "files"]' <<< "$BUILD" >/dev/null
+        and .tls_modes == ["auto", "files"] and .minimum_visible_ram_kib == 393216' <<< "$BUILD" >/dev/null
 )
 stage=prepare-corresponding-source-assets
 # GitHub Releases cap a single asset at 2 GiB. The corresponding source for
@@ -73,15 +78,16 @@ if gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
     exit 1
 fi
 cat > "$work/notes.md" <<EOF_NOTES
-## نصب VPS تازه با SSL خودکار یا کاملاً آفلاین — Ubuntu 24.04 LTS amd64
+## نصب VPS تازه با ۵۱۲ MiB RAM و SSL خودکار یا آفلاین — Ubuntu 24.04 LTS amd64
 
+- محدودیت ۲ GiB حذف شد. نصب کامل روی Ubuntu Minimal با ۵۱۲ MiB RAM و ۱ vCPU بدون swap آزمایش شده است. این آزمون، ظرفیت کلاس پرجمعیت یا ضبط طولانی را تضمین نمی‌کند.
 - **برای نصب روی VPS** فقط \`$name.tar.gz\` را بگیر. \`START-HERE-fa.md\` داخل آرشیو و [راهنمای فارسی](https://github.com/$repo/blob/$commit/server/offline/README-fa.md) مراحل را توضیح می‌دهند.
 - **برای سایت تازهٔ مدرسه** در همان راهنما از نصب Baci روی هاست PHP/MySQL شروع کن. ZIP کوچک \`baci-classroom-site-pairing-v0.1.31.zip\` را روی رایانه باز کن؛ مدیر ۰٫۱٫۳۱ و کلاس ۰٫۴٫۲۴ هستند. بستهٔ کامل سایت پایه را از منبع اصلی بگیر.
 - \`*-ubuntu-source.tar\` یا بخش‌های \`*.tar.part-*\` کد منبع متناظر بسته‌های Ubuntu هستند؛ **روی VPS لازم نیستند**. اگر کد منبع را می‌خواهی، بعد از دریافت بخش‌ها و بررسی SHA-256، آن‌ها را با \`cat *-ubuntu-source.tar.part-* > $source_tar\` به هم بچسبان و SHA-256 فایل بازسازی‌شده را هم بررسی کن.
 
 پیش‌نیازهای نرم‌افزاری از خود بسته نصب می‌شوند. با \`--tls auto\` و رکورد A مستقیم و TCP 443 باز، Caddy گواهی عمومی Let’s Encrypt را می‌گیرد، نصب و تمدید می‌کند؛ به گواهی قبلی یا پورت 80 نیازی نیست. اگر صدور آنلاین ممکن نیست، \`--tls files\` از گواهی آماده استفاده می‌کند و کاملاً آفلاین نصب می‌شود. این نسخه برای ارتقای VPS موجود نیست.
 
-[آزمون همین بایت‌ها روی دو Ubuntu تازه]($base) — نصب آفلاین با PEM و صدور واقعی TLS-ALPN-01 با CA آزمایشی، HTTPS معتبر، API و وب‌هوک امضاشده، ضربان ضبط، MP4 sandbox‌شده و حفظ گواهی بعد از reboot. صدور زندهٔ Let’s Encrypt و کلاس با گوشی/هاست واقعی به آزمون خودت در محیط مقصد نیاز دارند.
+[آزمون همین بایت‌ها روی دو Ubuntu تازهٔ ۵۱۲ MiB]($base) — نصب بدون swap، PEM آفلاین و صدور واقعی TLS-ALPN-01 با CA آزمایشی، API و وب‌هوک امضاشده، صوت Opus دوطرفه و تصویر VP8 بین دو همتای WebRTC، ضربان ضبط، MP4 آزمایشی sandbox‌شده و حفظ گواهی بعد از reboot. صدور زندهٔ Let’s Encrypt و کلاس با گوشی/هاست واقعی به آزمون خودت در محیط مقصد نیاز دارند.
 EOF_NOTES
 gh release create "$tag" "${files[@]}" \
     --repo "$repo" --target "$commit" --title "Classroom VPS v$version · Automatic TLS · Ubuntu 24.04 amd64" \
