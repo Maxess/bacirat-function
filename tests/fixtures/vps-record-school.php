@@ -56,6 +56,14 @@ try {
                 CREATE TABLE bot_chats (platform TEXT,chat_id TEXT,title TEXT,chat_type TEXT,status TEXT);
                 INSERT INTO bot_chats VALUES ('telegram','-100321','آزمایش تحویل','supergroup','member')");
             cl_rec_set_link($s, $cfg, cl_classes($db, '1405/1406')[15], 'telegram:' . QA_GROUP, $provider);
+        } elseif ($cmd === 'tickets') {
+            // Use the same grants and five-second nbf allowance as the real site.
+            $tickets = ['teacher-7'=>cl_join_ticket($cfg, QA_ROOM, $teacher)];
+            for ($i = 1; $i <= 10; $i++) {
+                $actor = ['identity'=>'student-' . $i,'name'=>'پژوهشگر آزمایشی ' . $i];
+                $tickets[$actor['identity']] = cl_join_ticket($cfg, QA_ROOM, $actor);
+            }
+            echo json_encode($tickets, JSON_THROW_ON_ERROR), "\n";
         } elseif ($cmd === 'start') {
             $state = json_decode(file_get_contents($dir . '/live.json'), true, 4, JSON_THROW_ON_ERROR);
             $sid = $state['teacherSID'];

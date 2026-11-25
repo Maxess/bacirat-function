@@ -14,8 +14,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/livekit/protocol/auth"
+	"github.com/go-logr/logr"
 	"github.com/livekit/protocol/livekit"
+	"github.com/livekit/protocol/logger"
 	lksdk "github.com/livekit/server-sdk-go/v2"
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
@@ -100,13 +101,7 @@ func name(i int) string {
 	return fmt.Sprintf("student-%d", i)
 }
 
-func connect(p pairing, i int, streams []channel, counters *[pupilCount+1][4]atomic.Uint64) (*lksdk.Room, error) {
-	yes, no := true, false
-	jwt, err := auth.NewAccessToken(p.Key, p.Secret).SetIdentity(name(i)).SetValidFor(2 * time.Minute).
-		SetVideoGrant(&auth.VideoGrant{RoomJoin: true, Room: roomName, CanSubscribe: &yes, CanPublish: &no, CanPublishData: &no}).ToJWT()
-	if err != nil {
-		return nil, err
-	}
+func connect(p pairing, i int, jwt string, streams []channel, counters *[pupilCount+1][4]atomic.Uint64) (*lksdk.Room, error) {
 	cb := lksdk.NewRoomCallback()
 	cb.OnTrackSubscribed = func(track *webrtc.TrackRemote, pub *lksdk.RemoteTrackPublication, from *lksdk.RemoteParticipant) {
 		for index, s := range streams {
@@ -127,15 +122,28 @@ func connect(p pairing, i int, streams []channel, counters *[pupilCount+1][4]ato
 }
 
 func run() error {
-	if len(os.Args) != 7 || os.Args[1] != "--fixture" {
-		return fmt.Errorf("expected --fixture camera.ivf screen.ivf teacher.opus pupil.opus live-state.json")
+	if len(os.Args) != 8 || os.Args[1] != "--fixture" {
+		return fmt.Errorf("expected --fixture camera.ivf screen.ivf teacher.opus pupil.opus live-state.json tickets.json")
 	}
+	// The SDK validation-failure logger dumps entire HTTP requests. Only emit
+	// our own fixed-stage diagnostics, never join tickets or request headers.
+	lksdk.SetLogger(logger.LogRLogger(logr.Discard()))
 	var pair pairing
 	if err := json.NewDecoder(os.Stdin).Decode(&pair); err != nil {
 		return err
 	}
 	if pair.URL != "wss://media.example.test" && pair.URL != "wss://classroom-new.example.com" {
 		return fmt.Errorf("test fixture must use the isolated QA hostname")
+	}
+	ticketFile, err := os.Open(os.Args[7])
+	if err != nil {
+		return err
+	}
+	var tickets map[string]string
+	err = json.NewDecoder(ticketFile).Decode(&tickets)
+	_ = ticketFile.Close()
+	if err != nil || len(tickets) != pupilCount+1 {
+		return fmt.Errorf("expected one school join ticket per peer")
 	}
 	cam, err := movie(os.Args[2])
 	if err != nil {
@@ -179,7 +187,7 @@ func run() error {
 	for start := 0; start <= pupilCount; start += 3 {
 		var group sync.WaitGroup
 		for i := start; i < start+3 && i <= pupilCount; i++ {
-			group.Go(func() { rooms[i], errors[i] = connect(pair, i, streams, &counters) })
+			group.Go(func() { rooms[i], errors[i] = connect(pair, i, tickets[name(i)], streams, &counters) })
 		}
 		group.Wait()
 		for i := start; i < start+3 && i <= pupilCount; i++ {

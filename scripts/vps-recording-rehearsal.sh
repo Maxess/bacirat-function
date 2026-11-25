@@ -48,8 +48,10 @@ GUEST
     # Wait for the new site's heartbeat before opening a normal bell.
     vm 'for n in $(seq 1 24); do if sudo baci-vps doctor --online 2>&1 | grep -q "^school_recorder=ready"; then exit; fi; sleep 1; done; exit 1'
     vm 'sudo systemd-run --quiet --unit=baci-qa-sample /bin/bash -c '\''while true; do grep -E "^MemAvailable:|^SwapTotal:|^SwapFree:" /proc/meminfo | xargs; sleep 1; done'\'''
+    echo "QA_STAGE clocks guest=$(vm 'date -u +%s.%N') runner=$(date -u +%s.%N)"
+    ( umask 077; school tickets > "$q/tickets.json" )
     as_runner timeout 125 env GOMAXPROCS=3 "$client" --fixture "$q/camera.ivf" "$q/screen.ivf" \
-        "$q/teacher.opus" "$q/pupil.opus" "$q/live.json" < "$q/pair.json" > "$q/load.log" 2>&1 &
+        "$q/teacher.opus" "$q/pupil.opus" "$q/live.json" "$q/tickets.json" < "$q/pair.json" > "$q/load.log" 2>&1 &
     load_pid=$!
     for n in $(seq 1 70); do
         if [[ -s "$q/live.json" ]]; then break; fi
