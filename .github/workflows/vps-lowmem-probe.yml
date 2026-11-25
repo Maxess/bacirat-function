@@ -39,6 +39,6 @@ jobs:
           bash scripts/.vps-lowmem-probe-ci.sh "$w/diagnosis-only.tar.gz" files 512 2>&1 | tee "$w/result.log"
           rc=${PIPESTATUS[0]}
           set -e
-          proof=$(grep -E '^QA_BROWSER|^QA_MEMORY|^QA_DIAG|^VM memory|^oom_kill|^VM guest failure|^VM passed' "$w/result.log" | tail -14 | paste -sd '|')
+          proof=$(grep -E '^QA_BROWSER|^QA_PHASE|^QA_VM|^QA_MEMORY|^QA_DIAG|^VM memory|^oom_kill|^VM guest failure|^VM passed' "$w/result.log" | tail -24 | paste -sd '|')
           echo "::notice title=512 MiB measurements::${proof:0:3900}"
           exit "$rc"
