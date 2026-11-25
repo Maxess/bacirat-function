@@ -1,6 +1,9 @@
 """QA TLS edge in the test client's network, outside the classroom VPS."""
+import base64
 from email import policy
 from email.parser import BytesParser
+import hashlib
+import hmac
 import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -39,6 +42,18 @@ class Peer(BaseHTTPRequestHandler):
                 with (self.server.directory / 'received.mp4').open('xb') as dst:  # No duplicate delivery.
                     dst.write(fields['video'])
                 self.reply(200, 'application/json', json.dumps({'ok': True, 'result': {'chat': {'id': -100321}, 'message_id': 321}}).encode())
+            elif self.path == '/campus/plugins/school-plugins.php?plugin=school-classroom&route=events':
+                encoded, claims, signature = self.headers['Authorization'].removeprefix('Bearer ').split('.')
+
+                def b64url(text):
+                    return base64.urlsafe_b64decode(text + '=' * (-len(text) % 4))
+
+                pair = self.server.pair
+                assert hmac.compare_digest(b64url(signature), hmac.digest(pair['api_secret'].encode(),
+                                                                          f'{encoded}.{claims}'.encode(), 'sha256'))
+                claims = json.loads(b64url(claims))
+                assert claims['iss'] == pair['api_key'] and claims['sha256'] == base64.b64encode(hashlib.sha256(body).digest()).decode()
+                self.reply(200, 'application/json', b'{"ok":true}')
             elif self.path == '/campus/plugins/school-plugins.php?plugin=school-classroom&route=recording':
                 assert length <= 32768
                 conn = http.client.HTTPConnection('127.0.0.1', 18391, timeout=8)
@@ -62,6 +77,7 @@ if __name__ == '__main__':
     directory = Path(sys.argv[1])
     with ThreadingHTTPServer(('172.30.124.2', 443), Peer) as server:
         server.directory = directory
+        server.pair = json.loads((directory / 'pair.json').read_text())
         tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         tls.load_cert_chain(directory / 'school.pem', directory / 'school.key')
         server.socket = tls.wrap_socket(server.socket, server_side=True)

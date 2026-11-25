@@ -2,7 +2,8 @@
 # Sourced by test-vps-offline-vm.sh. Peers, school and provider run outside the
 # VM; the guest runs just the installed VPS services (plus QA sampling).
 run_recording_rehearsal() (
-    set -euo pipefail
+    set -Eeuo pipefail
+    trap 'echo "QA_STAGE rehearsal failed at line $LINENO: $BASH_COMMAND" >&2' ERR
     local q="$work/recording" client=$1 net=baci-vps-recording
     mkdir -m 700 "$q"
     cp "$work/qa.crt" "$work/school.pem" "$work/school.key" "$q/"
@@ -16,7 +17,9 @@ run_recording_rehearsal() (
     stop_fixture() {
         local code=$?
         if (( code != 0 )); then
-            tail -10 "$q/load.log" "$q/php.log" "$q/tls.log" 2>/dev/null || true
+            for file in "$q/load.log" "$q/php.log" "$q/tls.log"; do
+                if [[ -f "$file" ]]; then tail -8 "$file" | sed "s#^#QA_STAGE $(basename "$file"): #"; fi
+            done
             vm 'sudo journalctl --no-pager -n 12 -u school-classroom-recorder -u school-classroom-postprocess -o cat' || true
             school status || true
         fi
@@ -38,6 +41,7 @@ ip link set "$iface" up
 sed -i -E 's/^172\.30\.123\.2 school\.example\.test$/172.30.124.2 school.example.test/' /etc/hosts
 systemctl stop baci-fixture-peer
 GUEST
+    echo "QA_STAGE isolated school and synthetic inputs on runner, VPS on guest"
     school init
     as_runner php -S 127.0.0.1:18391 "$php" > "$q/php.log" 2>&1 &
     in_net python3 "$root/tests/fixtures/vps-record-tls.py" "$q" > "$q/tls.log" 2>&1 &
@@ -52,6 +56,7 @@ GUEST
         kill -0 "$load_pid" && sleep 1
     done
     test -s "$q/live.json"
+    echo "QA_STAGE real RTP warm-up passed; requesting teacher recording"
     school start
     for n in $(seq 1 30); do
         if school status | grep -Fq '"live":true'; then break; fi
