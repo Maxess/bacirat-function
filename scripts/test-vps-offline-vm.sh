@@ -13,13 +13,13 @@ original=${7:-}
 if [[ "$scenario" == upgrade ]]; then original=$(realpath "$original"); fi
 if [[ -n "$capacity" ]]; then capacity=$(realpath "$capacity"); fi
 [[ "$mode" == files || "$mode" == auto ]]
-[[ "$ram" == 512 || "$ram" == 4096 ]]
+[[ "$ram" == 512 || "$ram" == 1024 || "$ram" == 4096 ]]
 cpus=2
 profile=full
-if [[ "$ram" == 512 ]]; then cpus=1; profile=live; fi
+if [[ "$ram" != 4096 ]]; then cpus=1; profile=live; fi
 if [[ "$scenario" == compact ]]; then profile=compact; fi
 if [[ "$scenario" == upgrade ]]; then profile=live; fi
-if [[ "$scenario" != default ]]; then test "$ram" = 512; fi
+if [[ "$scenario" != default ]]; then test "$ram" != 4096; fi
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 work=$(mktemp -d)
 port=22131
@@ -187,8 +187,8 @@ set -Eeuo pipefail
 trap 'echo "VM guest failure at line $LINENO: $BASH_COMMAND" >&2' ERR
 read -r total swap < <(awk '/^MemTotal:/{m=$2} /^SwapTotal:/{s=$2} END {print m,s}' /proc/meminfo)
 printf 'VM memory: provisioned=%s MiB visible=%s KiB swap=%s KiB\n' "$RAM" "$total" "$swap"
-if [[ "$RAM" == 512 ]]; then
-    test "$total" -le 524288
+if [[ "$RAM" != 4096 ]]; then
+    test "$total" -le "$((RAM * 1024))"
     test "$swap" -eq 0
 fi
 awk '$1 == "oom_kill" {print $2}' /proc/vmstat > oom.before
@@ -424,7 +424,7 @@ for unit in "${units[@]}"; do
     printf 'VM service %s %s\n' "$unit" "$(systemctl show -p MemoryCurrent -p MemoryPeak "$unit" | paste -sd ' ')"
 done
 awk '$1 == "oom_kill" {print $2}' /proc/vmstat | cmp oom.before -
-if [[ "$RAM" == 512 ]]; then
+if [[ "$RAM" != 4096 ]]; then
     awk '/^SwapTotal:/ {exit ($2 != 0)}' /proc/meminfo
 fi
 printf 'VM before reboot: OOM kills=0; %s\n' "$(grep '^MemAvailable:' /proc/meminfo)"

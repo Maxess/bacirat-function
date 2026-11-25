@@ -49,6 +49,23 @@ src = replace(src, '                await ArchiveRenderer(self.assets).check_rep
                 print('QA_PHASE audio decoder support: '+str(await page.evaluate("AudioDecoder.isConfigSupported({codec:'opus',sampleRate:48000,numberOfChannels:2}).then(x=>x.supported)")), flush=True)
                 assert await page.evaluate('replay.ready()')
                 print('QA_PHASE replay ready; closing browser', flush=True)""")
+src = replace(src, "            print('QA_PHASE driver ready; launching browser', flush=True)\n            browser =", """            print('QA_PHASE driver ready; launching browser', flush=True)
+            if os.getenv('BACI_QA_PERSISTENT'):
+                import tempfile
+                from capture import ORIGIN
+                with tempfile.TemporaryDirectory(prefix='baci-qa-profile-') as profile:
+                    context = await playwright.chromium.launch_persistent_context(profile, **self.launch, timeout=10000, service_workers='block', accept_downloads=False)
+                    print('QA_PHASE persistent context ready', flush=True)
+                    renderer = ArchiveRenderer(self.assets)
+                    await context.route('**/*', lambda r: renderer.route(r, None, signaling=False))
+                    page = context.pages[0]
+                    await page.goto(ORIGIN+'/replay', wait_until='load', timeout=5000)
+                    assert await page.evaluate('replay.ready()')
+                    print('QA_PHASE persistent replay ready', flush=True)
+                    await context.close()
+                await movie.check_encoder(self.ffmpeg)
+                return
+            browser =""")
 src = replace(src, '        await movie.check_encoder(self.ffmpeg)', "        print('QA_PHASE browser stopped; encoding', flush=True)\n        await movie.check_encoder(self.ffmpeg)\n        print('QA_PHASE MP4 ready', flush=True)")
 src = replace(src, "        self.stopping = asyncio.Event()", '''        if os.getenv('BACI_QA_SOFTWARE'):
             self.launch['args'] += ['--disable-gpu', '--disable-software-rasterizer', '--renderer-process-limit=1']
@@ -67,9 +84,9 @@ start = text.index('        if self.full:\n            probe_renderer(test=True)
 stop = text.index("        print('۴/۴", start)
 # Self-tests are safe on the isolated empty guest. Restart only the renderer
 # between probes, preserving the failed outcome in the test log.
-text = text[:start] + '''        for label in ('protocol', 'no-lowend'):
+text = text[:start] + '''        for label in ('persistent',):
             diagnostic = SYSTEMD / (RENDERER + f'.d/99-ci-{label}.conf')
-            write(diagnostic, '[Service]\\nEnvironment=DEBUG=pw:browser,pw:protocol\\nEnvironment=BACI_QA_SOFTWARE=1\\nEnvironment=CHROME_LOG_FILE=/tmp/chromium.qa.log\\nEnvironment=XDG_CACHE_HOME=/tmp/baci-cache\\n' + ('Environment=BACI_QA_NO_LOWEND=1\\n' if label == 'no-lowend' else ''))
+            write(diagnostic, '[Service]\\nEnvironment=DEBUG=pw:browser,pw:protocol\\nEnvironment=BACI_QA_SOFTWARE=1\\nEnvironment=BACI_QA_PERSISTENT=1\\nEnvironment=XDG_CACHE_HOME=/tmp/baci-cache\\n' + ('Environment=BACI_QA_NO_LOWEND=1\\n' if label == 'no-lowend' else ''))
             run('systemctl', 'daemon-reload')
             run('systemctl', 'restart', RENDERER)
             began = time.monotonic()

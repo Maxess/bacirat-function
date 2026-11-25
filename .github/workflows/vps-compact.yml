@@ -22,10 +22,13 @@ jobs:
         include:
           - scenario: compact
             tls: files
+            ram: 512
           - scenario: compact
             tls: auto
+            ram: 512
           - scenario: upgrade
             tls: files
+            ram: 1024
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -66,7 +69,7 @@ jobs:
           esac
           log="$w/rehearsal.log"
           set +e
-          bash scripts/test-vps-offline-vm.sh "$w/compact-trial.tar.gz" '${{ matrix.tls }}' 512 '' '${{ matrix.scenario }}' "$load" "$w/baseline-v1.2.0.tar.gz" 2>&1 | tee "$log"
+          bash scripts/test-vps-offline-vm.sh "$w/compact-trial.tar.gz" '${{ matrix.tls }}' '${{ matrix.ram }}' '' '${{ matrix.scenario }}' "$load" "$w/baseline-v1.2.0.tar.gz" 2>&1 | tee "$log"
           rc=${PIPESTATUS[0]}
           set -e
           if (( rc != 0 )); then

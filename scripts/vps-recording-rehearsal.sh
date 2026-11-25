@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Sourced by test-vps-offline-vm.sh. Peers, school and provider run outside the
-# VM; the 512 MiB guest runs just the installed VPS services (plus QA sampling).
+# VM; the guest runs just the installed VPS services (plus QA sampling).
 run_recording_rehearsal() (
     set -euo pipefail
     local q="$work/recording" client=$1 net=baci-vps-recording
@@ -85,5 +85,5 @@ GUEST
         echo "QA_RAM unit=$u peak_bytes=$(cat "$path/memory.peak")"
     done
     grep -Eq "^oom_kill +0$" /proc/vmstat'
-    echo 'QA_RECORD received and decoded an approved MP4; one 512 MiB guest, teacher + 10 pupils, UDP media only.'
+    echo "QA_RECORD received and decoded an approved MP4; one $ram MiB guest, teacher + 10 pupils, UDP media only."
 )
