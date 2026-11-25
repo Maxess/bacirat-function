@@ -1,0 +1,71 @@
+name: Isolated VPS RTC fixture diagnosis
+on:
+  push:
+    paths: [.github/workflows/vps-rtc-diagnose.yml]
+permissions:
+  contents: read
+jobs:
+  rtc:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 9
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version: '1.26.2'
+          cache: false
+      - name: Exercise the pinned SFU with isolated interfaces and synthetic clients
+        run: |
+          set -euo pipefail
+          work=$(mktemp -d "$RUNNER_TEMP/rtc-fixture.XXXXXXXX")
+          curl -fsSL --connect-timeout 15 'https://github.com/livekit/livekit/releases/download/v1.13.11/livekit_1.13.11_linux_amd64.tar.gz' -o "$work/livekit.tgz"
+          printf '%s  %s\n' '1e9ee90ca301e1842b2887fc77cb122759756a9c8aeb4334ee91de3325ec43fb' "$work/livekit.tgz" | sha256sum -c --strict
+          tar -xzf "$work/livekit.tgz" -C "$work"
+          export WORK="$work"
+          PYTHONPATH=server python3 - <<'PY'
+          import install, json, os
+          from pathlib import Path
+          w = Path(os.environ['WORK'])
+          ip, key, secret = '192.0.0.9', 'qa-key', 's' * 64
+          (w/'livekit.yaml').write_text(install.engine_config(ip,key,secret).replace('bind_addresses: [127.0.0.1]', f'bind_addresses: [{ip}]').replace('level: warn','level: debug'))
+          (w/'pair.json').write_text(json.dumps({'signal_url':f'ws://{ip}:7880','api_key':key,'api_secret':secret}))
+          s = Path('tests/fixtures/vps-live-media.go').read_text().replace('wss://media.example.test','ws://192.0.0.9:7880')
+          s = s.replace('"fmt"', '"fmt"\n"log"\n"github.com/go-logr/stdr"\n"github.com/livekit/protocol/logger"')
+          s = s.replace('func main() {', 'func main() {\nstdr.SetVerbosity(8)\nlksdk.SetLogger(logger.LogRLogger(stdr.New(log.New(os.Stderr,"", log.Lmicroseconds))))')
+          (w/'fixture.go').write_text(s)
+          PY
+          (cd server/recorder/native && CGO_ENABLED=0 go build -mod=readonly -o "$work/fixture" "$work/fixture.go")
+          sudo unshare --net --mount --propagation private /bin/bash -s -- "$work" <<'SH'
+          set -euo pipefail
+          cd "$1"
+          ip netns add schoolqa
+          ip link add vpsqa0 type veth peer name schoolqa0 netns schoolqa
+          ip link set lo up
+          ip addr add 172.30.123.1/29 dev vpsqa0
+          ip addr add 192.0.0.9/32 dev vpsqa0
+          ip link set vpsqa0 up
+          ip netns exec schoolqa ip addr add 172.30.123.2/29 dev schoolqa0
+          ip netns exec schoolqa ip link set schoolqa0 up
+          ip netns exec schoolqa ip link set lo up
+          ip netns exec schoolqa ip route add 192.0.0.9/32 via 172.30.123.1
+          ip netns exec schoolqa ip rule add ipproto tcp dport 7881 prohibit
+          ./livekit-server --config livekit.yaml >livekit.log 2>&1 &
+          sfu=$!
+          cleanup() { kill "$sfu" 2>/dev/null || true; ip netns del schoolqa; }
+          trap cleanup EXIT
+          for try in {1..30}; do if curl -fsS 'http://192.0.0.9:7880/' -o /dev/null; then break; fi; sleep .2; done
+          tcpdump -i vpsqa0 -nn -l udp port 7882 > udp.log 2>&1 &
+          capture=$!
+          set +e
+          ip netns exec schoolqa timeout 65 ./fixture <pair.json >peer.log 2>&1
+          rc=$?
+          set -e
+          kill "$capture" 2>/dev/null || true
+          ss -lunp | grep ':7882' || true
+          grep -E 'ICE connected|iceCandidatePair|[Cc]andidate|[Cc]onnect|fixture failed|exchanged' peer.log | tail -18 | while IFS= read -r line; do echo "::notice title=Peer RTC::${line:0:800}"; done
+          grep -E 'ICE|candidate|transport|session' livekit.log | tail -15 | while IFS= read -r line; do echo "::notice title=SFU RTC::${line:0:900}"; done
+          head -6 udp.log | while IFS= read -r line; do echo "::notice title=UDP::${line:0:800}"; done
+          exit "$rc"
+          SH
