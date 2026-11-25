@@ -8,6 +8,8 @@
 
 روی VPS تازه، LiveKit، درگاه ورود، Caddy، ضبط و پیش‌نیازها از خود بسته نصب می‌شوند. با `--tls auto`، Caddy برای نام رسانهٔ تازه از Let’s Encrypt روی TCP 443 گواهی می‌گیرد، نصب و خودکار تمدید می‌کند. برای VPS بدون دسترسی به مرجع صدور، `--tls files` با PEM آماده کاملاً آفلاین است. راهنما ساخت سایت Baci روی PHP/MySQL، فایل اتصال خصوصی، Cron هاست و آزمون دو دستگاه را هم پوشش می‌دهد. این نصب‌گر برای ارتقای VPS موجود نیست. [نسخهٔ قدیمی ۱٫۰٫۰](https://github.com/Maxess/bacirat-function/releases/tag/vps-offline-v1.0.0) فقط گواهی آماده می‌پذیرد.
 
+**VPS به اینترنت دسترسی دارد؟** [نصب مستقیم از همین مخزن در SSH](docs/install-vps-from-github.fa.md) بدون انتقال آرشیو با FileZilla هم ممکن است. اگر این شاخه را از قبل گرفته‌ای، از ریشهٔ مخزن `bash ./install-vps.sh --tls auto` را بزن.
+
 ## کلاس مجازی برای سایت آزمایشی Baci
 
 مبنا [شاخهٔ `arena/dbe3eaf3-baci`](https://github.com/mtagbot/Baci/tree/arena%2Fdbe3eaf3-baci)، [بستهٔ سایت `Release_V1.15` (نسخهٔ `4.221.0`)](https://github.com/mtagbot/Baci/blob/e0f3f686448642cf04ea01fcb60e79a7a786b902/Release_V1.15-Site.zip) است.
