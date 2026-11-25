@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        cpu: [1, 2]
+        cpu: [1]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -43,6 +43,6 @@ jobs:
           bash scripts/.vps-lowmem-probe-ci.sh "$w/diagnosis-only.tar.gz" files 512 2>&1 | tee "$w/result.log"
           rc=${PIPESTATUS[0]}
           set -e
-          proof=$(grep -E '^QA_BROWSER|^QA_PHASE|^QA_VM|^QA_MEMORY|^QA_DIAG|^VM memory|^oom_kill|^VM guest failure|^VM passed' "$w/result.log" | tail -24 | paste -sd '|')
+          proof=$(grep -E '^QA_BROWSER|^QA_PHASE|^QA_VM|^QA_MEMORY|^QA_DIAG|^QA_TRACE|^VM memory|^oom_kill|^VM guest failure|^VM passed' "$w/result.log" | tail -28 | paste -sd '|')
           echo "::notice title=512 MiB with ${{ matrix.cpu }} vCPU::${proof:0:3900}"
           exit "$rc"

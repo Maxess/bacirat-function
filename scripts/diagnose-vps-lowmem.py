@@ -33,10 +33,13 @@ src = replace(src, '                await ArchiveRenderer(self.assets).check_rep
                 renderer = ArchiveRenderer(self.assets)
                 context = await browser.new_context(service_workers='block', accept_downloads=False, reduced_motion='reduce')
                 print('QA_PHASE context ready', flush=True)
-                await context.route('**/*', lambda r: renderer.route(r, None, signaling=False))
-                print('QA_PHASE routes ready', flush=True)
+                if not os.getenv('BACI_QA_NO_LOWEND'):
+                    await context.route('**/*', lambda r: renderer.route(r, None, signaling=False))
+                    print('QA_PHASE routes ready', flush=True)
                 page = await context.new_page()
                 print('QA_PHASE page ready', flush=True)
+                if os.getenv('BACI_QA_NO_LOWEND'):
+                    await context.route('**/*', lambda r: renderer.route(r, None, signaling=False))
                 from capture import ORIGIN
                 await page.goto(ORIGIN + '/replay', wait_until='load', timeout=5000)
                 print('QA_PHASE page loaded', flush=True)
@@ -49,6 +52,8 @@ src = replace(src, '                await ArchiveRenderer(self.assets).check_rep
 src = replace(src, '        await movie.check_encoder(self.ffmpeg)', "        print('QA_PHASE browser stopped; encoding', flush=True)\n        await movie.check_encoder(self.ffmpeg)\n        print('QA_PHASE MP4 ready', flush=True)")
 src = replace(src, "        self.stopping = asyncio.Event()", '''        if os.getenv('BACI_QA_SOFTWARE'):
             self.launch['args'] += ['--disable-gpu', '--disable-software-rasterizer', '--renderer-process-limit=1']
+        if os.getenv('BACI_QA_NO_LOWEND'):
+            self.launch['args'] += ['--disable-low-end-device-mode']
         self.stopping = asyncio.Event()''')
 files['postprocess.py'] = src.encode()
 with ZipFile(patch, 'w') as out:
@@ -62,12 +67,11 @@ start = text.index('        if self.full:\n            probe_renderer(test=True)
 stop = text.index("        print('۴/۴", start)
 # Self-tests are safe on the isolated empty guest. Restart only the renderer
 # between probes, preserving the failed outcome in the test log.
-text = text[:start] + '''        for label in ('normal', 'software'):
-            if label == 'software':
-                diagnostic = SYSTEMD / (RENDERER + '.d/99-ci-debug.conf')
-                write(diagnostic, '[Service]\\nEnvironment=BACI_QA_SOFTWARE=1\\nEnvironment=XDG_CACHE_HOME=/tmp/baci-cache\\n')
-                run('systemctl', 'daemon-reload')
-                run('systemctl', 'restart', RENDERER)
+text = text[:start] + '''        for label in ('protocol', 'no-lowend'):
+            diagnostic = SYSTEMD / (RENDERER + f'.d/99-ci-{label}.conf')
+            write(diagnostic, '[Service]\\nEnvironment=DEBUG=pw:browser,pw:protocol\\nEnvironment=BACI_QA_SOFTWARE=1\\nEnvironment=CHROME_LOG_FILE=/tmp/chromium.qa.log\\nEnvironment=XDG_CACHE_HOME=/tmp/baci-cache\\n' + ('Environment=BACI_QA_NO_LOWEND=1\\n' if label == 'no-lowend' else ''))
+            run('systemctl', 'daemon-reload')
+            run('systemctl', 'restart', RENDERER)
             began = time.monotonic()
             try:
                 probe_renderer(test=True)
@@ -78,7 +82,9 @@ text = text[:start] + '''        for label in ('normal', 'software'):
             stat_line = ' '.join((after/f).read_text().strip().replace('\\n', ',') for f in ('memory.peak', 'memory.events'))
             print(f'QA_MEMORY {label} ok={passed} seconds={time.monotonic()-began:.2f} peak_bytes,events={stat_line}; '
                   + re.search(r'^MemAvailable:.*', Path('/proc/meminfo').read_text(), re.M)[0], flush=True)
-            run('journalctl','-n','28','-u',RENDERER,'--no-pager','-o','cat', show=True)
+            raw = run('journalctl','-n','180','-u',RENDERER,'--no-pager','-o','cat', output=True).decode(errors='replace')
+            for ln in [ln for ln in raw.splitlines() if any(k in ln for k in ('QA_PHASE', 'QA_BROWSER', 'attachedToTarget', 'Target.createTarget', 'Runtime.runIfWaitingForDebugger', 'Page.enable', 'FATAL', 'gpu-process', 'exited', 'SharedMemory'))][-18:]:
+                print(f'QA_TRACE {label} {ln[:410]}', flush=True)
         need(passed, 'The sandboxed software renderer also failed.')
 ''' + text[stop:]
 compile(text, str(base), 'exec')
