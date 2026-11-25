@@ -140,11 +140,13 @@ sudo update-ca-certificates >/dev/null
 media=media.example.test
 if [[ "$MODE" == auto ]]; then media=classroom-new.example.com; fi
 printf '%s\n' "$media" > qa-media
-sudo ip address add 192.0.0.9/32 dev lo
 printf '192.0.0.9 %s\n' "$media" | sudo tee -a /etc/hosts >/dev/null
 sudo ip netns add schoolqa
 sudo ip link add vpsqa0 type veth peer name schoolqa0 netns schoolqa
 sudo ip addr add 172.30.123.1/29 dev vpsqa0
+# LiveKit binds its UDP mux to non-loopback interfaces. Put the advertised
+# address on the test WAN, not on lo, so ICE exercises the real UDP socket.
+sudo ip addr add 192.0.0.9/32 dev vpsqa0
 sudo ip link set vpsqa0 up
 sudo ip netns exec schoolqa ip addr add 172.30.123.2/29 dev schoolqa0
 sudo ip netns exec schoolqa ip link set schoolqa0 up
