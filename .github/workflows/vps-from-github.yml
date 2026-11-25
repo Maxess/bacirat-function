@@ -52,11 +52,19 @@ jobs:
           chmod 600 privkey.pem
           sudo install -m 0644 ca.crt "$trust"
           sudo update-ca-certificates >/dev/null
-          TMPDIR="$work" bash ./install-vps.sh --check --tls files --cert ./fullchain.pem --key ./privkey.pem \
+          # The hosted runner makes /opt writable for its tool cache. Present a stock
+          # root-owned /opt in a private test mount namespace, without relaxing any installer checks.
+          sudo install -d -m 0755 "$work/stock-opt"
+          sudo unshare --mount --propagation private /bin/bash -c '
+            set -eu
+            mount --bind "$1/stock-opt" /opt
+            exec runuser -u "$2" -- /usr/bin/env TMPDIR="$1" /bin/bash ./install-vps.sh "${@:3}"
+          ' _ "$work" "$(id -un)" --check --tls files --cert ./fullchain.pem --key ./privkey.pem \
             --site https://school.example.test/campus --media media.example.test --ipv4 192.0.0.9 2>&1 | tee "$log"
           grep -Fq 'archive_sha256=ok' "$log"
           grep -Fq 'preflight=ok tls=files' "$log"
           test -z "$(find "$work" -maxdepth 1 -name 'baci-vps-github.*' -print -quit)"
+          test -z "$(find "$work/stock-opt" -mindepth 1 -print -quit)"
           for path in /etc/school-classroom /usr/local/sbin/baci-vps /run/baci-vps-install.lock "$HOME/Baci-VPS-pairing.json"; do
             test ! -e "$path"
           done
