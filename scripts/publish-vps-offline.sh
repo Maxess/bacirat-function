@@ -23,10 +23,12 @@ trap 'echo "::error title=VPS release::Failed at $stage; public release not conf
 gh api "repos/$repo/actions/runs/$run" | jq -e --arg sha "$commit" --arg branch "$branch" '
     .status == "completed" and .conclusion == "success" and .head_sha == $sha and .head_branch == $branch
     and (.path | split("@")[0]) == ".github/workflows/vps-offline.yml"' >/dev/null
-stage=verify-low-memory-vm-gate
+stage=verify-live-and-compact-vm-gates
 gh api "repos/$repo/actions/runs/$run/jobs" | jq -e '
     any(.jobs[]; .name == "ubuntu-noble-installer" and .conclusion == "success"
         and any(.steps[]; .name == "Verify 512 MiB live and full installs, both TLS modes and WebRTC"
+                and .conclusion == "success")
+        and any(.steps[]; .name == "Verify packaged compact recording and safe add-on"
                 and .conclusion == "success"))' >/dev/null
 stage=verify-ci-artifact
 gh api "repos/$repo/actions/runs/$run/artifacts" | jq -e --arg digest "sha256:$artifact_sha" '
@@ -45,7 +47,10 @@ stage=check-published-inventory
     grep -Fxq "$installer  $name.tar.gz" "$sha_file"
     BUILD=$(tar -xOf "$name.tar.gz" baci-classroom-vps-offline/BUILD.json)
     jq -e --arg sha "$commit" --arg ver "$version" '.git == $sha and .version == $ver and .arch == "amd64" and .ubuntu == "24.04"
-        and .tls_modes == ["auto", "files"] and .minimum_visible_ram_kib == 393216 and .install_profiles == ["live", "full"]' <<< "$BUILD" >/dev/null
+        and .tls_modes == ["auto", "files"] and .minimum_visible_ram_kib == 393216
+        and .install_profiles == ["live", "compact", "full"] and .full_visible_ram_kib == 1835008
+        and .compact_visible_ram_kib == 458752 and .compact_swap_kib == 512000
+        and .compact_no_swap_visible_ram_kib == 917504' <<< "$BUILD" >/dev/null
 )
 stage=prepare-corresponding-source-assets
 # GitHub Releases cap a single asset at 2 GiB. The corresponding source for
@@ -78,16 +83,18 @@ if gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
     exit 1
 fi
 cat > "$work/notes.md" <<EOF_NOTES
-## نصب VPS تازه با ۵۱۲ MiB RAM و SSL خودکار یا آفلاین — Ubuntu 24.04 LTS amd64
+## کلاس زنده و ضبط روی یک VPS — Ubuntu 24.04 LTS amd64
 
-- برای **کلاس زنده** محدودیت ۲ GiB حذف شد: حالت \`--profile live\` روی Ubuntu Minimal با ۵۱۲ MiB RAM و ۱ vCPU بدون swap آزمایش شده است. صدا، تصویر، ورود، HTTPS و اتصال سایت برقرارند؛ ضبط، Chromium و ساخت MP4 در این حالت نصب نمی‌شوند. برای ضبط از حالت \`--profile full\` و VPS با RAM بیشتر استفاده کن. خود نصب‌گر با توجه به RAM حالت را انتخاب می‌کند؛ ظرفیت کلاس پرجمعیت باید جداگانه سنجیده شود.
+- **زنده بدون ضبط**: \`--profile live\` روی ۵۱۲ MiB RAM و ۱ vCPU بدون swap بررسی شده است. \`auto\` روی RAM کم همچنان این حالت را انتخاب می‌کند.
+- **ضبط کم‌حافظه روی همان VPS**: \`--profile compact\` را صریح انتخاب کن. برای پلن ۵۱۲ MiB، دست‌کم ۴۴۸ MiB باید به لینوکس برسد و یک swap فعال در حد ۵۱۲ MiB لازم است. ضبط فشرده هنگام کلاس انجام می‌شود؛ ساخت و ارسال MP4 پس از بسته‌شدن، تأیید و تأخیر مدرسه، خارج از زنگ فعال است. آزمون ظرفیت کوتاه و مصنوعی است، نه تضمین چند کلاس یا همهٔ دوربین‌ها.
+- **افزودن ضبط به نصب ۱٫۲٫۰ live**: مسیر جداگانهٔ \`--add-recorder\` فقط برای همان نصب مدیریت‌شده، جفت‌سازی موجود و بدون زنگ/فیلم معوق است. اول از راهنمای بسته و \`--check\` استفاده کن؛ نصب تازه یا وارد کردن مجدد جفت‌سازی لازم نیست.
 - **برای نصب روی VPS** فقط \`$name.tar.gz\` را بگیر. \`START-HERE-fa.md\` داخل آرشیو و [راهنمای فارسی](https://github.com/$repo/blob/$commit/server/offline/README-fa.md) مراحل را توضیح می‌دهند.
 - **برای سایت تازهٔ مدرسه** در همان راهنما از نصب Baci روی هاست PHP/MySQL شروع کن. ZIP کوچک \`baci-classroom-site-pairing-v0.1.31.zip\` را روی رایانه باز کن؛ مدیر ۰٫۱٫۳۱ و کلاس ۰٫۴٫۲۴ هستند. بستهٔ کامل سایت پایه را از منبع اصلی بگیر.
 - \`*-ubuntu-source.tar\` یا بخش‌های \`*.tar.part-*\` کد منبع متناظر بسته‌های Ubuntu هستند؛ **روی VPS لازم نیستند**. اگر کد منبع را می‌خواهی، بعد از دریافت بخش‌ها و بررسی SHA-256، آن‌ها را با \`cat *-ubuntu-source.tar.part-* > $source_tar\` به هم بچسبان و SHA-256 فایل بازسازی‌شده را هم بررسی کن.
 
-پیش‌نیازهای نرم‌افزاری از خود بسته نصب می‌شوند. با \`--tls auto\` و رکورد A مستقیم و TCP 443 باز، Caddy گواهی عمومی Let’s Encrypt را می‌گیرد، نصب و تمدید می‌کند؛ به گواهی قبلی یا پورت 80 نیازی نیست. اگر صدور آنلاین ممکن نیست، \`--tls files\` از گواهی آماده استفاده می‌کند و کاملاً آفلاین نصب می‌شود. این نسخه برای ارتقای VPS موجود نیست.
+پیش‌نیازهای نرم‌افزاری از خود بسته نصب می‌شوند. با \`--tls auto\` و رکورد A مستقیم و TCP 443 باز، Caddy گواهی عمومی Let’s Encrypt را می‌گیرد، نصب و تمدید می‌کند؛ به گواهی قبلی یا پورت 80 نیازی نیست. اگر صدور آنلاین ممکن نیست، \`--tls files\` از گواهی آماده استفاده می‌کند و کاملاً آفلاین نصب می‌شود. مسیر عادی نصب، تنظیمات VPS موجود را بازنویسی نمی‌کند.
 
-[آزمون همین بایت‌ها روی Ubuntu تازه]($base) — حالت زنده در ۵۱۲ MiB بدون swap و حالت کامل در ۴ GiB، هر کدام با PEM آفلاین و صدور واقعی TLS-ALPN-01 با CA آزمایشی، API و وب‌هوک امضاشده، صوت Opus دوطرفه و تصویر VP8 بین دو همتای WebRTC و بازیابی پس از reboot. در نصب کامل ضربان ضبط و MP4 آزمایشی sandbox‌شده هم بررسی شدند. صدور زندهٔ Let’s Encrypt و کلاس با گوشی/هاست واقعی به آزمون خودت در محیط مقصد نیاز دارند.
+[آزمون همین بایت‌ها روی Ubuntu]($base) — یک دبیر و ۱۰ شاگرد مصنوعی روی یک VM ۵۱۲ MiB با swap، دریافت رسانه با UDP و تحویل MP4 قابل‌پخش به مقصد آزمایشی HTTPS، با تصویر متحرک، PDF و صدای دو میکروفون. رد ارسال و لغو مقصد نیز باید به حذف رسانه و نبود ارسال منجر شوند. نصب compact با صدور TLS-ALPN-01 در CA آزمایشی جداگانه بررسی شده است. آزمون افزودن ضبط و سلامت نصب قبلی روی VM یک GiB بدون swap انجام شده؛ آن نتیجه جایگزین آزمون ۵۱۲ MiB نیست. صدور عمومی، دستگاه‌ها و گروه واقعی مدرسه به بررسی جداگانه در محیط مقصد نیاز دارند.
 EOF_NOTES
 gh release create "$tag" "${files[@]}" \
     --repo "$repo" --target "$commit" --title "Classroom VPS v$version · Automatic TLS · Ubuntu 24.04 amd64" \
