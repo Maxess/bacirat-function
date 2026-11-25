@@ -3,7 +3,10 @@
 Nothing produced by this script is a release candidate. Compare the normal
 renderer and a software-only browser, with the sandbox enabled in both cases.
 """
+import hashlib
+import os
 from pathlib import Path
+import re
 import sys
 from zipfile import ZipFile
 
@@ -14,6 +17,8 @@ def replace(text, old, new):
 
 
 bundle = Path(sys.argv[1])
+mode = os.environ.get('QA_MODE', 'modern')
+assert mode in ('modern', 'swap')
 base = bundle / 'setup.py'
 patch = bundle / 'payload/baci-classroom-renderer-v0.4.23-r1.zip'
 with ZipFile(patch) as archive:
@@ -76,17 +81,24 @@ files['postprocess.py'] = src.encode()
 with ZipFile(patch, 'w') as out:
     for name, data in files.items():
         out.writestr(name, data)
-import hashlib
 text = replace(base.read_text(), 'FULL_RAM_KIB = 1792 * 1024', 'FULL_RAM_KIB = 384 * 1024')
 text = replace(text, "07d51104f5fa7bbfd90d6329931fa0e9d03967b9c8fc617c8fe08f10b4d38cfd", hashlib.sha256(patch.read_bytes()).hexdigest())
 text = replace(text, 'conn.settimeout(22 if test else 3)', 'conn.settimeout(30 if test else 3)')
+if mode == 'modern':
+    text = text.replace('148.0.7778.96', '159.0.8154.6').replace('1223', '1255')
+    lock = bundle / 'requirements.lock'
+    lock.write_text(re.sub(r'^playwright=.*$', 'playwright==1.65.2 --hash=sha256:58932d35f56767ab7ebcdd3d4a733bfb3e62a1a5bc43c08e28b9fa9b3e61cf33', lock.read_text(), flags=re.M))
+    for wheel in (bundle / 'wheels').glob('playwright-1.60*.whl'):
+        wheel.unlink()
+    chrome = bundle / 'payload/chrome-headless-shell-linux64.zip'
+    text = replace(text, '88817c574c1838a39f88fda0bbd043b4481fd385fb10e92c323e230844d636ce', hashlib.sha256(chrome.read_bytes()).hexdigest())
 start = text.index('        if self.full:\n            probe_renderer(test=True)')
 stop = text.index("        print('۴/۴", start)
 # Self-tests are safe on the isolated empty guest. Restart only the renderer
 # between probes, preserving the failed outcome in the test log.
-text = text[:start] + '''        for label in ('persistent',):
+text = text[:start] + '''        for label in ('sanitized-probe',):
             diagnostic = SYSTEMD / (RENDERER + f'.d/99-ci-{label}.conf')
-            write(diagnostic, '[Service]\\nEnvironment=DEBUG=pw:browser,pw:protocol\\nEnvironment=BACI_QA_SOFTWARE=1\\nEnvironment=BACI_QA_PERSISTENT=1\\nEnvironment=XDG_CACHE_HOME=/tmp/baci-cache\\n' + ('Environment=BACI_QA_NO_LOWEND=1\\n' if label == 'no-lowend' else ''))
+            write(diagnostic, '[Service]\\nEnvironment=DEBUG=pw:browser,pw:protocol\\nEnvironment=BACI_QA_SOFTWARE=1\\nEnvironment=XDG_CACHE_HOME=/tmp/baci-cache\\n' + ('Environment=BACI_QA_NO_LOWEND=1\\n' if label == 'no-lowend' else ''))
             run('systemctl', 'daemon-reload')
             run('systemctl', 'restart', RENDERER)
             began = time.monotonic()
@@ -107,8 +119,15 @@ text = text[:start] + '''        for label in ('persistent',):
 compile(text, str(base), 'exec')
 base.write_text(text)
 fixture = Path('scripts/.vps-lowmem-probe-ci.sh')
-import os
-cpus = int(os.environ.get('QA_VCPUS', '1'))
-assert cpus in (1,2)
-text = Path('scripts/test-vps-offline-vm.sh').read_text().replace('cpus=1; profile=live', f'cpus={cpus}; profile=full')
+text = Path('scripts/test-vps-offline-vm.sh').read_text().replace('cpus=1; profile=live', 'cpus=1; profile=full')
+if mode == 'swap':
+    # Test only: allow the guest one explicitly provisioned 512 MiB swap file.
+    # No shipped installer does this, and the RAM remains 512 MiB.
+    text = text.replace('read -r total swap < <(', """sudo install -m 0600 /dev/null /var/tmp/qa.swap
+sudo fallocate -l 512M /var/tmp/qa.swap
+sudo mkswap /var/tmp/qa.swap >/dev/null
+sudo swapon /var/tmp/qa.swap
+read -r total swap < <(""")
+    text = text.replace('test "$swap" -eq 0', 'test "$swap" -ge 500000')
+    text = text.replace("awk '/^SwapTotal:/ {exit ($2 != 0)}' /proc/meminfo", "awk '/^SwapTotal:/ {exit ($2 < 500000)}' /proc/meminfo")
 fixture.write_text(text.replace('printf \'VM accelerator:', 'printf \'QA_VM accelerator:'))
