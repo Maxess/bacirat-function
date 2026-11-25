@@ -7,7 +7,7 @@ umask 077
 fail() { printf 'Baci VPS: %s\n' "$*" >&2; exit 1; }
 if [[ ${1:-} == --help || ${1:-} == -h ]]; then
     cat <<'HELP'
-Fresh, dedicated Ubuntu 24.04 LTS amd64 VPS only. Read START-HERE-fa.md first.
+Dedicated Ubuntu 24.04 LTS amd64 VPS only. Read START-HERE-fa.md first.
   sudo bash baci-classroom-vps-offline/install.sh
   sudo bash baci-classroom-vps-offline/install.sh --check
 Inputs are prompted if omitted: --site https://school.example.ir[/school]
@@ -18,7 +18,9 @@ TLS: no PEM files -> automatic Let’s Encrypt (direct A record and open TCP 443
   --cert PATH --key PATH   optional paths in files mode
 Profile: auto (default) selects live on low-RAM VPSes and full when there is room for recording.
   --profile live  LiveKit, admission and HTTPS only. Suitable for a 512 MiB VPS; no local recording.
+  --profile compact  Local recording and MP4 for one small room; lower memory.
   --profile full  Also install the Recorder and sandboxed MP4 renderer, with additional RAM.
+Existing idle v1.2.0 live install: use this new bundle with --add-recorder [--check].
 After install: sudo baci-vps doctor [--online] or sudo baci-vps export
 HELP
     exit

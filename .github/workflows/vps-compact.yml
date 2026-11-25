@@ -1,0 +1,78 @@
+name: Compact classroom recording (candidate QA)
+on:
+  push:
+    paths:
+      - .github/workflows/vps-compact.yml
+      - server/offline/**
+      - scripts/test-vps-offline-vm.sh
+      - scripts/vps-recording-rehearsal.sh
+      - tests/fixtures/vps-record-*
+      - tests/fixtures/vps-class-load.go
+      - tests/fixtures/vps-offline-peer.py
+      - tests/test_vps_offline.py
+permissions:
+  contents: read
+jobs:
+  recording:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 24
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - scenario: compact
+            tls: files
+          - scenario: compact
+            tls: auto
+          - scenario: upgrade
+            tls: files
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version: '1.26.2'
+          cache: false
+      - name: Build the off-VPS synthetic clients and test helpers
+        env:
+          CGO_ENABLED: '0'
+          GOTOOLCHAIN: local
+        run: |
+          set -euo pipefail
+          sudo apt-get -q update
+          sudo apt-get -qy install --no-install-recommends qemu-system-x86 qemu-utils cloud-image-utils ffmpeg php8.3-cli php8.3-sqlite3 php8.3-curl
+          if test -c /dev/kvm; then sudo chmod a+rw /dev/kvm; fi
+          (cd server/recorder/native; go build -mod=readonly -trimpath -o "$RUNNER_TEMP/class-load" "$GITHUB_WORKSPACE/tests/fixtures/vps-class-load.go")
+          php -l tests/fixtures/vps-record-school.php
+          php tests/classroom-recording.php
+          python3 -m unittest discover -s tests -p test_vps_offline.py
+      - name: Rehearse with the pinned 1.2.0 dependency closure, not a release asset
+        run: |
+          set -euo pipefail
+          w="$RUNNER_TEMP/compact-qa"
+          mkdir "$w"
+          curl --disable -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 15 --max-time 180 --retry 3 \
+            'https://github.com/Maxess/bacirat-function/releases/download/vps-offline-v1.2.0/baci-classroom-vps-offline-v1.2.0-ubuntu24.04-amd64.tar.gz' -o "$w/baseline-v1.2.0.tar.gz"
+          printf '%s  %s\n' 9a79d791d38e2277b5fb29f9d05ae223338bb4c25ae30ab83ffb7c9d148c1cb4 "$w/baseline-v1.2.0.tar.gz" | sha256sum -c --strict
+          tar -xzf "$w/baseline-v1.2.0.tar.gz" -C "$w"
+          p="$w/baci-classroom-vps-offline"
+          cp server/offline/{apt-local.sh,setup.py,install.sh,compact-renderer.py} "$p/"
+          ( cd "$p"; find . -type f ! -name SHA256SUMS -printf '%P\0' | sort -z | xargs -0 sha256sum > SHA256SUMS )
+          tar -cf - -C "$w" baci-classroom-vps-offline | gzip -n -1 > "$w/compact-trial.tar.gz"
+          case '${{ matrix.tls }}' in
+            files) load="$RUNNER_TEMP/class-load" ;;
+            auto) load='' ;;
+          esac
+          log="$w/rehearsal.log"
+          set +e
+          bash scripts/test-vps-offline-vm.sh "$w/compact-trial.tar.gz" '${{ matrix.tls }}' 512 '' '${{ matrix.scenario }}' "$load" "$w/baseline-v1.2.0.tar.gz" 2>&1 | tee "$log"
+          rc=${PIPESTATUS[0]}
+          set -e
+          if (( rc != 0 )); then
+            proof=$(grep -E '^QA_|Error:|^VM guest failure|^Baci VPS:|^oom_kill|^VM rehearsal|^postprocess:|^recorder:' "$log" | tail -24 | paste -sd '|')
+            echo "::error title=Compact VM rehearsal::${proof:0:3800}"
+            exit "$rc"
+          fi
+          proof=$(grep -E '^QA_|^VM memory|^VM passed|^Real ACME' "$log" | paste -sd '|')
+          echo "::notice title=Compact VM measurements::${proof:0:4100}"

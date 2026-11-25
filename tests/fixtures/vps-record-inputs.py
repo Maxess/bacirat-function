@@ -1,0 +1,48 @@
+"""Build only the synthetic test patterns; FFmpeg runs outside the 512 MiB VM."""
+from pathlib import Path
+import struct
+import subprocess
+import sys
+
+
+def ffmpeg(*args):
+    subprocess.run(['ffmpeg', '-hide_banner', '-v', 'error', '-nostdin', *args], check=True)
+
+
+p = Path(sys.argv[1])
+for name, size, rate, source in [('camera', '640x360', '260k', 'testsrc2'), ('screen', '1280x720', '420k', 'testsrc')]:
+    ffmpeg('-f', 'lavfi', '-i', f'{source}=size={size}:rate=10', '-t', '3', '-an', '-c:v', 'libvpx',
+           '-pix_fmt', 'yuv420p', '-deadline', 'realtime', '-cpu-used', '6', '-threads', '2', '-g', '15',
+           '-b:v', rate, '-f', 'ivf', str(p / f'{name}.ivf'))
+for name, hz in [('teacher', 440), ('pupil', 730)]:
+    ogg = p / f'{name}.ogg'
+    ffmpeg('-f', 'lavfi', '-i', f'sine=frequency={hz}:sample_rate=48000', '-t', '2', '-vn',
+           '-c:a', 'libopus', '-b:a', '24k', '-frame_duration', '20', str(ogg))
+    raw = ogg.read_bytes()
+    pos, packet, packets = 0, b'', []
+    while pos < len(raw):
+        assert raw[pos:pos+4] == b'OggS'
+        n = raw[pos+26]
+        sizes = raw[pos+27:pos+27+n]
+        pos += 27+n
+        for length in sizes:
+            packet += raw[pos:pos+length]
+            pos += length
+            if length < 255:
+                if not packet.startswith((b'OpusHead', b'OpusTags')):
+                    packets.append(packet)
+                packet = b''
+    assert 95 <= len(packets) <= 101 and not packet
+    (p / f'{name}.opus').write_bytes(b''.join(struct.pack('>H', len(packet)) + packet for packet in packets))
+# A colored document with a real xref, safe to render with the bundled PDF.js.
+paint = b'0.9 0.65 0.1 rg 0 0 480 300 re f 0.1 0.2 0.7 rg 100 80 280 140 re f\n'
+items = [b'<</Type /Catalog /Pages 2 0 R>>', b'<</Type /Pages /Kids [3 0 R] /Count 1>>',
+         b'<</Type /Page /Parent 2 0 R /MediaBox [0 0 480 300] /Contents 4 0 R /Resources <<>>>>',
+         b'<</Length ' + str(len(paint)).encode() + b'>>\nstream\n' + paint + b'endstream']
+pdf, offsets = b'%PDF-1.4\n', [0]
+for i, item in enumerate(items, 1):
+    offsets.append(len(pdf))
+    pdf += f'{i} 0 obj\n'.encode() + item + b'\nendobj\n'
+(p / 'board.pdf').write_bytes(pdf + b'xref\n0 5\n0000000000 65535 f \n' +
+    b''.join(f'{offset:010d} 00000 n \n'.encode() for offset in offsets[1:]) +
+    f'trailer\n<</Size 5 /Root 1 0 R>>\nstartxref\n{len(pdf)}\n%%EOF\n'.encode())

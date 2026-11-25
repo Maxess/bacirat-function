@@ -40,6 +40,9 @@ class OfflineSetupTest(unittest.TestCase):
         self.assertEqual(setup.install_profile('auto', setup.FULL_RAM_KIB), 'full')
         self.assertEqual(setup.install_profile('full', 4194304), 'full')
         self.assertEqual(setup.install_profile('live', 4194304), 'live')
+        self.assertEqual(setup.install_profile('compact', 469200), 'compact')
+        with self.assertRaisesRegex(setup.Refused, 'not swap'):
+            setup.install_profile('compact', setup.COMPACT_RAM_KIB - 1)
         with self.assertRaisesRegex(setup.Refused, 'use --profile live'):
             setup.install_profile('full', 469200)
 
@@ -274,6 +277,61 @@ class OfflineSetupTest(unittest.TestCase):
             doc.assert_called_once_with(config, False)
             apt.assert_not_called()
             export.assert_not_called()
+
+    def test_compact_install_has_recording_and_rolls_back_only_addon_units(self):
+        self.assertTrue(setup.with_recording({'profile': 'compact'}))
+        self.assertEqual(setup.Fresh('compact').enabled, setup.ENABLED)
+        addition = setup.RecorderAddition('compact')
+        addition.starting = addition.enabling = True
+        with patch.object(setup, 'run') as run:
+            addition.cleanup()
+        self.assertEqual([x.args for x in run.call_args_list], [
+            ('systemctl', 'disable', setup.RECORDER),
+            ('systemctl', 'stop', setup.RECORDER, setup.RENDERER),
+            ('systemctl', 'daemon-reload'),
+        ])
+
+    def test_add_recorder_requires_explicit_path_and_check_is_read_only(self):
+        with ExitStack() as stack:
+            patcher = lambda name, **kwargs: stack.enter_context(patch.object(setup, name, **kwargs))
+            patcher('system_preflight')
+            patcher('STATE').is_file.return_value = True
+            config = {'profile': 'live', 'version': '1.2.0'}
+            patcher('json_file', return_value=config)
+            patcher('doctor', return_value=True)
+            preflight = patcher('addition_preflight', return_value=('compact', {'recording_secret': 'not-logged'}, 469200))
+            apt = patcher('deb_install')
+            txn = patcher('RecorderAddition', wraps=setup.RecorderAddition)
+            stack.enter_context(patch.object(setup.os, 'umask'))
+            stdout = stack.enter_context(redirect_stdout(StringIO()))
+            stack.enter_context(redirect_stderr(StringIO()))
+            self.assertEqual(setup.main(['--profile', 'compact']), 0)
+            preflight.assert_not_called()
+            self.assertEqual(setup.main(['--add-recorder', '--check', '--site', 'https://other.example.ir']), 1)
+            preflight.assert_not_called()
+            self.assertEqual(setup.main(['--add-recorder', '--check']), 0)
+            self.assertEqual(preflight.call_args.args[:2], (config, 'auto'))
+            self.assertIn('add_recorder_preflight=ok profile=compact', stdout.getvalue())
+            self.assertNotIn('not-logged', stdout.getvalue())
+            txn.assert_not_called()
+            apt.assert_not_called()
+
+    def test_add_recorder_fences_both_the_sfu_and_school(self):
+        inputs = {'school': 'https://school.example.ir'}
+        with patch.object(setup.media, 'pilot_deployment', return_value={}), \
+                patch.object(setup.media, 'local_rooms', return_value=[{}]) as rooms, \
+                patch.object(setup, 'recorder_status') as status:
+            with self.assertRaisesRegex(setup.Refused, 'still has rooms'):
+                setup.recorder_idle(inputs, {}, '')
+            status.assert_not_called()
+            rooms.return_value = []
+            for idle, worker_ok in [(False, True), (True, False), (True, True)]:
+                status.return_value = {'idle': idle, 'worker_ok': worker_ok}
+                if idle and worker_ok:
+                    setup.recorder_idle(inputs, {}, '')
+                else:
+                    with self.assertRaisesRegex(setup.Refused, 'open lesson'):
+                        setup.recorder_idle(inputs, {}, '')
 
     def test_root_writes_are_exclusive_and_reclaim_only_failed_new_file(self):
         with tempfile.TemporaryDirectory() as path, patch.object(setup.os, 'fchown'):

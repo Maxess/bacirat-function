@@ -98,11 +98,9 @@ if [[ -n "$capacity" ]]; then
     # remains in the runner's original network, with SLIRP restrict=on.
     cat > "$work/tap-launch.py" <<'PY_TAP'
 import fcntl, os, struct, sys
-from array import array
 import socket
 import subprocess
 
-left, right = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
 script = """
 import fcntl, os, socket, struct, sys
 from array import array
@@ -114,7 +112,6 @@ with socket.socket(fileno=int(sys.argv[1])) as sock:
 # sudo normally closes inherited fds. A private Unix listener passes the TAP fd
 # back across the namespace boundary, without executing QEMU as root.
 address = os.path.join(os.path.dirname(__file__), 'tapsock')
-left.close(); right.close()
 listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 listener.bind(address)
 listener.listen(1)
@@ -397,7 +394,7 @@ if [[ "$SCENARIO" == upgrade ]]; then
     sudo systemctl show -p InvocationID "${units[@]}" > running.before
     "${add[@]}" --check | grep -Fq add_recorder_preflight=ok
     # Fail after the renderer is installed and probed, not merely at argument parsing.
-    touch /run/baci-qa-deny-third-maintenance 2>/dev/null || sudo touch /run/baci-qa-deny-third-maintenance
+    sudo touch /run/baci-qa-deny-third-maintenance
     if "${add[@]}" > rollback.log 2>&1; then exit 1; fi
     sudo rm /run/baci-qa-deny-third-maintenance
     grep -Fq 'Incomplete Recorder add-on rolled back' rollback.log

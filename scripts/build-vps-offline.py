@@ -180,7 +180,7 @@ def main():
         root = Path(temp)
         bundle = root / BUNDLE
         bundle.mkdir()
-        for name in ('install.sh', 'apt-local.sh', 'setup.py', 'requirements.lock', 'ubuntu-packages.txt', 'THIRD-PARTY.md'):
+        for name in ('install.sh', 'apt-local.sh', 'setup.py', 'compact-renderer.py', 'requirements.lock', 'ubuntu-packages.txt', 'THIRD-PARTY.md'):
             shutil.copyfile(OFFLINE / name, bundle / name)
         shutil.copyfile(OFFLINE / 'README-fa.md', bundle / 'START-HERE-fa.md')
         shutil.copyfile(ROOT / 'server/install.py', bundle / 'vps_media.py')
@@ -197,6 +197,7 @@ def main():
             'git': run('git', 'rev-parse', 'HEAD', cwd=ROOT, text=True, capture_output=True).strip(),
             'tls_modes': ['auto', 'files'], 'minimum_visible_ram_kib': setup.MIN_RAM_KIB,
             'install_profiles': list(setup.PROFILES), 'full_visible_ram_kib': setup.FULL_RAM_KIB,
+            'compact_visible_ram_kib': setup.COMPACT_RAM_KIB,
             'deb_count': count, 'apt_origin': ARCHIVE, 'pinned_payload_sha256': setup.PAYLOAD, 'payload_origins': origins},
             indent=2, sort_keys=True) + '\n')
         (bundle / 'SHA256SUMS').write_text(checksums((p for p in bundle.rglob('*') if p.is_file()), bundle))
