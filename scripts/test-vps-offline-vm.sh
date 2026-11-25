@@ -5,7 +5,11 @@
 set -euo pipefail
 archive=$(realpath "$1")
 mode=${2:-files}
+ram=${3:-4096}
 [[ "$mode" == files || "$mode" == auto ]]
+[[ "$ram" == 512 || "$ram" == 4096 ]]
+cpus=2
+if [[ "$ram" == 512 ]]; then cpus=1; fi
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 work=$(mktemp -d)
 port=22131
@@ -17,7 +21,7 @@ cleanup() {
         echo 'VM rehearsal failed. Diagnostic tail (synthetic environment only):' >&2
         tail -20 "$work/serial.log" 2>/dev/null || true
         if [[ -n "$vm_pid" ]]; then
-            vm 'tail -6 rejected.log preflight.log 2>/dev/null || true; sudo journalctl --no-pager -n 16 -u "school-classroom-*" -o cat; sudo journalctl --no-pager -n 12 -u baci-qa-acme -o cat; sudo journalctl --no-pager -n 8 -u baci-qa-pebble -o cat' || true
+            vm 'tail -6 rejected.log preflight.log 2>/dev/null || true; grep -E "^(MemTotal|MemAvailable|SwapTotal):" /proc/meminfo; grep ^oom_kill /proc/vmstat; sudo journalctl -k --no-pager -g "oom-kill|Out of memory" -o cat; sudo journalctl --no-pager -n 16 -u "school-classroom-*" -o cat; sudo journalctl --no-pager -n 12 -u baci-qa-acme -o cat; sudo journalctl --no-pager -n 8 -u baci-qa-pebble -o cat' || true
         fi
     fi
     if [[ -n "$vm_pid" ]]; then
@@ -63,7 +67,7 @@ cloud-localds "$work/seed.img" "$work/user-data" "$work/meta-data"
 qemu-img create -q -f qcow2 -F qcow2 -b "$work/base.img" "$work/vm.img" 24G
 accel=(-accel tcg -cpu max)
 if [[ -r /dev/kvm && -w /dev/kvm ]]; then accel=(-accel kvm -cpu host); fi
-qemu-system-x86_64 "${accel[@]}" -m 4096 -smp 2 -display none -monitor none -serial file:"$work/serial.log" \
+qemu-system-x86_64 "${accel[@]}" -m "$ram" -smp "$cpus" -display none -monitor none -serial file:"$work/serial.log" \
     -drive file="$work/vm.img",if=virtio,format=qcow2 -drive file="$work/seed.img",if=virtio,format=raw,readonly=on \
     -netdev user,id=nic,restrict=on,hostfwd=tcp:127.0.0.1:$port-:22 -device virtio-net-pci,netdev=nic &
 vm_pid=$!
@@ -106,9 +110,17 @@ else
     done
     send "$work/pebble" "$work/pebble-challtestsrv" "$work/acme.pem" "$work/acme.key" "$root/tests/fixtures/vps-acme-gateway.py"
 fi
-vm "ARCHIVE=$(basename "$archive") MODE=$mode bash -s" <<'GUEST'
+vm "ARCHIVE=$(basename "$archive") MODE=$mode RAM=$ram bash -s" <<'GUEST'
 set -Eeuo pipefail
 trap 'echo "VM guest failure at line $LINENO: $BASH_COMMAND" >&2' ERR
+read -r total swap < <(awk '/^MemTotal:/{m=$2} /^SwapTotal:/{s=$2} END {print m,s}' /proc/meminfo)
+printf 'VM memory: provisioned=%s MiB visible=%s KiB swap=%s KiB\n' "$RAM" "$total" "$swap"
+if [[ "$RAM" == 512 ]]; then
+    test "$total" -le 524288
+    test "$swap" -eq 0
+fi
+awk '$1 == "oom_kill" {print $2}' /proc/vmstat > oom.before
+test "$(cat oom.before)" = 0
 python3 - <<'PY'
 import socket
 try:
@@ -257,6 +269,10 @@ sudo baci-vps doctor --online | tee online.log
 grep -Fq 'school_webhook=ok' online.log
 grep -Fq 'school_recorder=ready' online.log
 systemctl is-enabled school-classroom-{sfu,https,admission,recorder}.service
+awk '$1 == "oom_kill" {print $2}' /proc/vmstat | cmp oom.before -
+if [[ "$RAM" == 512 ]]; then
+    awk '/^SwapTotal:/ {exit ($2 != 0)}' /proc/meminfo
+fi
 cat /proc/sys/kernel/random/boot_id > boot.before
 GUEST
 vm 'sudo reboot' || true

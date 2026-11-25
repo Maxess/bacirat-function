@@ -30,7 +30,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))  # python -I: only the verified staging or root-owned install directory.
 import vps_media as media
 
-VERSION = '1.1.0'
+VERSION = '1.2.0'
 APP, CFG, SYSTEMD = media.APP, media.CFG, media.SYSTEMD
 REC = Path('/opt/school-classroom-recorder')
 REC_CFG = Path('/etc/school-classroom-recorder.json')
@@ -75,6 +75,8 @@ PAYLOAD = {
 }
 ENV = {'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LC_ALL': 'C', 'HOME': '/root'}
 GIB = 1024**3
+# A VM provisioned with 512 MiB exposes less to /proc/meminfo after kernel reservations.
+MIN_RAM_KIB = 384 * 1024
 
 
 class Refused(Exception):
@@ -216,7 +218,8 @@ def fresh_preflight():
         except OSError:
             raise Refused(f'Port {port}/{"UDP" if kind == socket.SOCK_DGRAM else "TCP"} is already in use. No service was stopped.') from None
     total_kib = int(re.search(r'^MemTotal:\s+(\d+)', Path('/proc/meminfo').read_text(), re.M)[1])
-    need(total_kib >= 1792 * 1024, 'Use a VPS with at least 2 GiB RAM (4 GiB recommended).')
+    need(total_kib >= MIN_RAM_KIB, f'Linux sees {total_kib // 1024} MiB of RAM. '
+         'Use a dedicated VPS provisioned with 512 MiB or more (at least 384 MiB visible to Linux).')
     need(all(shutil.disk_usage(path).free >= size * GIB for path, size in
              [(APP.parent, 2), (SPOOL.parent, 5), (HERE, 1)]), 'Not enough free space; allow at least 8 GiB free on the system disk.')
 

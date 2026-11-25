@@ -67,14 +67,14 @@ jobs:
           trap 'while IFS= read -r line; do echo "::error title=Bundle build::$line"; done < <(tail -20 "$log")' ERR
           python3 -u scripts/build-vps-offline.py "$RUNNER_TEMP/vps-release" 2>&1 | tee "$log"
           grep -E '^Ubuntu dependency inventory:|^[0-9a-f]{64}  ' "$log" | while IFS= read -r line; do echo "::notice title=Bundle manifest::$line"; done
-      - name: Rehearse the exact deliverable in two fresh Ubuntu VMs (offline PEM and real ACME)
+      - name: Rehearse the exact deliverable on fresh 512 MiB Ubuntu VMs (offline PEM and real ACME)
         run: |
           set -euo pipefail
           for mode in files auto; do
             log="$RUNNER_TEMP/vps-rehearsal-$mode.log"
-            trap 'while IFS= read -r line; do echo "::error title=VPS $mode rehearsal::$line"; done < <(grep -E "^VM guest failure|^Test CA|^Baci VPS:|^Traceback|^.*Error:|start request repeated|Failed to |\"error\":|^VM rehearsal" "$log" | tail -9)' ERR
-            bash scripts/test-vps-offline-vm.sh "$RUNNER_TEMP"/vps-release/*amd64.tar.gz "$mode" 2>&1 | tee "$log"
-            grep -E '^VM passed:|^VM baseline|^No VM Internet|^Real ACME' "$log" | while IFS= read -r line; do echo "::notice title=Isolated VPS $mode test::$line"; done
+            trap 'while IFS= read -r line; do echo "::error title=VPS $mode rehearsal::$line"; done < <(grep -E "^VM guest failure|^VM memory|^MemAvailable|^oom_kill|Out of memory|^Test CA|^Baci VPS:|^Traceback|^.*Error:|start request repeated|Failed to |\"error\":|^VM rehearsal" "$log" | tail -14)' ERR
+            bash scripts/test-vps-offline-vm.sh "$RUNNER_TEMP"/vps-release/*amd64.tar.gz "$mode" 512 2>&1 | tee "$log"
+            grep -E '^VM passed:|^VM baseline|^VM memory|^No VM Internet|^Real ACME' "$log" | while IFS= read -r line; do echo "::notice title=Isolated VPS $mode test::$line"; done
           done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
