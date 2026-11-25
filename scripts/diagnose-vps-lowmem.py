@@ -66,7 +66,7 @@ src = replace(src, "            print('QA_PHASE driver ready; launching browser'
                 await movie.check_encoder(self.ffmpeg)
                 return
             browser =""")
-src = replace(src, '        await movie.check_encoder(self.ffmpeg)', "        print('QA_PHASE browser stopped; encoding', flush=True)\n        await movie.check_encoder(self.ffmpeg)\n        print('QA_PHASE MP4 ready', flush=True)")
+src = replace(src, '\n        await movie.check_encoder(self.ffmpeg)', "\n        print('QA_PHASE browser stopped; encoding', flush=True)\n        await movie.check_encoder(self.ffmpeg)\n        print('QA_PHASE MP4 ready', flush=True)")
 src = replace(src, "        self.stopping = asyncio.Event()", '''        if os.getenv('BACI_QA_SOFTWARE'):
             self.launch['args'] += ['--disable-gpu', '--disable-software-rasterizer', '--renderer-process-limit=1']
         if os.getenv('BACI_QA_NO_LOWEND'):
