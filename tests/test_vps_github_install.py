@@ -77,7 +77,7 @@ exit "${INSTALL_ERROR:-0}"
             self.assertEqual(re.findall(rf'^readonly {key}=(.+)$', LAUNCHER, re.M), [value])
 
     def test_verified_download_forwards_exact_flags_with_original_directory(self):
-        args = ('--check', '--tls', 'files', '--site', 'https://school.example.test/campus',
+        args = ('--check', '--profile', 'live', '--tls', 'files', '--site', 'https://school.example.test/campus',
                 '--media', 'rtc.example.test', '--ipv4', '192.0.0.9', '--cert', 'a chain.pem', '--key', './privkey.pem')
         result = self.launch(*args)
         self.assertEqual(result.returncode, 0, result.stderr)

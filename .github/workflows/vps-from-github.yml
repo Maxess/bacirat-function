@@ -59,10 +59,10 @@ jobs:
             set -eu
             mount --bind "$1/stock-opt" /opt
             exec runuser -u "$2" -- /usr/bin/env TMPDIR="$1" /bin/bash ./install-vps.sh "${@:3}"
-          ' _ "$work" "$(id -un)" --check --tls files --cert ./fullchain.pem --key ./privkey.pem \
+          ' _ "$work" "$(id -un)" --profile live --check --tls files --cert ./fullchain.pem --key ./privkey.pem \
             --site https://school.example.test/campus --media media.example.test --ipv4 192.0.0.9 2>&1 | tee "$log"
           grep -Fq 'archive_sha256=ok' "$log"
-          grep -Fq 'preflight=ok tls=files' "$log"
+          grep -Fq 'preflight=ok tls=files profile=live' "$log"
           test -z "$(find "$work" -maxdepth 1 -name 'baci-vps-github.*' -print -quit)"
           test -z "$(find "$work/stock-opt" -mindepth 1 -print -quit)"
           for path in /etc/school-classroom /usr/local/sbin/baci-vps /run/baci-vps-install.lock "$HOME/Baci-VPS-pairing.json"; do

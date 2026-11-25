@@ -5,9 +5,9 @@ export PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C
 unset BASH_ENV ENV CDPATH TAR_OPTIONS
 umask 077
 
-# Update this pin only after the new archive has passed both VM rehearsals and is public.
-readonly VERSION=1.1.0
-readonly SHA256=10faa75003f631be462468afae318daf077de5f71a7eb10dd07e3d97d733f0a3
+# Update this pin only after the exact VM-tested archive is public.
+readonly VERSION=1.2.0
+readonly SHA256=9a79d791d38e2277b5fb29f9d05ae223338bb4c25ae30ab83ffb7c9d148c1cb4
 readonly BUNDLE=baci-classroom-vps-offline
 readonly ARCHIVE="${BUNDLE}-v${VERSION}-ubuntu24.04-amd64.tar.gz"
 readonly URL="https://github.com/Maxess/bacirat-function/releases/download/vps-offline-v${VERSION}/${ARCHIVE}"
@@ -16,9 +16,10 @@ fail() { printf 'Baci VPS: %s\n' "$*" >&2; exit 1; }
 if [[ ${1:-} == --help || ${1:-} == -h ]]; then
     cat <<HELP
 Baci VPS $VERSION from GitHub Releases (fresh Ubuntu 24.04 LTS amd64 only).
-  bash install-vps.sh --tls auto
+  bash install-vps.sh --profile live --tls auto  # 512 MiB VPS, no local recording
   bash install-vps.sh --tls auto --check
   bash install-vps.sh --tls files --cert ./fullchain.pem --key ./privkey.pem
+Omit --profile to select live or full automatically; full also installs local recording.
 All installer flags are forwarded, including --site, --media and --ipv4.
 Run as your SSH user; sudo is used only after the archive is verified and unpacked.
 HELP
