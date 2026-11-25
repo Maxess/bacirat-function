@@ -6,15 +6,25 @@ set -euo pipefail
 archive=$(realpath "$1")
 mode=${2:-files}
 ram=${3:-4096}
+scenario=${5:-default}
+capacity=${6:-}
+original=${7:-}
+[[ "$scenario" == default || "$scenario" == compact || "$scenario" == upgrade ]]
+if [[ "$scenario" == upgrade ]]; then original=$(realpath "$original"); fi
+if [[ -n "$capacity" ]]; then capacity=$(realpath "$capacity"); fi
 [[ "$mode" == files || "$mode" == auto ]]
 [[ "$ram" == 512 || "$ram" == 4096 ]]
 cpus=2
 profile=full
 if [[ "$ram" == 512 ]]; then cpus=1; profile=live; fi
+if [[ "$scenario" == compact ]]; then profile=compact; fi
+if [[ "$scenario" == upgrade ]]; then profile=live; fi
+if [[ "$scenario" != default ]]; then test "$ram" = 512; fi
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 work=$(mktemp -d)
 port=22131
 vm_pid=
+test_network=
 cleanup() {
     local rc=$?
     trap - EXIT
@@ -28,6 +38,11 @@ cleanup() {
     if [[ -n "$vm_pid" ]]; then
         kill "$vm_pid" 2>/dev/null || true
         wait "$vm_pid" 2>/dev/null || true
+    fi
+    if [[ -n "$test_network" ]]; then
+        sudo ip netns del "$test_network" || true
+        sudo rm -f "/etc/netns/$test_network/hosts"
+        sudo rmdir "/etc/netns/$test_network" || true
     fi
     rm -rf "$work"
     exit "$rc"
@@ -68,7 +83,57 @@ cloud-localds "$work/seed.img" "$work/user-data" "$work/meta-data"
 qemu-img create -q -f qcow2 -F qcow2 -b "$work/base.img" "$work/vm.img" 24G
 accel=(-accel tcg -cpu max)
 if [[ -r /dev/kvm && -w /dev/kvm ]]; then accel=(-accel kvm -cpu host); fi
-qemu-system-x86_64 "${accel[@]}" -m "$ram" -smp "$cpus" -display none -monitor none -serial file:"$work/serial.log" \
+extra_nic=()
+if [[ -n "$capacity" ]]; then
+    test_network=baci-vps-recording
+    sudo ip netns add "$test_network"
+    sudo mkdir -p "/etc/netns/$test_network"
+    printf '%s\n' '127.0.0.1 localhost' '192.0.0.9 media.example.test classroom-new.example.com' '172.30.124.2 school.example.test' \
+        | sudo tee "/etc/netns/$test_network/hosts" >/dev/null
+    sudo ip netns exec "$test_network" ip tuntap add dev qatap mode tap user "$(id -u)"
+    sudo ip netns exec "$test_network" ip addr add 172.30.124.2/29 dev qatap
+    sudo ip netns exec "$test_network" ip link set lo up
+    sudo ip netns exec "$test_network" ip link set qatap up
+    # Open TAP once and inherit only its fd into QEMU; QEMU's SSH hostfwd
+    # remains in the runner's original network, with SLIRP restrict=on.
+    cat > "$work/tap-launch.py" <<'PY_TAP'
+import fcntl, os, struct, sys
+from array import array
+import socket
+import subprocess
+
+left, right = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
+script = """
+import fcntl, os, socket, struct, sys
+from array import array
+with socket.socket(fileno=int(sys.argv[1])) as sock:
+    with open('/dev/net/tun', 'r+b', buffering=0) as tap:
+        fcntl.ioctl(tap, 0x400454ca, struct.pack('16sH', b'qatap', 0x1002))
+        sock.sendmsg([b'T'], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array('i', [tap.fileno()]))])
+"""
+# sudo normally closes inherited fds. A private Unix listener passes the TAP fd
+# back across the namespace boundary, without executing QEMU as root.
+address = os.path.join(os.path.dirname(__file__), 'tapsock')
+left.close(); right.close()
+listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+listener.bind(address)
+listener.listen(1)
+listener.settimeout(8)
+connector = script.replace('with socket.socket(fileno=int(sys.argv[1])) as sock:',
+    'with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:\n    sock.connect(sys.argv[1])')
+subprocess.run(['sudo', 'ip', 'netns', 'exec', 'baci-vps-recording', 'python3', '-c', connector, address], check=True, timeout=6)
+with listener.accept()[0] as sock:
+    _, ancillary, _, _ = sock.recvmsg(1, socket.CMSG_SPACE(4))
+listener.close()
+assert len(ancillary) == 1 and ancillary[0][:2] == (socket.SOL_SOCKET, socket.SCM_RIGHTS)
+fd, = struct.unpack('i', ancillary[0][2])
+os.set_inheritable(fd, True)
+os.execvp(sys.argv[1], sys.argv[1:] + ['-netdev', f'tap,id=qa-tap,fd={fd}', '-device', 'virtio-net-pci,netdev=qa-tap,mac=52:54:00:12:34:57'])
+PY_TAP
+    extra_nic=(python3 "$work/tap-launch.py")
+fi
+printf 'VM accelerator: %s\n' "${accel[*]}"
+"${extra_nic[@]}" qemu-system-x86_64 "${accel[@]}" -m "$ram" -smp "$cpus" -display none -monitor none -serial file:"$work/serial.log" \
     -drive file="$work/vm.img",if=virtio,format=qcow2 -drive file="$work/seed.img",if=virtio,format=raw,readonly=on \
     -netdev user,id=nic,restrict=on,hostfwd=tcp:127.0.0.1:$port-:22 -device virtio-net-pci,netdev=nic &
 vm_pid=$!
@@ -87,6 +152,11 @@ for target in "${targets[@]}"; do
         -extfile "$work/$target.ext" -out "$work/$target.pem" >/dev/null 2>&1
 done
 wait_vm
+if [[ "$scenario" == upgrade ]]; then
+    cp -- "$archive" "$work/recorder-candidate.tar.gz"
+    send "$work/recorder-candidate.tar.gz"
+    archive=$original
+fi
 send "$archive" "$work/qa.crt" "$work/school.pem" "$work/school.key" "$root/tests/fixtures/vps-offline-peer.py"
 if [[ -n ${4:-} ]]; then
     install -m 0755 "$4" "$work/vps-live-media"
@@ -115,7 +185,7 @@ else
     done
     send "$work/pebble" "$work/pebble-challtestsrv" "$work/acme.pem" "$work/acme.key" "$root/tests/fixtures/vps-acme-gateway.py"
 fi
-vm "ARCHIVE=$(basename "$archive") MODE=$mode RAM=$ram PROFILE=$profile bash -s" <<'GUEST'
+vm "ARCHIVE=$(basename "$archive") MODE=$mode RAM=$ram PROFILE=$profile SCENARIO=$scenario bash -s" <<'GUEST'
 set -Eeuo pipefail
 trap 'echo "VM guest failure at line $LINENO: $BASH_COMMAND" >&2' ERR
 read -r total swap < <(awk '/^MemTotal:/{m=$2} /^SwapTotal:/{s=$2} END {print m,s}' /proc/meminfo)
@@ -158,6 +228,7 @@ sha256sum /etc/apt/sources.list.d/* > apt.before
 sysctl -n kernel.apparmor_restrict_unprivileged_userns > apparmor.before
 tar xzf "$ARCHIVE"
 installer=(sudo bash baci-classroom-vps-offline/install.sh --site https://school.example.test/campus --media "$media" --ipv4 192.0.0.9)
+if [[ "$SCENARIO" == compact ]]; then installer+=(--profile compact); fi
 if [[ "$PROFILE" == live ]]; then
     if "${installer[@]}" --check --profile full > rejected.log 2>&1; then exit 1; fi
     grep -Fq 'use --profile live' rejected.log
@@ -254,7 +325,7 @@ test "$(sudo stat -c '%a:%U' /etc/school-classroom/site-pairing.json)" = 600:roo
 sudo cmp /etc/school-classroom/site-pairing.json Baci-VPS-pairing.json
 units=(school-classroom-{sfu,https,admission}.service)
 private=(/etc/school-classroom/{livekit.yaml,admission.json,site-pairing.json,offline-vps.json})
-if [[ "$PROFILE" == full ]]; then
+if [[ "$PROFILE" != live ]]; then
     grep -Fq renderer_mp4=ok installation.log
     sudo -u school-recorder test ! -r /etc/school-classroom/site-pairing.json
     sudo -u school-recorder test ! -r /etc/school-classroom/tls/privkey.pem
@@ -298,9 +369,9 @@ sudo systemd-run --quiet --unit=baci-fixture-peer --property=WorkingDirectory="$
 sudo /usr/bin/python3 vps-offline-peer.py --exercise
 sudo baci-vps doctor --online | tee online.log
 grep -Fq 'school_webhook=ok' online.log
-if [[ "$PROFILE" == full ]]; then
+if [[ "$PROFILE" != live ]]; then
     grep -Fq 'school_recorder=ready' online.log
-    grep -Fq 'profile=full recorder=ok renderer=ok' online.log
+    grep -Fq "profile=$PROFILE recorder=ok renderer=ok" online.log
 else
     grep -Fq 'profile=live recorder=not_installed renderer=not_installed' online.log
     test ! -e /run/baci-fixture-beat.json
@@ -317,7 +388,40 @@ if [[ -x ./vps-live-media ]]; then
         | sudo ip netns exec schoolqa timeout 70 ./vps-live-media
     sudo baci-vps doctor
 fi
-if [[ "$PROFILE" == full ]]; then units+=(school-classroom-postprocess.service); fi
+if [[ "$SCENARIO" == upgrade ]]; then
+    mkdir candidate
+    tar -xzf recorder-candidate.tar.gz -C candidate
+    add=(sudo bash candidate/baci-classroom-vps-offline/install.sh --add-recorder --profile compact)
+    sudo sha256sum /etc/school-classroom/{livekit.yaml,admission.json,site-pairing.json,Caddyfile} \
+        /opt/school-classroom/{caddy,livekit-server,admission.py,vps_media.py} > live.before
+    sudo systemctl show -p InvocationID "${units[@]}" > running.before
+    "${add[@]}" --check | grep -Fq add_recorder_preflight=ok
+    # Fail after the renderer is installed and probed, not merely at argument parsing.
+    touch /run/baci-qa-deny-third-maintenance 2>/dev/null || sudo touch /run/baci-qa-deny-third-maintenance
+    if "${add[@]}" > rollback.log 2>&1; then exit 1; fi
+    sudo rm /run/baci-qa-deny-third-maintenance
+    grep -Fq 'Incomplete Recorder add-on rolled back' rollback.log
+    grep -Fq 'school still has an open lesson' rollback.log
+    sudo sha256sum --check install.before
+    sudo test ! -e /opt/school-classroom-recorder
+    sudo test ! -e /var/lib/school-classroom-recorder
+    sudo test ! -e /etc/school-classroom-recorder.json
+    sudo test ! -e /etc/apparmor.d/school-classroom-chromium
+    ! getent passwd school-recorder
+    sudo sha256sum --check live.before
+    sudo systemctl show -p InvocationID "${units[@]}" | cmp running.before -
+    echo 'QA_ADDON rollback after a late school refusal left the original live stack and pairing intact.'
+    "${add[@]}" | tee addition.log
+    grep -Fq 'add_recorder=ok profile=compact renderer_mp4=ok school_recorder=ready' addition.log
+    sudo sha256sum --check live.before
+    sudo systemctl show -p InvocationID "${units[@]}" | cmp running.before -
+    if [[ "$MODE" == files ]]; then sudo cmp privkey.pem /etc/school-classroom/tls/privkey.pem; fi
+    sudo cmp /etc/school-classroom/site-pairing.json Baci-VPS-pairing.json
+    echo 'QA_ADDON enabled real Recorder on the unchanged v1.2.0 live install without re-pairing.'
+    units+=(school-classroom-recorder.service)
+    PROFILE=compact
+fi
+if [[ "$PROFILE" != live ]]; then units+=(school-classroom-postprocess.service); fi
 for unit in "${units[@]}"; do
     test "$(systemctl show -p NRestarts --value "$unit")" -eq 0
     printf 'VM service %s %s\n' "$unit" "$(systemctl show -p MemoryCurrent -p MemoryPeak "$unit" | paste -sd ' ')"
@@ -345,6 +449,12 @@ UNIT
 sudo systemctl enable baci-qa-media-address.service
 cat /proc/sys/kernel/random/boot_id > boot.before
 GUEST
+if [[ "$scenario" == upgrade ]]; then profile=compact; fi
+if [[ -n "$capacity" ]]; then
+    # shellcheck source=vps-recording-rehearsal.sh
+    source "$root/scripts/vps-recording-rehearsal.sh"
+    run_recording_rehearsal "$capacity"
+fi
 vm 'sudo reboot' || true
 for attempt in $(seq 1 60); do
     if vm 'test "$(cat /proc/sys/kernel/random/boot_id)" != "$(cat boot.before)" && grep -Eq "^oom_kill +0$" /proc/vmstat && ss -Hlnu | grep -F "192.0.0.9:7882" >/dev/null && sudo baci-vps doctor' 2>/dev/null; then

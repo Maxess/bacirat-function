@@ -31,6 +31,7 @@ def decode(raw):
 
 class School(http.server.BaseHTTPRequestHandler):
     lock = threading.Lock()
+    maintenance_checks = {}
 
     def log_message(self, *args):
         pass
@@ -59,7 +60,12 @@ class School(http.server.BaseHTTPRequestHandler):
                         result = {'ok': True, 'capture': [], 'pending': [], 'settle': [], 'work': None, 'lease': 0}
                     elif data['action'] == 'maintenance':
                         match = BEAT.exists() and data['worker'] == BEAT.read_text()
-                        result = {'ok': True, 'release': '0.4.23', 'idle': True, 'worker_ok': True, 'native_ready': match}
+                        idle = True
+                        if Path('/run/baci-qa-deny-third-maintenance').is_file():
+                            who = data['worker']
+                            self.maintenance_checks[who] = self.maintenance_checks.get(who, 0) + 1
+                            idle = self.maintenance_checks[who] < 3
+                        result = {'ok': True, 'release': '0.4.23', 'idle': idle, 'worker_ok': True, 'native_ready': match}
                     else:
                         raise ValueError('unexpected synthetic request')
                 else:
@@ -81,7 +87,7 @@ def exercise():
     setup = module_from_spec(spec)
     loader.exec_module(setup)
     config = json.loads(SET.read_text())
-    if config.get('profile', 'full') == 'full':
+    if config.get('profile', 'full') != 'live':
         deadline = time.monotonic() + 40
         while time.monotonic() < deadline and not BEAT.exists():
             time.sleep(.5)
