@@ -63,7 +63,7 @@ jobs:
           printf '%s  %s\n' 9a79d791d38e2277b5fb29f9d05ae223338bb4c25ae30ab83ffb7c9d148c1cb4 "$w/baseline-v1.2.0.tar.gz" | sha256sum -c --strict
           tar -xzf "$w/baseline-v1.2.0.tar.gz" -C "$w"
           p="$w/baci-classroom-vps-offline"
-          cp server/offline/{apt-local.sh,setup.py,install.sh,compact-renderer.py} "$p/"
+          cp server/offline/{apt-local.sh,setup.py,install.sh,compact-renderer.py,compact-ffmpeg.py} "$p/"
           ( cd "$p"; find . -type f ! -name SHA256SUMS -printf '%P\0' | sort -z | xargs -0 sha256sum > SHA256SUMS )
           tar -cf - -C "$w" baci-classroom-vps-offline | gzip -n -1 > "$w/compact-trial.tar.gz"
           case '${{ matrix.tls }}' in

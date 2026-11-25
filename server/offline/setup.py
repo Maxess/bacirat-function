@@ -643,9 +643,17 @@ class Fresh:
         if self.profile == 'compact':
             program = REC_PROGRAM / 'compact-renderer.py'
             write(program, (HERE / program.name).read_bytes())
+            encoder = REC_PROGRAM / 'compact-ffmpeg.py'
+            write(encoder, (HERE / encoder.name).read_bytes(), 0o755)
+            small = check_memory(Path('/proc/meminfo').read_text()) < COMPACT_NOSWAP_RAM_KIB
+            # Keep resident memory bounded; the small renderer may page out a
+            # limited amount ONLY off peak. Do not set a tight MemoryHigh that
+            # stalls Chromium/FFmpeg on every page fault during PDF startup.
+            resident, swap = ('336M', '192M') if small else ('640M', '0')
             units[RENDERER + '.d/80-compact.conf'] = ('[Service]\nExecStart=\n'
                 f'ExecStart={REC}/venv/bin/python -Esu {program}\nEnvironment=XDG_CACHE_HOME=/tmp/baci-font-cache\n'
-                'CPUQuota=100%\nMemoryHigh=310M\nMemoryMax=336M\nMemorySwapMax=0\n')
+                'CPUQuota=100%\nMemoryHigh=infinity\n'
+                f'MemoryMax={resident}\nMemorySwapMax={swap}\n')
             units[RECORDER + '.d/80-compact.conf'] = '[Service]\nMemoryHigh=112M\nMemoryMax=160M\nMemorySwapMax=0\n'
         browser_files()
         venv_install()

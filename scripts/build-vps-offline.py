@@ -180,7 +180,7 @@ def main():
         root = Path(temp)
         bundle = root / BUNDLE
         bundle.mkdir()
-        for name in ('install.sh', 'apt-local.sh', 'setup.py', 'compact-renderer.py', 'requirements.lock', 'ubuntu-packages.txt', 'THIRD-PARTY.md'):
+        for name in ('install.sh', 'apt-local.sh', 'setup.py', 'compact-renderer.py', 'compact-ffmpeg.py', 'requirements.lock', 'ubuntu-packages.txt', 'THIRD-PARTY.md'):
             shutil.copyfile(OFFLINE / name, bundle / name)
         shutil.copyfile(OFFLINE / 'README-fa.md', bundle / 'START-HERE-fa.md')
         shutil.copyfile(ROOT / 'server/install.py', bundle / 'vps_media.py')
