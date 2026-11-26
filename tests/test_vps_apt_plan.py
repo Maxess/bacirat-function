@@ -99,6 +99,17 @@ Dir::Log "$work";''')
                 self.assertIn('Remv baci-qa-provider-extra', result.stderr)
                 self.assertIn('no package install was attempted', result.stderr)
 
+    def test_available_companion_candidate_avoids_removal_but_addon_stays_frozen(self):
+        self.block_removal()
+        with self.index.open('a') as file:
+            file.write(package('baci-qa-provider-extra', '2', depends='baci-qa-core (= 2)'))
+        fresh = self.script(APT, self.work, '--check')
+        self.assertEqual(fresh.returncode, 0, fresh.stderr)
+        self.assertIn('apt_plan=ok', fresh.stdout)
+        addon = self.script(APT, self.work, '--check', '--no-upgrades')
+        self.assertEqual(addon.returncode, 1, addon.stderr)
+        self.assertRegex(addon.stderr, r'apt_plan=(blocked|unresolved)')
+
     def test_addon_refuses_to_upgrade_an_installed_package_to_satisfy_deps(self):
         result = self.script(APT, self.work, '--check', '--no-upgrades')
         self.assertEqual(result.returncode, 1, result.stderr)

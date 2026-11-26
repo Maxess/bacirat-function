@@ -78,6 +78,7 @@ jobs:
           # The hosted runner makes /opt writable for its tool cache. Present a stock
           # root-owned /opt in a private test mount namespace, without relaxing any installer checks.
           sudo install -d -m 0755 "$work/stock-opt"
+          sha256sum /var/lib/dpkg/status > dpkg.before
           sudo unshare --mount --propagation private /bin/bash -c '
             set -eu
             mount --bind "$1/stock-opt" /opt
@@ -85,6 +86,10 @@ jobs:
           ' _ "$work" "$(id -un)" --check \
             --site https://school.example.test/campus --media media.example.test --ipv4 192.0.0.9 2>&1 | tee "$log"
           grep -Fq "archive_sha256=ok version=$VPS_VERSION" "$log"
+          if [[ "$VPS_VERSION" != 1.3.0 ]]; then
+            grep -Fq 'apt_plan=ok (read-only; no packages were changed)' "$log"
+          fi
+          sha256sum --strict --check dpkg.before
           # The hosted runner has ample RAM. Automatic selection must retain
           # recording and use the verified certificate pair in this directory.
           grep -Fq 'preflight=ok tls=files profile=full' "$log"

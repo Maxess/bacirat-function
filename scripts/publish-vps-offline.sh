@@ -52,6 +52,11 @@ setup_commit=$(gh api "repos/$repo/actions/runs/$setup_run" | jq -er --arg branc
     select(.status == "completed" and .conclusion == "success" and .head_branch == $branch
            and (.path | split("@")[0]) == ".github/workflows/vps-resilience.yml") | .head_sha')
 [[ "$setup_commit" =~ ^[a-f0-9]{40}$ ]]
+# A green transport test for a previous archive is not evidence for this one.
+gh api "repos/$repo/contents/docs/vps-offline-release.json?ref=$setup_commit" --jq .content | base64 -d \
+    | jq -e --arg ver "$version" --arg run "$run" --arg installer "$installer" --arg artifact "$artifact_sha" '
+        .version == $ver and (.run_id | tostring) == $run
+        and .installer_sha256 == $installer and .artifact_sha256 == $artifact' >/dev/null
 gh api "repos/$repo/actions/runs/$setup_run/jobs" | jq -e '
     any(.jobs[]; .name == "offline-and-tcp" and .conclusion == "success"
         and any(.steps[]; .name == "Check offline profile selection, managed swap and real TCP ICE on 512 MiB"
