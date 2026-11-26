@@ -103,6 +103,7 @@ def apt_environment(apt, suites='noble noble-updates noble-security'):
                       f'Dir::Etc::sourcelist "{own_sources}";\nDir::Etc::sourceparts "{apt}/empty";\n'
                       f'Dir::Etc::preferences "/dev/null";\nDir::Etc::preferencesparts "{apt}/empty";\n'
                       f'Dir::State::lists "{apt}/lists";\nDir::State::status "{status}";\n'
+                      f'Dir::State::extended_states "{apt}/extended_states";\n'
                       f'Dir::Cache::archives "{apt}/archives";\n'
                       'Dir::Cache::pkgcache "";\nDir::Cache::srcpkgcache "";\n'
                       'APT::Architecture "amd64";\nAPT::Architectures {"amd64";};\n'
@@ -136,6 +137,8 @@ def apt_bundle(work, bundle, sources):
         digest = sha(archive)
         # Avoid dpkg's URL-escaped epoch in local names; Package + Arch is unique in this repo.
         filename = f'{name}_{arch}.deb'
+        if (pool / filename).exists():
+            raise ValueError(f'More than one candidate for {name}/{arch}')
         archive.rename(pool / filename)
         index.append(fields + f'\nFilename: ./pool/{filename}\nSize: {(pool / filename).stat().st_size}\nSHA256: {digest}\n')
         source = control.get('Source', name)
@@ -148,7 +151,7 @@ def apt_bundle(work, bundle, sources):
             source_set.update(re.findall(r'([a-z0-9.+-]+) \(= ([^ )]+)\)', control.get(field, '')))
         rows.append((name, arch, version, digest, source_pkg, source_ver))
     if not index or not set(goals) <= {row[0] for row in rows}:
-        raise ValueError('APT did not download all runtime goals from the empty baseline')
+        raise ValueError('APT did not download all runtime and compatibility goals')
     (repo / 'Packages').write_text('\n'.join(index))
     (bundle / 'ubuntu-package-lock.tsv').write_text('package\tarch\tversion\tsha256\tsource\tsource-version\n'
                                                     + ''.join('\t'.join(row) + '\n' for row in sorted(rows)))
@@ -198,7 +201,7 @@ def main():
         bundle.mkdir()
         for name in ('install.sh', 'apt-local.sh', 'setup.py', 'compact-renderer.py', 'compact-ffmpeg.py', 'requirements.lock', 'ubuntu-packages.txt', 'ubuntu-compat-packages.txt', 'THIRD-PARTY.md'):
             shutil.copyfile(OFFLINE / name, bundle / name)
-        shutil.copyfile(OFFLINE / 'README-fa.md', bundle / 'START-HERE-fa.md')
+        shutil.copyfile(OFFLINE / 'START-HERE-fa.md', bundle / 'START-HERE-fa.md')
         shutil.copyfile(ROOT / 'server/install.py', bundle / 'vps_media.py')
         shutil.copyfile(ROOT / 'server/admission.py', bundle / 'admission.py')
         print('Fetching pinned application binaries, headless browser and hashed wheels…', flush=True)

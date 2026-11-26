@@ -73,22 +73,30 @@ wait_vm() {
 }
 image=ubuntu-24.04-minimal-cloudimg-amd64.img
 base=https://cloud-images.ubuntu.com/minimal/releases/noble/release
+scheme='=https'
 if [[ "$vm_baseline" == noble-ga-server ]]; then
     image=ubuntu-24.04-server-cloudimg-amd64.img
-    base=https://cloud-images.ubuntu.com/releases/noble/release-20240423
+    # Canonical's historical image host is HTTP-only. Authenticate its
+    # checksum with the stock Ubuntu cloud-image keyring *before* booting,
+    # then require the reviewed, pinned SHA-256 of this release image too.
+    base=http://cloud-images-archive.ubuntu.com/releases/noble/release-20240423
+    scheme='=http,https'
 fi
 fetch_image() {
-    curl --disable -fSsL --proto '=https' --proto-redir '=https' --connect-timeout 15 --max-time 240 --retry 2 "$base/$1" -o "$2"
+    curl --disable -fSsL --proto "$scheme" --proto-redir '=https' --connect-timeout 15 --max-time 240 --retry 2 "$base/$1" -o "$2"
 }
 fetch_image SHA256SUMS "$work/images.sha256"
 if [[ "$vm_baseline" == noble-ga-server ]]; then
     fetch_image SHA256SUMS.gpg "$work/images.sha256.gpg"
     gpgv --keyring /usr/share/keyrings/ubuntu-cloudimage-keyring.gpg "$work/images.sha256.gpg" "$work/images.sha256"
 fi
-fetch_image "$image" "$work/base.img"
 expected=$(awk -v name="*$image" '$2 == name {print $1}' "$work/images.sha256")
 [[ "$expected" =~ ^[a-f0-9]{64}$ ]]
-printf '%s  %s\n' "$expected" "$work/base.img" | sha256sum --check
+if [[ "$vm_baseline" == noble-ga-server ]]; then
+    [[ "$expected" == 32a9d30d18803da72f5936cf2b7b9efcb4d0bb63c67933f17e3bdfd1751de3f3 ]]
+fi
+fetch_image "$image" "$work/base.img"
+printf '%s  %s\n' "$expected" "$work/base.img" | sha256sum --check --strict
 printf 'VM baseline Ubuntu 24.04 (%s) SHA-256: %s\n' "$vm_baseline" "$expected"
 ssh-keygen -q -t ed25519 -N '' -f "$work/ssh"
 cat > "$work/user-data" <<EOF_USER

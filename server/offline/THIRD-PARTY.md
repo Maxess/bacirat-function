@@ -4,8 +4,10 @@
   Noble Updates, and Noble Security archives. `ubuntu-package-lock.tsv` lists
   exact binary versions, SHA-256 and matching source versions. The adjacent
   GitHub Release asset `*-ubuntu-source.tar` provides the corresponding Ubuntu
-  source files (`.dsc` plus their archives), including FFmpeg and its packaged
-  libraries. These are not needed to install or run the VPS. Package copyright
+  source files (`.dsc` plus their archives), including FFmpeg, its packaged
+  libraries, and the signed dependency-family companions for older Noble
+  hosts. The companion candidates are not unconditional install goals.
+  Source files are not needed to install or run the VPS. Package copyright
   notices are installed under `/usr/share/doc/<package>/copyright` per Ubuntu.
   This is not a Canonical or Ubuntu-endorsed distribution.
 - `payload/livekit_*`: unmodified LiveKit OSS release archive (Apache-2.0),
