@@ -23,7 +23,7 @@ Baci VPS $VERSION — Ubuntu 24.04 LTS amd64, systemd, cgroup v2.
   bash install-vps.sh --tls files --cert ./fullchain.pem --key ./privkey.pem
 A local archive named $ARCHIVE in the current directory is used before GitHub.
 The same SHA-256 is required for a local file, a mirror, and GitHub Releases.
-Default: keep recording enabled — full at 1792 MiB visible RAM, otherwise compact.
+Default (--profile auto): install recording — full at 1792 MiB visible RAM, otherwise compact.
 Compact needs 448 MiB visible RAM; below 896 MiB it also needs 512 MiB active swap.
 Choose --profile live explicitly only if you want a live-only install without recording.
 TLS defaults to the local PEM pair when present, otherwise public ACME on TCP 443.
@@ -33,7 +33,7 @@ Run as the SSH user; sudo is invoked only for the verified local installer.
 HELP
 }
 
-bundle= mirror= profile= has_profile=false
+bundle= mirror= profile=auto has_profile=false
 args=()
 while (( $# )); do
     case $1 in
@@ -54,7 +54,7 @@ while (( $# )); do
         --profile)
             [[ "$has_profile" == false ]] || fail 'Specify --profile only once.'
             case $value in
-                live|compact|full|auto) args+=(--profile "$value"); has_profile=true ;;
+                live|compact|full|auto) profile=$value; has_profile=true ;;
                 *) fail 'Choose --profile live, compact, full or auto.' ;;
             esac ;;
     esac
@@ -72,7 +72,7 @@ if (( EUID != 0 )); then
     command -v sudo >/dev/null || fail 'این حساب SSH باید دسترسی sudo داشته باشد.'
 fi
 
-if [[ "$has_profile" == false ]]; then
+if [[ "$profile" == auto ]]; then
     # Do not silently install live-only on a small VPS. That would hide an unmet
     # requirement from a school expecting recording and group delivery.
     read -r ram swap < <(awk '/^MemTotal:/ {r=$2} /^SwapTotal:/ {s=$2} END {print r+0,s+0}' /proc/meminfo)
@@ -87,8 +87,8 @@ if [[ "$has_profile" == false ]]; then
         fail 'برای ضبط حداقل ۴۴۸ MiB RAM قابل‌مشاهده لازم است. اگر فقط کلاس زنده می‌خواهی، --profile live را صریح بزن.'
     fi
     printf 'پروفایل ضبط انتخاب شد: %s (MemTotal=%s KiB، SwapTotal=%s KiB)\n' "$profile" "$ram" "$swap"
-    args+=(--profile "$profile")
 fi
+args+=(--profile "$profile")
 
 if [[ -z "$bundle" && -z "$mirror" && ( -e "$ARCHIVE" || -L "$ARCHIVE" ) ]]; then
     bundle="./$ARCHIVE"

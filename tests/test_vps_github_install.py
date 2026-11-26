@@ -78,8 +78,9 @@ exit "${INSTALL_ERROR:-0}"
             self.assertEqual(re.findall(rf'^readonly {key}=(.+)$', LAUNCHER, re.M), [value])
 
     def test_verified_download_forwards_exact_flags_with_original_directory(self):
-        args = ('--check', '--profile', 'live', '--tls', 'files', '--site', 'https://school.example.test/campus',
-                '--media', 'rtc.example.test', '--ipv4', '192.0.0.9', '--cert', 'a chain.pem', '--key', './privkey.pem')
+        args = ('--check', '--tls', 'files', '--site', 'https://school.example.test/campus',
+                '--media', 'rtc.example.test', '--ipv4', '192.0.0.9', '--cert', 'a chain.pem', '--key', './privkey.pem',
+                '--profile', 'live')
         result = self.launch(*args)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(f"archive_sha256=ok version={RELEASE['version']}", result.stdout)
@@ -143,8 +144,9 @@ exit "${INSTALL_ERROR:-0}"
         self.assertIn('swap', refused.stderr)
         self.assertEqual(refused.returncode, 1)
         self.assertFalse((self.work / 'install.log').exists())
+        self.assertEqual(self.launch('--profile=auto', '--check', '--bundle', str(self.archive)).returncode, 1)
         self.env['SWAP'] = '524284'
-        ok = self.launch('--check', '--bundle', str(self.archive))
+        ok = self.launch('--profile=auto', '--check', '--bundle', str(self.archive))
         self.assertEqual(ok.returncode, 0, ok.stderr)
         self.assertEqual(self.argv('install')[-2:], ['--profile', 'compact'])
 

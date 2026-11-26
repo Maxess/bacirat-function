@@ -59,7 +59,7 @@ if [[ "$action" == --check ]]; then
     exit 0
 fi
 (( EUID == 0 )) || fail 'Run --apply with sudo.'
-exec 9>/run/lock/baci-vps-swap.lock
+exec 9>/run/baci-vps-swap.lock
 flock -n 9 || fail 'Another swap preparation is running.'
 check
 

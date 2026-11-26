@@ -11,10 +11,11 @@ capacity=${6:-}
 original=${7:-}
 swap_mib=${8:-0}
 # Release transport QA: exercise the separately shipped helper and launcher,
-# and close UDP on the two client peers, all with the exact published payload.
+# and close UDP on two external browser peers, using the exact release payload.
 resilience=${BACI_QA_RESILIENCE:-0}
 if [[ "$resilience" == 1 ]]; then
-    [[ "$scenario" == compact && "$mode" == files && "$ram" == 512 && "$swap_mib" == 512 && -n ${4:-} && -z "$capacity" ]]
+    [[ "$scenario" == compact && "$mode" == files && "$ram" == 512 && "$swap_mib" == 512 && -z ${4:-} && -z "$capacity" ]]
+    [[ -x "${BACI_QA_CHROMIUM:?}" && -d "${BACI_QA_PLAYWRIGHT:?}" ]]
 fi
 [[ "$swap_mib" == 0 || "$swap_mib" == 512 ]]
 [[ "$scenario" == default || "$scenario" == compact || "$scenario" == upgrade ]]
@@ -92,7 +93,7 @@ qemu-img create -q -f qcow2 -F qcow2 -b "$work/base.img" "$work/vm.img" 24G
 accel=(-accel tcg -cpu max)
 if [[ -r /dev/kvm && -w /dev/kvm ]]; then accel=(-accel kvm -cpu host); fi
 extra_nic=()
-if [[ -n "$capacity" ]]; then
+if [[ -n "$capacity" || "$resilience" == 1 ]]; then
     test_network=baci-vps-recording
     sudo ip netns add "$test_network"
     sudo mkdir -p "/etc/netns/$test_network"
@@ -318,11 +319,12 @@ fi
 if [[ "$QA_RESILIENCE" == 1 ]]; then
     # No WAN route, no downloads, no profile/TLS flags. A verified local bundle
     # should pick recording, and automatically recognise the valid local PEMs.
-    bash ./install-vps.sh --bundle "$ARCHIVE" --check --site https://school.example.test/campus \
-        --media "$media" --ipv4 192.0.0.9 | tee launcher.log
+    launcher=(bash ./install-vps.sh --bundle "$ARCHIVE" --site https://school.example.test/campus
+              --media "$media" --ipv4 192.0.0.9)
+    "${launcher[@]}" --check | tee launcher.log
     grep -Fq 'archive_sha256=ok' launcher.log
     grep -Fq 'preflight=ok tls=files profile=compact' launcher.log
-    test ! -e /etc/school-classroom
+    test ! -e /etc/school-classroom && test ! -e /run/baci-vps-install.lock
     echo 'QA_RESILIENCE offline launcher selected compact recording and local HTTPS files.'
 fi
 "${installer[@]}" --check | tee preflight.log
@@ -350,7 +352,13 @@ if "${installer[@]}" > rejected.log 2>&1; then exit 1; fi
 sudo grep -Fq 'do not modify' /opt/school-classroom/foreign.txt
 sudo rm /opt/school-classroom/foreign.txt
 sudo rmdir /opt/school-classroom
-"${installer[@]}" | tee installation.log
+if [[ "$QA_RESILIENCE" == 1 ]]; then
+    "${launcher[@]}" | tee installation.log
+    grep -Fq 'archive_sha256=ok' installation.log
+    echo 'QA_RESILIENCE local launcher completed the compact install without Internet.'
+else
+    "${installer[@]}" | tee installation.log
+fi
 grep -Fq "installation=ok tls=$MODE profile=$PROFILE" installation.log
 sudo grep -Fq 'includes: [192.0.0.9/32]' /etc/school-classroom/livekit.yaml
 ss -Hlnu | grep -F '192.0.0.9:7882' >/dev/null
@@ -418,18 +426,10 @@ if [[ -x ./vps-live-media ]]; then
         # After issuance the classroom doesn't need the disposable CA processes.
         sudo systemctl stop baci-qa-acme baci-qa-pebble baci-qa-dns
     fi
-    if [[ "$QA_RESILIENCE" == 1 ]]; then
-        # LiveKit TURN is disabled. The clients have one route to this SFU
-        # and cannot send UDP to its media mux: RTP must go over ICE/TCP.
-        sudo ip netns exec schoolqa ip rule add ipproto udp dport 7882 prohibit
-    else
-        sudo ip netns exec schoolqa ip rule add ipproto tcp dport 7881 prohibit
-    fi
+    # The two test peers cannot fall back to TCP ICE (or use a TURN relay).
+    sudo ip netns exec schoolqa ip rule add ipproto tcp dport 7881 prohibit
     sudo cat /etc/school-classroom/site-pairing.json \
         | sudo ip netns exec schoolqa timeout 70 ./vps-live-media
-    if [[ "$QA_RESILIENCE" == 1 ]]; then
-        echo 'QA_RESILIENCE two peers exchanged Opus and VP8 with UDP blocked; ICE/TCP on 7881.'
-    fi
     sudo baci-vps doctor
 fi
 if [[ "$SCENARIO" == upgrade ]]; then
@@ -499,6 +499,11 @@ if [[ -n "$capacity" ]]; then
     # shellcheck source=vps-recording-rehearsal.sh
     source "$root/scripts/vps-recording-rehearsal.sh"
     run_recording_rehearsal "$capacity"
+fi
+if [[ "$resilience" == 1 ]]; then
+    # shellcheck source=vps-tcp-rehearsal.sh
+    source "$root/scripts/vps-tcp-rehearsal.sh"
+    run_tcp_rehearsal
 fi
 vm 'sudo reboot' || true
 for attempt in $(seq 1 60); do
