@@ -82,13 +82,15 @@ jobs:
             set -eu
             mount --bind "$1/stock-opt" /opt
             exec runuser -u "$2" -- /usr/bin/env TMPDIR="$1" /bin/bash ./install-vps.sh "${@:3}"
-          ' _ "$work" "$(id -un)" --profile live --check --tls files --cert ./fullchain.pem --key ./privkey.pem \
+          ' _ "$work" "$(id -un)" --check \
             --site https://school.example.test/campus --media media.example.test --ipv4 192.0.0.9 2>&1 | tee "$log"
-          grep -Fq 'archive_sha256=ok' "$log"
-          grep -Fq 'preflight=ok tls=files profile=live' "$log"
+          grep -Fq "archive_sha256=ok version=$VPS_VERSION" "$log"
+          # The hosted runner has ample RAM. Automatic selection must retain
+          # recording and use the verified certificate pair in this directory.
+          grep -Fq 'preflight=ok tls=files profile=full' "$log"
           test -z "$(find "$work" -maxdepth 1 -name 'baci-vps-github.*' -print -quit)"
           test -z "$(find "$work/stock-opt" -mindepth 1 -print -quit)"
           for path in /etc/school-classroom /usr/local/sbin/baci-vps /run/baci-vps-install.lock "$HOME/Baci-VPS-pairing.json"; do
             test ! -e "$path"
           done
-          echo '::notice title=Direct GitHub install::The pinned public archive downloaded, matched the reviewed SHA-256 and passed the real installer preflight without installing or generating pairing credentials.'
+          echo '::notice title=Direct GitHub install::The pinned public archive downloaded, matched the reviewed SHA-256 and passed the real full-recording installer preflight without installing or generating pairing credentials.'
