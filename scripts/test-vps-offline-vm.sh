@@ -10,6 +10,12 @@ scenario=${5:-default}
 capacity=${6:-}
 original=${7:-}
 swap_mib=${8:-0}
+# Release transport QA: exercise the separately shipped helper and launcher,
+# and close UDP on the two client peers, all with the exact published payload.
+resilience=${BACI_QA_RESILIENCE:-0}
+if [[ "$resilience" == 1 ]]; then
+    [[ "$scenario" == compact && "$mode" == files && "$ram" == 512 && "$swap_mib" == 512 && -n ${4:-} && -z "$capacity" ]]
+fi
 [[ "$swap_mib" == 0 || "$swap_mib" == 512 ]]
 [[ "$scenario" == default || "$scenario" == compact || "$scenario" == upgrade ]]
 if [[ "$scenario" == upgrade ]]; then original=$(realpath "$original"); fi
@@ -157,6 +163,7 @@ if [[ "$scenario" == upgrade ]]; then
     archive=$original
 fi
 send "$archive" "$work/qa.crt" "$work/school.pem" "$work/school.key" "$root/tests/fixtures/vps-offline-peer.py"
+if [[ "$resilience" == 1 ]]; then send "$root/install-vps.sh" "$root/scripts/prepare-vps-swap.sh"; fi
 if [[ -n ${4:-} ]]; then
     install -m 0755 "$4" "$work/vps-live-media"
     send "$work/vps-live-media"
@@ -184,10 +191,22 @@ else
     done
     send "$work/pebble" "$work/pebble-challtestsrv" "$work/acme.pem" "$work/acme.key" "$root/tests/fixtures/vps-acme-gateway.py"
 fi
-vm "ARCHIVE=$(basename "$archive") MODE=$mode RAM=$ram PROFILE=$profile SCENARIO=$scenario QA_SWAP_MIB=$swap_mib bash -s" <<'GUEST'
+vm "ARCHIVE=$(basename "$archive") MODE=$mode RAM=$ram PROFILE=$profile SCENARIO=$scenario QA_SWAP_MIB=$swap_mib QA_RESILIENCE=$resilience bash -s" <<'GUEST'
 set -Eeuo pipefail
 trap 'echo "VM guest failure at line $LINENO: $BASH_COMMAND" >&2' ERR
-if (( QA_SWAP_MIB )); then
+if [[ "$QA_RESILIENCE" == 1 ]]; then
+    sha256sum /etc/fstab > fstab.before
+    sysctl -n vm.overcommit_memory > prep-overcommit.before
+    grep -Eq '^SwapTotal: +0 kB$' /proc/meminfo
+    sudo bash prepare-vps-swap.sh --check | grep -Fq swap=would_create
+    test ! -e /var/lib/baci-vps-swap
+    grep -Eq '^SwapTotal: +0 kB$' /proc/meminfo
+    sudo bash prepare-vps-swap.sh --apply | grep -Fq 'swap=ready size_mib=512 persistent=yes'
+    sudo bash prepare-vps-swap.sh --apply | grep -Fq swap=unchanged
+    sha256sum -c fstab.before
+    sysctl -n vm.overcommit_memory | cmp prep-overcommit.before -
+    echo 'QA_RESILIENCE managed swap applied offline; precheck read-only, rerun unchanged.'
+elif (( QA_SWAP_MIB )); then
     sudo install -m 0600 /dev/null /var/tmp/baci-qa.swap
     sudo fallocate -l "${QA_SWAP_MIB}M" /var/tmp/baci-qa.swap
     sudo mkswap /var/tmp/baci-qa.swap >/dev/null
@@ -296,6 +315,16 @@ PY_QA
     sudo install -m 0644 pebble-issuer.crt /usr/local/share/ca-certificates/baci-qa-acme-issuer.crt
     sudo update-ca-certificates >/dev/null
 fi
+if [[ "$QA_RESILIENCE" == 1 ]]; then
+    # No WAN route, no downloads, no profile/TLS flags. A verified local bundle
+    # should pick recording, and automatically recognise the valid local PEMs.
+    bash ./install-vps.sh --bundle "$ARCHIVE" --check --site https://school.example.test/campus \
+        --media "$media" --ipv4 192.0.0.9 | tee launcher.log
+    grep -Fq 'archive_sha256=ok' launcher.log
+    grep -Fq 'preflight=ok tls=files profile=compact' launcher.log
+    test ! -e /etc/school-classroom
+    echo 'QA_RESILIENCE offline launcher selected compact recording and local HTTPS files.'
+fi
 "${installer[@]}" --check | tee preflight.log
 grep -Fq "preflight=ok tls=$MODE profile=$PROFILE ram_kib=$total" preflight.log
 test ! -e /var/lib/school-classroom-https
@@ -389,10 +418,18 @@ if [[ -x ./vps-live-media ]]; then
         # After issuance the classroom doesn't need the disposable CA processes.
         sudo systemctl stop baci-qa-acme baci-qa-pebble baci-qa-dns
     fi
-    # The two test peers cannot fall back to TCP ICE (or use a TURN relay).
-    sudo ip netns exec schoolqa ip rule add ipproto tcp dport 7881 prohibit
+    if [[ "$QA_RESILIENCE" == 1 ]]; then
+        # LiveKit TURN is disabled. The clients have one route to this SFU
+        # and cannot send UDP to its media mux: RTP must go over ICE/TCP.
+        sudo ip netns exec schoolqa ip rule add ipproto udp dport 7882 prohibit
+    else
+        sudo ip netns exec schoolqa ip rule add ipproto tcp dport 7881 prohibit
+    fi
     sudo cat /etc/school-classroom/site-pairing.json \
         | sudo ip netns exec schoolqa timeout 70 ./vps-live-media
+    if [[ "$QA_RESILIENCE" == 1 ]]; then
+        echo 'QA_RESILIENCE two peers exchanged Opus and VP8 with UDP blocked; ICE/TCP on 7881.'
+    fi
     sudo baci-vps doctor
 fi
 if [[ "$SCENARIO" == upgrade ]]; then
@@ -468,6 +505,10 @@ for attempt in $(seq 1 60); do
     if vm 'test "$(cat /proc/sys/kernel/random/boot_id)" != "$(cat boot.before)" && grep -Eq "^oom_kill +0$" /proc/vmstat && ss -Hlnu | grep -F "192.0.0.9:7882" >/dev/null && sudo baci-vps doctor' 2>/dev/null; then
         if [[ "$mode" == auto ]]; then
             vm 'set -o pipefail; media=$(cat qa-media); openssl s_client -connect 127.0.0.1:443 -servername "$media" -verify_hostname "$media" -verify_return_error </dev/null 2>/dev/null | openssl x509 -noout -fingerprint -sha256 | cmp issued.before -'
+        fi
+        if [[ "$resilience" == 1 ]]; then
+            vm "awk -v file=/var/lib/baci-vps-swap/swapfile '\$1 == file && \$3 >= 512000 {ok=1} END {exit !ok}' /proc/swaps"
+            echo 'QA_RESILIENCE managed swap active after reboot.'
         fi
         echo "VM passed: ${ram} MiB profile=$profile tls=$mode; trusted HTTPS, signed API/webhooks and reboot recovery."
         if [[ "$profile" == full ]]; then echo 'VM full test: sandboxed MP4 and Recorder heartbeat passed.'; fi

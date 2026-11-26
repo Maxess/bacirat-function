@@ -1,4 +1,4 @@
-"""Test the GitHub transport and privilege handoff without running a real installer."""
+"""Test the offline/online transport, profile selection and privilege handoff."""
 from hashlib import sha256
 from io import BytesIO
 import json
@@ -28,8 +28,9 @@ class GitHubLauncherTest(unittest.TestCase):
             directory.mkdir()
         self.env = {'TMPDIR': str(self.tmp), 'MOCK': str(self.work)}
         self.mock('grep', 'if [[ ${@: -1} == /etc/os-release ]]; then exit "${WRONG_OS:-0}"; fi\nexec /bin/grep "$@"')
-        self.mock('uname', 'echo x86_64')
+        self.mock('uname', 'echo "${ARCH:-x86_64}"')
         self.mock('dpkg', 'echo amd64')
+        self.mock('awk', 'if [[ ${@: -1} == /proc/meminfo ]]; then echo "${RAM:-984744} ${SWAP:-0}"; else exec /usr/bin/awk "$@"; fi')
         self.mock('curl', '''printf '%s\\0' "$@" > "$MOCK/curl.log"
 while (( $# )); do
     if [[ $1 == --output ]]; then cp "$MOCK/fixture.tar.gz" "$2"; break; fi
@@ -56,7 +57,7 @@ exit "${INSTALL_ERROR:-0}"
 
     def launch(self, *args, fixture_pin=True):
         # Only the harness replaces the PATH and (for success cases) the digest.
-        # The shipped launcher takes neither an override URL nor an override digest.
+        # Mirrors are only another source for the same bytes; checksum is not overridable.
         original_path = 'export PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C'
         self.assertIn(original_path, LAUNCHER)
         text = LAUNCHER.replace(original_path, f'export PATH={shlex.quote(str(self.bin))}:/usr/bin:/bin LC_ALL=C')
@@ -106,14 +107,65 @@ exit "${INSTALL_ERROR:-0}"
         self.env['DOWNLOAD_ERROR'] = '18'
         result = self.launch('--tls', 'auto')
         self.assertEqual(result.returncode, 1)
-        self.assertIn('دانلود GitHub کامل نشد', result.stderr)
+        self.assertIn('با SFTP منتقل کن', result.stderr)
         self.assertFalse((self.work / 'sudo.log').exists())
         self.assertFalse((self.work / 'install.log').exists())
 
     def test_installer_failure_status_is_not_masked(self):
         self.env['INSTALL_ERROR'] = '23'
         self.assertEqual(self.launch('--tls', 'auto').returncode, 23)
-        self.assertEqual(self.argv('install')[1:], ['--tls', 'auto'])
+        self.assertEqual(self.argv('install')[1:], ['--tls', 'auto', '--profile', 'compact'])
+
+    def test_local_bundle_uses_no_curl_and_selects_compact(self):
+        (self.bin / 'curl').unlink()
+        args = ('--tls', 'files', '--check', '--cert', 'chain file.pem', '--key', 'private key.pem')
+        result = self.launch('--bundle', str(self.archive), *args)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.argv('install'), [str(self.cwd), *args, '--profile', 'compact'])
+        self.assertFalse((self.work / 'curl.log').exists())
+
+    def test_auto_detected_archive_is_verified_and_skips_remote_fetch(self):
+        archive = self.cwd / ARCHIVE_URL.rsplit('/', 1)[1]
+        archive.write_bytes(self.archive.read_bytes())
+        self.env['RAM'] = '2000000'
+        result = self.launch('--check')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.argv('install'), [str(self.cwd), '--check', '--profile', 'full'])
+        self.assertFalse((self.work / 'curl.log').exists())
+        result = self.launch('--check', fixture_pin=False)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn('SHA-256', result.stderr)
+        self.assertFalse((self.work / 'curl.log').exists())
+
+    def test_on_small_hardware_never_silently_drops_recording(self):
+        self.env['RAM'] = '469200'
+        refused = self.launch('--check', '--bundle', str(self.archive))
+        self.assertIn('swap', refused.stderr)
+        self.assertEqual(refused.returncode, 1)
+        self.assertFalse((self.work / 'install.log').exists())
+        self.env['SWAP'] = '524284'
+        ok = self.launch('--check', '--bundle', str(self.archive))
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        self.assertEqual(self.argv('install')[-2:], ['--profile', 'compact'])
+
+    def test_https_mirror_is_an_alternative_for_the_exact_same_archive(self):
+        url = 'https://mirror.example.ir/baci/test.tar.gz'
+        bad = self.launch('--mirror=' + url, '--check', fixture_pin=False)
+        self.assertEqual(bad.returncode, 1, bad.stderr)
+        self.assertFalse((self.work / 'install.log').exists())
+        ok = self.launch('--mirror=' + url, '--check')
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        self.assertEqual(self.argv('curl')[-1], url)
+        self.assertEqual(self.argv('install'), [str(self.cwd), '--check', '--profile', 'compact'])
+        self.assertNotIn('--insecure', self.argv('curl'))
+
+    def test_rejects_insecure_mirror_and_conflicting_inputs_before_fetch(self):
+        for args in [('--mirror=http://mirror.example.ir/vps.tar.gz',), ('--mirror=https://x:y@example.ir/vps.tar.gz',),
+                     ('--mirror=https://example.ir/vps.tar.gz', '--bundle', str(self.archive)), ('--bundle',),
+                     ('--profile', 'compact', '--profile', 'full')]:
+            self.assertEqual(self.launch(*args).returncode, 1, args)
+            self.assertFalse((self.work / 'curl.log').exists())
+            self.assertFalse((self.work / 'install.log').exists())
 
     def test_help_and_unsupported_os_do_not_download(self):
         self.env['WRONG_OS'] = '1'

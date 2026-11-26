@@ -1,0 +1,64 @@
+name: Classroom VPS offline preparation and TCP fallback
+on:
+  push:
+    paths:
+      - .github/workflows/vps-resilience.yml
+      - install-vps.sh
+      - scripts/prepare-vps-swap.sh
+      - scripts/test-vps-offline-vm.sh
+      - tests/test_vps_github_install.py
+      - tests/fixtures/vps-live-media.go
+permissions:
+  actions: read
+  contents: read
+jobs:
+  offline-and-tcp:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version: '1.26.2'
+          cache-dependency-path: server/recorder/native/go.sum
+      - name: Test launcher transport and build off-VM test peers
+        run: |
+          set -euo pipefail
+          sudo apt-get -q update
+          sudo apt-get -qy install --no-install-recommends qemu-system-x86 qemu-utils cloud-image-utils
+          sudo chmod a+rw /dev/kvm
+          bash -n scripts/prepare-vps-swap.sh
+          bash -n install-vps.sh
+          python3 -m unittest discover -s tests -p test_vps_github_install.py
+          ( cd server/recorder/native; CGO_ENABLED=0 GOTOOLCHAIN=local go build -mod=readonly -trimpath -o "$RUNNER_TEMP/peer" "$GITHUB_WORKSPACE/tests/fixtures/vps-live-media.go" )
+      - name: Use the exact VM-verified archive already built for release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          m=docs/vps-offline-release.json
+          run=$(jq -er .run_id "$m")
+          v=$(jq -er .version "$m")
+          sha=$(jq -er .installer_sha256 "$m")
+          digest=$(jq -er .artifact_sha256 "$m")
+          archive="baci-classroom-vps-offline-v$v-ubuntu24.04-amd64.tar.gz"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run/artifacts" \
+            | jq -e --arg digest "sha256:$digest" 'any(.artifacts[]; .name == "classroom-vps-offline-verified" and .expired == false and .digest == $digest)'
+          gh run download "$run" -n classroom-vps-offline-verified -D "$RUNNER_TEMP/baci-bundle"
+          printf '%s  %s\n' "$sha" "$RUNNER_TEMP/baci-bundle/$archive" | sha256sum --strict -c
+          echo "BACI_ARCHIVE=$RUNNER_TEMP/baci-bundle/$archive" >> "$GITHUB_ENV"
+      - name: Check offline profile selection, managed swap and real TCP ICE on 512 MiB
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/resilience.log"
+          trap 'proof=$(grep -E "^QA_|^VM |^Baci |[Ee]rror:|Failed to|^oom_kill" "$log" | tail -22 | paste -sd "|"); echo "::error title=Offline preparation and ICE fallback::${proof:0:3800}"' ERR
+          BACI_QA_RESILIENCE=1 bash scripts/test-vps-offline-vm.sh "$BACI_ARCHIVE" files 512 "$RUNNER_TEMP/peer" compact '' '' 512 2>&1 | tee "$log"
+          grep -Fq 'QA_RESILIENCE managed swap applied offline;' "$log"
+          grep -Fq 'QA_RESILIENCE offline launcher selected compact recording and local HTTPS files.' "$log"
+          grep -Fq 'QA_RESILIENCE two peers exchanged Opus and VP8 with UDP blocked;' "$log"
+          grep -Fq 'QA_RESILIENCE managed swap active after reboot.' "$log"
+          proof=$(grep -E '^QA_RESILIENCE|^VM memory|^VM passed' "$log" | paste -sd '|')
+          echo "::notice title=Offline preparation and ICE fallback::$proof"
+          sha256sum install-vps.sh scripts/prepare-vps-swap.sh | while IFS= read -r line; do echo "::notice title=Setup helper digest::$line"; done

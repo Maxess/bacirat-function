@@ -5,6 +5,7 @@ on:
       - .github/workflows/vps-from-github.yml
       - install-vps.sh
       - tests/test_vps_github_install.py
+      - docs/vps-offline-release.json
 permissions:
   contents: read
 jobs:
@@ -19,7 +20,23 @@ jobs:
         run: |
           bash -n install-vps.sh
           python3 -m unittest discover -s tests -p test_vps_github_install.py
+      - name: Check whether this exact archive has been published
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          v=$(jq -r .version docs/vps-offline-release.json)
+          name="baci-classroom-vps-offline-v$v-ubuntu24.04-amd64.tar.gz"
+          digest="sha256:$(jq -r .installer_sha256 docs/vps-offline-release.json)"
+          if release=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/vps-offline-v$v"); then
+            jq -e --arg name "$name" --arg digest "$digest" '.draft == false and any(.assets[]; .name == $name and .digest == $digest)' <<<"$release"
+            echo 'ready=yes' >> "$GITHUB_OUTPUT"
+          else
+            echo 'Public archive not available yet; the isolated offline launcher check runs separately.'
+          fi
       - name: Fetch the raw launcher and public archive without the Contents API, and run preflight
+        if: steps.release.outputs.ready == 'yes'
         run: |
           set -Eeuo pipefail
           umask 077
