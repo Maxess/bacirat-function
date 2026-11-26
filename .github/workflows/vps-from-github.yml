@@ -29,14 +29,20 @@ jobs:
           v=$(jq -r .version docs/vps-offline-release.json)
           name="baci-classroom-vps-offline-v$v-ubuntu24.04-amd64.tar.gz"
           digest="sha256:$(jq -r .installer_sha256 docs/vps-offline-release.json)"
-          if release=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/vps-offline-v$v"); then
-            jq -e --arg name "$name" --arg digest "$digest" '.draft == false and any(.assets[]; .name == $name and .digest == $digest)' <<<"$release"
+          id=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate --jq ".[] | select(.tag_name == \"vps-offline-v$v\" and .draft == false) | .id")
+          if [[ -n "$id" ]]; then
+            [[ "$id" =~ ^[0-9]+$ ]]
+            gh api "repos/$GITHUB_REPOSITORY/releases/$id/assets" \
+              | jq -e --arg name "$name" --arg digest "$digest" 'any(.[]; .name == $name and .digest == $digest)'
+            echo "version=$v" >> "$GITHUB_OUTPUT"
             echo 'ready=yes' >> "$GITHUB_OUTPUT"
           else
             echo 'Public archive not available yet; the isolated offline launcher check runs separately.'
           fi
-      - name: Fetch the raw launcher and public archive without the Contents API, and run preflight
+      - name: Fetch the public release launcher and archive, and run preflight
         if: steps.release.outputs.ready == 'yes'
+        env:
+          VPS_VERSION: ${{ steps.release.outputs.version }}
         run: |
           set -Eeuo pipefail
           umask 077
@@ -54,7 +60,7 @@ jobs:
           trap 'echo "::error title=GitHub install preflight::Failed on line $LINENO: $BASH_COMMAND"; if [[ -s "$log" ]]; then while IFS= read -r line; do echo "::error title=Installer output::$line"; done < <(tail -10 "$log"); fi' ERR
           curl --disable --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
             --connect-timeout 12 --max-time 30 \
-            "https://raw.githubusercontent.com/Maxess/bacirat-function/$GITHUB_SHA/install-vps.sh" \
+            "https://github.com/Maxess/bacirat-function/releases/download/vps-offline-v$VPS_VERSION/install-vps.sh" \
             --output "$work/install-vps.sh"
           cmp install-vps.sh "$work/install-vps.sh"
           cd "$work"

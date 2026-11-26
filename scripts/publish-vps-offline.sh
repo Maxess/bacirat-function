@@ -10,11 +10,14 @@ commit=$(jq -er '.commit' "$manifest")
 checksums=$(jq -er '.checksums_sha256' "$manifest")
 installer=$(jq -er '.installer_sha256' "$manifest")
 artifact_sha=$(jq -er '.artifact_sha256' "$manifest")
-[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$run" =~ ^[0-9]+$ && "$commit" =~ ^[a-f0-9]{40}$ \
+setup_run=$(jq -er '.setup_run_id' "$manifest")
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$run" =~ ^[0-9]+$ && "$setup_run" =~ ^[0-9]+$ && "$commit" =~ ^[a-f0-9]{40}$ \
     && "$checksums" =~ ^[a-f0-9]{64}$ && "$installer" =~ ^[a-f0-9]{64}$ && "$artifact_sha" =~ ^[a-f0-9]{64}$ ]]
 name="baci-classroom-vps-offline-v$version-ubuntu24.04-amd64"
 tag="vps-offline-v$version"
 base="https://github.com/$repo/actions/runs/$run"
+setup_evidence="https://github.com/$repo/actions/runs/$setup_run"
+guide="baci-vps-install-v$version-fa.md"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 stage=validate-ci-run
@@ -30,6 +33,21 @@ gh api "repos/$repo/actions/runs/$run/jobs" | jq -e '
                 and .conclusion == "success")
         and any(.steps[]; .name == "Verify packaged compact recording and safe add-on"
                 and .conclusion == "success"))' >/dev/null
+stage=verify-distribution-helpers
+# These are separate assets, not a modification or rebuild of the tested archive.
+setup_commit=$(gh api "repos/$repo/actions/runs/$setup_run" | jq -er --arg branch "$branch" '
+    select(.status == "completed" and .conclusion == "success" and .head_branch == $branch
+           and (.path | split("@")[0]) == ".github/workflows/vps-resilience.yml") | .head_sha')
+[[ "$setup_commit" =~ ^[a-f0-9]{40}$ ]]
+gh api "repos/$repo/actions/runs/$setup_run/jobs" | jq -e '
+    any(.jobs[]; .name == "offline-and-tcp" and .conclusion == "success"
+        and any(.steps[]; .name == "Check offline profile selection, managed swap and real TCP ICE on 512 MiB"
+                and .conclusion == "success"))' >/dev/null
+for helper in install-vps.sh scripts/prepare-vps-swap.sh; do
+    gh api "repos/$repo/contents/$helper?ref=$setup_commit" --jq .content | base64 -d | cmp - "$helper"
+done
+grep -Fxq "readonly VERSION=$version" install-vps.sh
+grep -Fxq "readonly SHA256=$installer" install-vps.sh
 stage=verify-ci-artifact
 gh api "repos/$repo/actions/runs/$run/artifacts" | jq -e --arg digest "sha256:$artifact_sha" '
     [.artifacts[] | select(.name == "classroom-vps-offline-verified")]
@@ -69,7 +87,11 @@ if (( $(stat -c %s "$work/$source_tar") >= 2000000000 )); then
     for part in "$work/$source_tar".part-* "$work/$source_tar.reassembled-sha256.txt"; do source_assets+=("$(basename "$part")"); done
     rm -- "$work/$source_tar"
 fi
-assets=("$name.tar.gz" 'baci-classroom-site-pairing-v0.1.31.zip' "${source_assets[@]}")
+stage=prepare-distribution-assets
+install -m 0644 install-vps.sh "$work/install-vps.sh"
+install -m 0644 scripts/prepare-vps-swap.sh "$work/baci-prepare-swap.sh"
+install -m 0644 docs/install-vps-from-github.fa.md "$work/$guide"
+assets=("$name.tar.gz" install-vps.sh baci-prepare-swap.sh "$guide" 'baci-classroom-site-pairing-v0.1.31.zip' "${source_assets[@]}")
 (
     cd "$work"
     sha256sum "${assets[@]}" > "$sha_file"
@@ -83,18 +105,18 @@ if gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
     exit 1
 fi
 cat > "$work/notes.md" <<EOF_NOTES
-## کلاس زنده و ضبط روی یک VPS — Ubuntu 24.04 LTS amd64
+## کلاس زنده، ضبط و تحویل فیلم روی یک VPS — Ubuntu 24.04 LTS amd64
 
-- **زنده بدون ضبط**: \`--profile live\` روی ۵۱۲ MiB RAM و ۱ vCPU بدون swap بررسی شده است. \`auto\` روی RAM کم همچنان این حالت را انتخاب می‌کند.
-- **ضبط کم‌حافظه روی همان VPS**: \`--profile compact\` را صریح انتخاب کن. برای پلن ۵۱۲ MiB، دست‌کم ۴۴۸ MiB باید به لینوکس برسد و یک swap فعال در حد ۵۱۲ MiB لازم است. ضبط فشرده هنگام کلاس انجام می‌شود؛ ساخت و ارسال MP4 پس از بسته‌شدن، تأیید و تأخیر مدرسه، خارج از زنگ فعال است. آزمون ظرفیت کوتاه و مصنوعی است، نه تضمین چند کلاس یا همهٔ دوربین‌ها.
-- **افزودن ضبط به نصب ۱٫۲٫۰ live**: مسیر جداگانهٔ \`--add-recorder\` فقط برای همان نصب مدیریت‌شده، جفت‌سازی موجود و بدون زنگ/فیلم معوق است. اول از راهنمای بسته و \`--check\` استفاده کن؛ نصب تازه یا وارد کردن مجدد جفت‌سازی لازم نیست.
-- **برای نصب روی VPS** فقط \`$name.tar.gz\` را بگیر. \`START-HERE-fa.md\` داخل آرشیو و [راهنمای فارسی](https://github.com/$repo/blob/$commit/server/offline/README-fa.md) مراحل را توضیح می‌دهند.
-- **برای سایت تازهٔ مدرسه** در همان راهنما از نصب Baci روی هاست PHP/MySQL شروع کن. ZIP کوچک \`baci-classroom-site-pairing-v0.1.31.zip\` را روی رایانه باز کن؛ مدیر ۰٫۱٫۳۱ و کلاس ۰٫۴٫۲۴ هستند. بستهٔ کامل سایت پایه را از منبع اصلی بگیر.
-- \`*-ubuntu-source.tar\` یا بخش‌های \`*.tar.part-*\` کد منبع متناظر بسته‌های Ubuntu هستند؛ **روی VPS لازم نیستند**. اگر کد منبع را می‌خواهی، بعد از دریافت بخش‌ها و بررسی SHA-256، آن‌ها را با \`cat *-ubuntu-source.tar.part-* > $source_tar\` به هم بچسبان و SHA-256 فایل بازسازی‌شده را هم بررسی کن.
+**[راهنمای نصب فارسی](https://github.com/$repo/releases/download/$tag/$guide)** · **[آرشیو نصب](https://github.com/$repo/releases/download/$tag/$name.tar.gz)** · **[اسکریپت نصب](https://github.com/$repo/releases/download/$tag/install-vps.sh)** · **[SHA-256](https://github.com/$repo/releases/download/$tag/$sha_file)**
 
-پیش‌نیازهای نرم‌افزاری از خود بسته نصب می‌شوند. با \`--tls auto\` و رکورد A مستقیم و TCP 443 باز، Caddy گواهی عمومی Let’s Encrypt را می‌گیرد، نصب و تمدید می‌کند؛ به گواهی قبلی یا پورت 80 نیازی نیست. اگر صدور آنلاین ممکن نیست، \`--tls files\` از گواهی آماده استفاده می‌کند و کاملاً آفلاین نصب می‌شود. مسیر عادی نصب، تنظیمات VPS موجود را بازنویسی نمی‌کند.
+پس از بررسی هش، اسکریپت و آرشیو را کنار هم با SFTP بفرست؛ اجرای \`bash ./install-vps.sh --check\` و بعد \`bash ./install-vps.sh\` کافی است. می‌شود همین آرشیو را مستقیم از انتشار یا آینهٔ HTTPS دریافت کرد، ولی **VPS برای نصب کتابخانه‌ها به GitHub، مخزن Ubuntu یا CDN نیاز ندارد**. راهنمای همین صفحه و راهنمای فارسی همراه انتشار را ملاک بگیر؛ متن تاریخی داخل آرشیو را تغییر نداده‌ایم تا همان بایت‌های آزموده‌شده منتشر شوند.
 
-[آزمون همین بایت‌ها روی Ubuntu]($base) — یک دبیر و ۱۰ شاگرد مصنوعی روی یک VM ۵۱۲ MiB با swap، دریافت رسانه با UDP و تحویل MP4 قابل‌پخش به مقصد آزمایشی HTTPS، با تصویر متحرک، PDF و صدای دو میکروفون. رد ارسال و لغو مقصد نیز باید به حذف رسانه و نبود ارسال منجر شوند. نصب compact با صدور TLS-ALPN-01 در CA آزمایشی جداگانه بررسی شده است. آزمون افزودن ضبط و سلامت نصب قبلی روی VM یک GiB بدون swap انجام شده؛ آن نتیجه جایگزین آزمون ۵۱۲ MiB نیست. صدور عمومی، دستگاه‌ها و گروه واقعی مدرسه به بررسی جداگانه در محیط مقصد نیاز دارند.
+- **پیش‌فرض ضبط را حفظ می‌کند:** \`compact\` از ۴۴۸ MiB RAM قابل‌مشاهده؛ زیر ۸۹۶ MiB، swap فعال در حد ۵۱۲ MiB لازم است. \`full\` از ۱۷۹۲ MiB قابل‌مشاهده. \`live\` فقط با انتخاب صریح، بدون ضبط. فایل \`baci-prepare-swap.sh\` اختیاری است و فقط با تأیید \`--apply\` روی VPS سازگار swap اختصاصی می‌سازد.
+- **HTTPS خودکار:** Caddy برای نام رسانه با رکورد A مستقیم و TCP 443 باز از Let’s Encrypt گواهی می‌گیرد. اگر VPS به مرجع صدور نمی‌رسد، نصب و HTTPS با گواهی عمومی آماده و \`--tls files\` بدون دسترسی به آن مرجع ممکن است. پورت ۸۰ لازم نیست. برای رسانه UDP 7882 مسیر ترجیحی است و TCP 7881 جایگزین در شبکهٔ سازگار؛ HTTPS به‌تنهایی رسانه را عبور نمی‌دهد.
+- **سایت مدرسه:** ZIP کوچک \`baci-classroom-site-pairing-v0.1.31.zip\` شامل مدیر ۰٫۱٫۳۱ و کلاس ۰٫۴٫۲۴ است. VPS تازه فایل جفت‌سازی خصوصی تازه می‌سازد. روی VPS مدیریت‌شدهٔ ۱٫۲٫۰ در حالت live می‌توان با \`--add-recorder\` در زمان بیکاری و بدون تغییر اتصال قبلی ضبط را اضافه کرد.
+- فایل‌های \`*-ubuntu-source.tar\` و \`*.tar.part-*\` صرفاً کد منبع متناظر Ubuntu هستند؛ برای نصب دانلودشان نکن. برای استفاده از منبع، پس از تأیید هش همهٔ بخش‌ها، روی رایانه با \`cat $source_tar.part-* > $source_tar\` یکپارچه و هش بازسازی‌شده را مقایسه کن.
+
+[آزمون همین آرشیو]($base): ۵۱۲ MiB با swap، یک دبیر و ۱۰ شاگرد مصنوعی، ۴۴٫۶۰ ثانیه MP4 به مقصد آزمایشی HTTPS، و پاک‌سازی بدون ساخت و ارسال بعد از «نفرست» یا لغو مقصد. [آزمون جداگانهٔ نصب‌یار، swap و دو مرورگر روی TCP]($setup_evidence). آزمون ACME با CA آزمایشی بوده؛ پیش از کلاس واقعی، DNS، راه رسانه از دو شبکه و API گروه مدرسه را جدا بررسی کن. این نسخه برای هر سیستم‌عامل/CPU یا ظرفیت نامحدود نیست.
 EOF_NOTES
 gh release create "$tag" "${files[@]}" \
     --repo "$repo" --target "$commit" --title "Classroom VPS v$version · Automatic TLS · Ubuntu 24.04 amd64" \
@@ -112,5 +134,8 @@ for asset in "${assets[@]}"; do
     echo "::notice title=GitHub asset verified::$asset ($size bytes) SHA-256 $digest"
 done
 stage=publish-draft
-gh release edit "$tag" --repo "$repo" --draft=false --latest=false
+gh release edit "$tag" --repo "$repo" --draft=false --latest=true
+stage=verify-public-release
+gh api "repos/$repo/releases/tags/$tag" | jq -e --arg archive "$name.tar.gz" --arg digest "sha256:$installer" '
+    .draft == false and any(.assets[]; .name == $archive and .digest == $digest)' >/dev/null
 echo "::notice title=Public VPS release::https://github.com/$repo/releases/tag/$tag"
