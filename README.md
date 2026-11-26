@@ -4,7 +4,9 @@
 
 ## نصب VPS کلاس و ضبط با SSL خودکار
 
-**[راهنمای فارسی ۱٫۳٫۰](docs/install-vps-from-github.fa.md)** · [انتشار VPS با آرشیو و هش‌ها](https://github.com/Maxess/bacirat-function/releases/tag/vps-offline-v1.3.0) · [ZIP اتصال سایت (مدیر ۰٫۱٫۳۱ و کلاس ۰٫۴٫۲۴)](artifacts/baci-classroom-site-pairing-v0.1.31.zip).
+**[راهنمای فارسی ۱٫۳٫۱](docs/install-vps-from-github.fa.md)** · [انتشار VPS با آرشیو و هش‌ها](https://github.com/Maxess/bacirat-function/releases/tag/vps-offline-v1.3.1) · [ZIP اتصال سایت (مدیر ۰٫۱٫۳۱ و کلاس ۰٫۴٫۲۴)](artifacts/baci-classroom-site-pairing-v0.1.31.zip).
+
+اگر ۱٫۳٫۰ روی Ubuntu 24.04 اولیه با تعارض APT متوقف شد، این انتشار آن ناسازگاری را رفع کرده است؛ بستهٔ قبلی را دوباره اجرا نکن و برای این خطا VPS را ریست نکن. [گزارش بازتولید و آزمون‌ها](docs/vps-noble-dependencies.fa.md).
 
 در **Ubuntu 24.04 LTS amd64**، اسکریپت انتشار به‌طور پیش‌فرض ضبط را نصب می‌کند: `compact` روی VPS کم‌حافظه و `full` با RAM کافی. مسیر کلاس، ضبط، رندر و تحویل آزمایشی روی ۵۱۲ MiB و swap فعال و همچنین افزودن ضبط روی نصب مدیریت‌شدهٔ ۱٫۲٫۰ آزموده شده‌اند. `--profile live` فقط برای کلاس بدون ضبط است. برای نصب بدون GitHub/CDN، آرشیو و `install-vps.sh` را کنار هم با SFTP منتقل کن، سپس `bash ./install-vps.sh --check` و پس از موفقیت `bash ./install-vps.sh` بزن. `--tls auto` نیاز به دسترسی مرجع صدور و TCP 443 دارد؛ `--tls files` گواهی عمومی آماده را بدون تماس با آن مرجع نصب می‌کند.
 

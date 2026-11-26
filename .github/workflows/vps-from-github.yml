@@ -1,5 +1,10 @@
 name: Classroom VPS direct GitHub install
 on:
+  workflow_call:
+    inputs:
+      expect_public:
+        type: boolean
+        default: false
   push:
     paths:
       - .github/workflows/vps-from-github.yml
@@ -24,6 +29,7 @@ jobs:
         id: release
         env:
           GH_TOKEN: ${{ github.token }}
+          EXPECT_PUBLIC: ${{ inputs.expect_public || false }}
         run: |
           set -euo pipefail
           v=$(jq -r .version docs/vps-offline-release.json)
@@ -36,6 +42,9 @@ jobs:
               | jq -e --arg name "$name" --arg digest "$digest" 'any(.[]; .name == $name and .digest == $digest)'
             echo "version=$v" >> "$GITHUB_OUTPUT"
             echo 'ready=yes' >> "$GITHUB_OUTPUT"
+          elif [[ "$EXPECT_PUBLIC" == true ]]; then
+            echo '::error title=Direct GitHub install::Expected the matching release to be public.'
+            exit 1
           else
             echo 'Public archive not available yet; the isolated offline launcher check runs separately.'
           fi

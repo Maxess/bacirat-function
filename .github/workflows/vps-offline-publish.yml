@@ -23,3 +23,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           scripts/publish-vps-offline.sh docs/vps-offline-release.json
+  public-preflight:
+    needs: publish
+    permissions:
+      contents: read
+    uses: ./.github/workflows/vps-from-github.yml
+    with:
+      expect_public: true
