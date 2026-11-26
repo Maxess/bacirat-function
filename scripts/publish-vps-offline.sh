@@ -21,6 +21,15 @@ guide="baci-vps-install-v$version-fa.md"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 stage=validate-ci-run
+release_error() {
+    # Preserve useful GitHub API errors even where the Actions log is unavailable.
+    while IFS= read -r line; do
+        line=${line//'%'/'%25'}
+        line=${line//$'\r'/'%0D'}
+        printf '::error title=GitHub Release API::%s\n' "${line:0:500}"
+    done < <(sed -E 's#(https?://[^[:space:]?]+)\?[^[:space:]"]+#\1?[redacted]#g' "$work/release.log" | tail -10)
+    return 1
+}
 trap 'echo "::error title=VPS release::Failed at $stage; public release not confirmed."' ERR
 # Tie the bytes to a completed run of the required workflow on this branch.
 gh api "repos/$repo/actions/runs/$run" | jq -e --arg sha "$commit" --arg branch "$branch" '
@@ -118,9 +127,11 @@ cat > "$work/notes.md" <<EOF_NOTES
 
 [آزمون همین آرشیو]($base): ۵۱۲ MiB با swap، یک دبیر و ۱۰ شاگرد مصنوعی، ۴۴٫۶۰ ثانیه MP4 به مقصد آزمایشی HTTPS، و پاک‌سازی بدون ساخت و ارسال بعد از «نفرست» یا لغو مقصد. [آزمون جداگانهٔ نصب‌یار، swap و دو مرورگر روی TCP]($setup_evidence). آزمون ACME با CA آزمایشی بوده؛ پیش از کلاس واقعی، DNS، راه رسانه از دو شبکه و API گروه مدرسه را جدا بررسی کن. این نسخه برای هر سیستم‌عامل/CPU یا ظرفیت نامحدود نیست.
 EOF_NOTES
-gh release create "$tag" "${files[@]}" \
-    --repo "$repo" --target "$commit" --title "Classroom VPS v$version · Automatic TLS · Ubuntu 24.04 amd64" \
-    --draft --latest=false --notes-file "$work/notes.md"
+gh release create "$tag" \
+    --repo "$repo" --target "$commit" --title "Classroom VPS v$version · Live, recording and HTTPS · Ubuntu 24.04 amd64" \
+    --draft --latest=false --notes-file "$work/notes.md" > "$work/release.log" 2>&1 || release_error
+stage=upload-draft-assets
+gh release upload "$tag" "${files[@]}" --repo "$repo" > "$work/release.log" 2>&1 || release_error
 stage=verify-github-asset-sha256
 # The REST release id works for both old and new gh CLI versions. The tag
 # itself may not exist as a Git ref while this release is still a draft.
@@ -134,7 +145,7 @@ for asset in "${assets[@]}"; do
     echo "::notice title=GitHub asset verified::$asset ($size bytes) SHA-256 $digest"
 done
 stage=publish-draft
-gh release edit "$tag" --repo "$repo" --draft=false --latest=true
+gh release edit "$tag" --repo "$repo" --draft=false --latest=true > "$work/release.log" 2>&1 || release_error
 stage=verify-public-release
 gh api "repos/$repo/releases/tags/$tag" | jq -e --arg archive "$name.tar.gz" --arg digest "sha256:$installer" '
     .draft == false and any(.assets[]; .name == $archive and .digest == $digest)' >/dev/null
