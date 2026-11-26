@@ -81,33 +81,49 @@ def non_deb(bundle):
     return origins
 
 
-def apt_bundle(work, bundle, sources):
-    repo = bundle / 'apt'
-    repo.mkdir()
-    pool = repo / 'pool'
-    pool.mkdir()
-    apt = work / 'apt-build'
-    for folder in (apt / 'lists/partial', apt / 'archives/partial'):
+def package_goals(filename):
+    goals = [line for line in (OFFLINE / filename).read_text().splitlines() if line and not line.startswith('#')]
+    if not goals or len(set(goals)) != len(goals) or not all(re.fullmatch(r'[a-z0-9][a-z0-9.+-]+', goal) for goal in goals):
+        raise ValueError(f'Invalid package goals in {filename}')
+    return goals
+
+
+def apt_environment(apt, suites='noble noble-updates noble-security'):
+    for folder in (apt / 'lists/partial', apt / 'archives/partial', apt / 'empty'):
         folder.mkdir(parents=True)
     own_sources = apt / 'ubuntu.sources'
     own_sources.write_text(f'Types: deb deb-src\nURIs: {ARCHIVE}\n'
-                           'Suites: noble noble-updates noble-security\nComponents: main universe\n'
+                           f'Suites: {suites}\nComponents: main universe\n'
                            'Architectures: amd64\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n')
     status = apt / 'empty-status'
     status.touch()
     config = apt / 'apt.conf'
-    config.write_text('Dir::Etc::main "/dev/null";\nDir::Etc::parts "-";\n'
-                      f'Dir::Etc::sourcelist "{own_sources}";\nDir::Etc::sourceparts "-";\n'
-                      'Dir::Etc::preferences "/dev/null";\nDir::Etc::preferencesparts "-";\n'
+    config.write_text('Dir::Etc::main "/dev/null";\n'
+                      f'Dir::Etc::parts "{apt}/empty";\n'
+                      f'Dir::Etc::sourcelist "{own_sources}";\nDir::Etc::sourceparts "{apt}/empty";\n'
+                      f'Dir::Etc::preferences "/dev/null";\nDir::Etc::preferencesparts "{apt}/empty";\n'
                       f'Dir::State::lists "{apt}/lists";\nDir::State::status "{status}";\n'
-                      f'Dir::Cache::archives "{apt}/archives";\nDir::Cache::pkgcache "";\nDir::Cache::srcpkgcache "";\n'
+                      f'Dir::Cache::archives "{apt}/archives";\n'
+                      'Dir::Cache::pkgcache "";\nDir::Cache::srcpkgcache "";\n'
                       'APT::Architecture "amd64";\nAPT::Architectures {"amd64";};\n'
-                      'APT::Get::Always-Include-Phased-Updates "true";\nAPT::Install-Recommends "false";\n'
+                      'APT::Get::Always-Include-Phased-Updates "true";\n'
+                      'APT::Install-Recommends "false";\n'
                       f'APT::Sandbox::User "{os.environ["USER"]}";\nAcquire::Languages "none";\nAcquire::Retries "3";\n')
     env = os.environ | {'APT_CONFIG': str(config), 'LC_ALL': 'C', 'DEBIAN_FRONTEND': 'noninteractive'}
-    print('Fetching signed Noble APT indexes…', flush=True)
     run('apt-get', '-q', '-o', 'APT::Update::Error-Mode=any', 'update', env=env)
-    goals = [line for line in (OFFLINE / 'ubuntu-packages.txt').read_text().splitlines() if line and not line.startswith('#')]
+    return env
+
+
+def apt_bundle(work, bundle, sources):
+    repo = bundle / 'apt'
+    pool = repo / 'pool'
+    pool.mkdir(parents=True)
+    apt = work / 'apt-build'
+    print('Fetching signed Noble APT indexes…', flush=True)
+    env = apt_environment(apt)
+    # Resolve the compatibility families together, so there is exactly one
+    # mutually compatible version of each binary in the installed candidate pool.
+    goals = package_goals('ubuntu-packages.txt') + package_goals('ubuntu-compat-packages.txt')
     # An empty dpkg status avoids accidentally relying on anything installed on CI (including dev libraries).
     run('apt-get', '-qy', '--download-only', '--no-remove', 'install', *goals, env=env)
     index, rows, source_set = [], [], set()
@@ -180,7 +196,7 @@ def main():
         root = Path(temp)
         bundle = root / BUNDLE
         bundle.mkdir()
-        for name in ('install.sh', 'apt-local.sh', 'setup.py', 'compact-renderer.py', 'compact-ffmpeg.py', 'requirements.lock', 'ubuntu-packages.txt', 'THIRD-PARTY.md'):
+        for name in ('install.sh', 'apt-local.sh', 'setup.py', 'compact-renderer.py', 'compact-ffmpeg.py', 'requirements.lock', 'ubuntu-packages.txt', 'ubuntu-compat-packages.txt', 'THIRD-PARTY.md'):
             shutil.copyfile(OFFLINE / name, bundle / name)
         shutil.copyfile(OFFLINE / 'README-fa.md', bundle / 'START-HERE-fa.md')
         shutil.copyfile(ROOT / 'server/install.py', bundle / 'vps_media.py')

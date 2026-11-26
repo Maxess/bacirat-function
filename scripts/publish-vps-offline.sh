@@ -41,6 +41,8 @@ gh api "repos/$repo/actions/runs/$run/jobs" | jq -e '
         and any(.steps[]; .name == "Verify 512 MiB live and full installs, both TLS modes and WebRTC"
                 and .conclusion == "success")
         and any(.steps[]; .name == "Verify packaged compact recording and safe add-on"
+                and .conclusion == "success")
+        and any(.steps[]; .name == "Verify the archive keeps the older Noble Server base intact"
                 and .conclusion == "success"))' >/dev/null
 stage=verify-distribution-helpers
 # These are separate assets, not a modification or rebuild of the tested archive.

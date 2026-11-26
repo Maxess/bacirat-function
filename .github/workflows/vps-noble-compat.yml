@@ -1,0 +1,39 @@
+name: Classroom VPS Noble GA dependency compatibility
+on:
+  push:
+    paths:
+      - .github/workflows/vps-noble-compat.yml
+      - scripts/test-vps-noble-compat.py
+      - scripts/build-vps-offline.py
+      - server/offline/ubuntu-*-packages.txt
+      - server/offline/ubuntu-packages.txt
+permissions:
+  contents: read
+jobs:
+  noble-ga-resolver:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 9
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - name: Reproduce the old failure and solve with the complete signed cohorts
+        run: |
+          set -euo pipefail
+          old="$RUNNER_TEMP/v1.3.0-apt-regression.tar.gz"
+          log="$RUNNER_TEMP/noble-compat.log"
+          curl --disable -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 15 --max-time 180 --retry 2 \
+            'https://github.com/Maxess/bacirat-function/releases/download/vps-offline-v1.3.0/baci-classroom-vps-offline-v1.3.0-ubuntu24.04-amd64.tar.gz' -o "$old"
+          trap 'proof=$(grep -E "^QA_APT|^E:|^Remv |^W:|^RuntimeError:|^ValueError:|^The following|^  [a-zA-Z-]|^Inst (dbus|libpython3.12t64|libglib2.0-bin|gir1.2-glib|systemd)" "$log" | tail -28 | paste -sd "|"); echo "::error title=Noble GA resolver::${proof:0:3900}"' ERR
+          python3 -u scripts/test-vps-noble-compat.py "$old" 2>&1 | tee "$log"
+          grep '^QA_APT ' "$log" | while IFS= read -r line; do echo "::notice title=Noble GA resolver::$line"; done
+      - name: Look for a retained official April 2024 cloud image for the kernel rehearsal
+        run: |
+          for track in releases minimal/releases; do
+            for day in 23 25; do
+              url="https://cloud-images.ubuntu.com/$track/noble/release-202404$day/SHA256SUMS"
+              if sums=$(curl -fsSL --connect-timeout 5 --max-time 8 "$url" 2>/dev/null); then
+                printf '::notice title=GA cloud image::%s %s\n' "$url" "$(grep -F 'amd64.img' <<<"$sums" | head -3 | paste -sd '|')"
+              fi
+            done
+          done

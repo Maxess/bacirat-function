@@ -1,0 +1,8 @@
+# Signed Noble candidates for already-installed packages on older Ubuntu Server images.
+# These are builder goals only, never requested unconditionally on the VPS.
+# The matching versions of their Depends/Pre-Depends go into the same local APT pool.
+dbus
+dbus-user-session
+gir1.2-glib-2.0
+libglib2.0-bin
+libpython3.12t64

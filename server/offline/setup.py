@@ -30,7 +30,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))  # python -I: only the verified staging or root-owned install directory.
 import vps_media as media
 
-VERSION = '1.3.0'
+VERSION = '1.3.1'
 APP, CFG, SYSTEMD = media.APP, media.CFG, media.SYSTEMD
 REC = Path('/opt/school-classroom-recorder')
 RECORDER_RELEASE = '0.4.23'
@@ -770,8 +770,8 @@ def replacement(path, data, mode):
 
 
 def addition_preflight(config, requested, worker):
-    need(config.get('version') in ('1.2.0', VERSION) and config.get('profile') == 'live' and config.get('tls_mode') in ('files','auto'),
-         'This add-on is only for a completed Baci offline live install (v1.2.0 or this release).')
+    need(config.get('version') in ('1.2.0', '1.3.0', VERSION) and config.get('profile') == 'live' and config.get('tls_mode') in ('files','auto'),
+         'This add-on is only for a completed Baci offline live install (v1.2.0, v1.3.0 or this release).')
     meminfo = Path('/proc/meminfo').read_text()
     total_kib = check_memory(meminfo)
     selected = ('full' if total_kib >= FULL_RAM_KIB else 'compact') if requested == 'auto' else requested
