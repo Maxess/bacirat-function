@@ -106,13 +106,7 @@ assets=("$name.tar.gz" install-vps.sh baci-prepare-swap.sh "$guide" 'baci-classr
     sha256sum "${assets[@]}" > "$sha_file"
 )
 assets+=("$sha_file")
-files=()
-for asset in "${assets[@]}"; do files+=("$work/$asset"); done
-stage=create-draft
-if gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
-    echo "::error title=VPS release::The tag already has a release. No asset was replaced."
-    exit 1
-fi
+stage=prepare-release-notes
 cat > "$work/notes.md" <<EOF_NOTES
 ## کلاس زنده، ضبط و تحویل فیلم روی یک VPS — Ubuntu 24.04 LTS amd64
 
@@ -127,23 +121,52 @@ cat > "$work/notes.md" <<EOF_NOTES
 
 [آزمون همین آرشیو]($base): ۵۱۲ MiB با swap، یک دبیر و ۱۰ شاگرد مصنوعی، ۴۴٫۶۰ ثانیه MP4 به مقصد آزمایشی HTTPS، و پاک‌سازی بدون ساخت و ارسال بعد از «نفرست» یا لغو مقصد. [آزمون جداگانهٔ نصب‌یار، swap و دو مرورگر روی TCP]($setup_evidence). آزمون ACME با CA آزمایشی بوده؛ پیش از کلاس واقعی، DNS، راه رسانه از دو شبکه و API گروه مدرسه را جدا بررسی کن. این نسخه برای هر سیستم‌عامل/CPU یا ظرفیت نامحدود نیست.
 EOF_NOTES
-gh release create "$tag" \
-    --repo "$repo" --target "$commit" --title "Classroom VPS v$version · Live, recording and HTTPS · Ubuntu 24.04 amd64" \
-    --draft --latest=false --notes-file "$work/notes.md" > "$work/release.log" 2>&1 || release_error
-stage=upload-draft-assets
-gh release upload "$tag" "${files[@]}" --repo "$repo" > "$work/release.log" 2>&1 || release_error
-stage=verify-github-asset-sha256
-# The REST release id works for both old and new gh CLI versions. The tag
-# itself may not exist as a Git ref while this release is still a draft.
-id=$(gh api "repos/$repo/releases" --paginate --jq ".[] | select(.tag_name == \"$tag\" and .draft == true) | .id")
+stage=find-or-create-draft
+find_release() {
+    gh api "repos/$repo/releases" --paginate --jq ".[] | select(.tag_name == \"$tag\")"
+}
+release=$(find_release)
+if [[ -z "$release" ]]; then
+    gh release create "$tag" \
+        --repo "$repo" --target "$commit" --title "Classroom VPS v$version · Live, recording and HTTPS · Ubuntu 24.04 amd64" \
+        --draft --latest=false --notes-file "$work/notes.md" > "$work/release.log" 2>&1 || release_error
+    release=$(find_release)
+fi
+# The Actions integration may be prohibited from making a release targeting an
+# earlier commit. A maintainer-created draft is safe only with the exact target
+# and a digest-matching subset of the expected assets. Never alter public assets.
+id=$(jq -ser --arg commit "$commit" '
+    select(length == 1) | .[0] | select(.draft == true and .prerelease == false and .target_commitish == $commit) | .id' <<<"$release")
 [[ "$id" =~ ^[0-9]+$ ]]
-gh api "repos/$repo/releases/$id/assets" --jq '.[] | [.name,.size,.digest] | @tsv' > "$work/github-assets.tsv"
+stage=inventory-draft-assets
+asset_inventory() {
+    gh api "repos/$repo/releases/$id/assets" --paginate --jq '.[] | [.name,.size,.digest] | @tsv'
+}
+asset_inventory > "$work/github-assets.tsv"
+: > "$work/expected-assets.tsv"
+missing=()
 for asset in "${assets[@]}"; do
     size=$(stat -c %s "$work/$asset")
     digest=$(sha256sum "$work/$asset" | cut -d ' ' -f1)
-    grep -Fxq "$asset"$'\t'"$size"$'\t'"sha256:$digest" "$work/github-assets.tsv"
-    echo "::notice title=GitHub asset verified::$asset ($size bytes) SHA-256 $digest"
+    line="$asset"$'\t'"$size"$'\t'"sha256:$digest"
+    printf '%s\n' "$line" >> "$work/expected-assets.tsv"
+    if ! grep -Fxq "$line" "$work/github-assets.tsv"; then missing+=("$work/$asset"); fi
 done
+while IFS= read -r line; do
+    grep -Fxq "$line" "$work/expected-assets.tsv"
+done < "$work/github-assets.tsv"
+stage=upload-draft-assets
+if (( ${#missing[@]} )); then
+    gh release upload "$tag" "${missing[@]}" --repo "$repo" > "$work/release.log" 2>&1 || release_error
+fi
+stage=verify-github-asset-sha256
+asset_inventory > "$work/github-assets.tsv"
+cmp <(sort "$work/expected-assets.tsv") <(sort "$work/github-assets.tsv")
+while IFS=$'\t' read -r asset size digest; do
+    echo "::notice title=GitHub asset verified::$asset ($size bytes) $digest"
+done < "$work/expected-assets.tsv"
+stage=set-validated-release-notes
+gh release edit "$tag" --repo "$repo" --notes-file "$work/notes.md" > "$work/release.log" 2>&1 || release_error
 stage=publish-draft
 gh release edit "$tag" --repo "$repo" --draft=false --latest=true > "$work/release.log" 2>&1 || release_error
 stage=verify-public-release
