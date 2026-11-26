@@ -22,7 +22,7 @@ spec.loader.exec_module(build)
 OLD_SHA = '282f266d3df3d613a5209be41798764b61fb7d42dc33efdc76001f29ca720255'
 # Stock Server metapackages plus the ordinary image packages seen in the
 # report. Exact checks keep this anchored to the GA pocket, not current updates.
-SERVER = ('ubuntu-server', 'ubuntu-standard', 'vim', 'upower', 'snapd', 'packagekit-tools', 'modemmanager', 'udisks2',
+SERVER = ('ubuntu-server', 'ubuntu-server-minimal', 'ubuntu-standard', 'vim', 'upower', 'snapd', 'packagekit-tools', 'modemmanager', 'udisks2',
           'dbus-user-session', 'gir1.2-glib-2.0', 'gir1.2-girepository-2.0', 'libglib2.0-bin', 'networkd-dispatcher', 'python3-gi')
 EXPECTED = {
     'ubuntu-server': '1.539', 'ubuntu-server-minimal': '1.539',
@@ -134,11 +134,20 @@ def main():
         old.mkdir()
         new.mkdir()
         old_goals = unpack_indexes(args.previous, old)
-        before = resolve(old_goals, file_environment(old, status))
+        previous_versions = {record['Package']: record['Version'] for raw in (old / 'Packages').read_text().split('\n\n')
+                             if (record := Parser().parsestr(raw))['Package']}
+        cohort = ('libdbus-1-3', 'dbus', 'dbus-daemon', 'dbus-user-session', 'libglib2.0-0t64', 'libglib2.0-bin',
+                  'gir1.2-glib-2.0', 'python3', 'python3.12', 'libpython3.12t64')
+        print('QA_APT v1.3.0 index: ' + ', '.join(f'{pkg}={previous_versions.get(pkg, "absent")}' for pkg in cohort), flush=True)
+        old_env = file_environment(old, status)
+        before = resolve(old_goals, old_env)
         removed = set(re.findall(r'^Remv (\S+)', before.stdout, re.M))
         if before.returncode or not {'ubuntu-server', 'systemd-resolved', 'dbus', 'libpython3.12t64'} <= removed:
             raise RuntimeError('The v1.3.0 failure was not reproduced on the GA fixture:\n' + before.stdout)
-        print(f'QA_APT v1.3.0 proposes {len(removed)} removals, including Ubuntu Server, systemd-resolved, D-Bus and libpython.', flush=True)
+        blocked = resolve(old_goals, old_env, no_remove=True)
+        if blocked.returncode == 0 or 'remove is disabled' not in blocked.stdout:
+            raise RuntimeError('Could not reproduce the old guard refusal:\n' + blocked.stdout)
+        print(f'QA_APT v1.3.0 refuses {len(removed)} proposed removals, including Ubuntu Server, systemd-resolved, D-Bus and libpython.', flush=True)
         runtime = build.package_goals('ubuntu-packages.txt')
         compat = build.package_goals('ubuntu-compat-packages.txt')
         if set(runtime) & set(compat):
