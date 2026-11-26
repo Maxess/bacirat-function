@@ -1,0 +1,44 @@
+name: Classroom VPS read-only APT diagnosis
+on:
+  push:
+    paths:
+      - .github/workflows/vps-apt-plan.yml
+      - scripts/diagnose-vps-apt.sh
+      - server/offline/apt-local.sh
+      - tests/test_vps_apt_plan.py
+permissions:
+  contents: read
+jobs:
+  noble-resolver:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - name: Reproduce a provider dependency conflict with APT and no network
+        run: |
+          sudo unshare --net -- runuser -u "$(id -un)" -- python3 -m unittest discover -s tests -p test_vps_apt_plan.py
+      - name: Read only the indexes from the exact public v1.3.0 archive
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/baci-classroom-vps-offline-v1.3.0-ubuntu24.04-amd64.tar.gz"
+          curl --disable --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+            --connect-timeout 12 --max-time 180 --retry 1 --output "$archive" \
+            "https://github.com/Maxess/bacirat-function/releases/download/vps-offline-v1.3.0/$(basename "$archive")"
+          sha256sum /var/lib/dpkg/status > "$RUNNER_TEMP/dpkg.before"
+          set +e
+          sudo unshare --net -- runuser -u "$(id -un)" -- bash scripts/diagnose-vps-apt.sh "$archive" > "$RUNNER_TEMP/diagnosis.log" 2>&1
+          rc=$?
+          set -e
+          cat "$RUNNER_TEMP/diagnosis.log"
+          sha256sum --strict --check "$RUNNER_TEMP/dpkg.before"
+          ! grep -qF '/etc/apt/-/' "$RUNNER_TEMP/diagnosis.log"
+          if (( rc == 0 )); then
+            grep -q '^apt_plan=ok ' "$RUNNER_TEMP/diagnosis.log"
+          elif (( rc == 1 )); then
+            grep -qE '^apt_plan=(blocked|unresolved) ' "$RUNNER_TEMP/diagnosis.log"
+          else
+            exit 1
+          fi
+          printf '::notice title=Public bundle APT diagnostic::%s; dpkg status unchanged and network disabled.\n' "$(grep '^apt_plan=' "$RUNNER_TEMP/diagnosis.log")"

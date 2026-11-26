@@ -398,10 +398,20 @@ def edge_unit():
         'CapabilityBoundingSet=\n', 'CapabilityBoundingSet=CAP_NET_BIND_SERVICE\n')
 
 
+def deb_apt(profile, *, addition=False, check=False):
+    goals = ('--no-upgrades',) if addition else LIVE_DEBS if profile == 'live' else ()
+    options = ('--check',) if check else ()
+    action = 'Offline APT plan' if check else 'Offline APT (no package removal or downgrade)'
+    run('/bin/bash', HERE / 'apt-local.sh', HERE, *options, *goals, show=True, timeout=900, label=action)
+
+
+def deb_preflight(profile, *, addition=False):
+    deb_apt(profile, addition=addition, check=True)
+
+
 def deb_install(profile, *, addition=False):
     print('نصب پیش‌نیازها از خود بسته، بدون دانلود…', flush=True)
-    goals = ('--no-upgrades',) if addition else LIVE_DEBS if profile == 'live' else ()
-    run('/bin/bash', HERE / 'apt-local.sh', HERE, *goals, show=True, timeout=900, label='Offline APT (no package removal or downgrade)')
+    deb_apt(profile, addition=addition)
 
 
 def verify_payloads():
@@ -942,6 +952,7 @@ def main(argv=None):
                 worker = secrets.token_hex(16)
                 profile, keys, total = addition_preflight(config, args.profile, worker)
                 if args.check:
+                    deb_preflight(profile, addition=True)
                     print(f'add_recorder_preflight=ok profile={profile} ram_kib={total} (read-only; no settings changed)')
                     return 0
                 deb_install(profile, addition=True)
@@ -980,6 +991,7 @@ def main(argv=None):
             elif args.check:
                 raise Refused('The Ubuntu base has no trust store; full install supplies it before ACME.')
         if args.check:
+            deb_preflight(profile)
             suffix = ('DNS and ACME directory reachable; no certificate was ordered; check incoming TCP 443 in the provider panel'
                       if mode == 'auto' else 'local files only; DNS, firewall and pairing are separate')
             print(f'preflight=ok tls={mode} profile={profile} ram_kib={total_kib} ({suffix})')

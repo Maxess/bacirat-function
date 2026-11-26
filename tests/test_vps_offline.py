@@ -245,7 +245,7 @@ class OfflineSetupTest(unittest.TestCase):
             with self.subTest(mode=mode), ExitStack() as stack:
                 mocks = {attr: stack.enter_context(patch.object(setup, attr)) for attr in (
                     'system_preflight', 'fresh_preflight', 'verify_payloads', 'tls_selection', 'STATE', 'TRUST_ROOTS',
-                    'check_media_dns', 'check_acme_access', 'deb_install', 'Fresh', 'export_pair', 'cert_inputs', 'validate_cert')}
+                    'check_media_dns', 'check_acme_access', 'deb_preflight', 'deb_install', 'Fresh', 'export_pair', 'cert_inputs', 'validate_cert')}
                 stack.enter_context(patch.object(setup.Path, 'is_file', return_value=True))
                 stack.enter_context(patch.object(setup.os, 'umask'))
                 out = stack.enter_context(redirect_stdout(StringIO()))
@@ -258,6 +258,7 @@ class OfflineSetupTest(unittest.TestCase):
                 mocks['tls_selection'].return_value = (mode, 'cert.pem', 'key.pem')
                 self.assertEqual(setup.main(flags + ['--check', '--tls', mode]), 0)
                 self.assertIn(f'preflight=ok tls={mode} profile=live ram_kib=469200', out.getvalue())
+                mocks['deb_preflight'].assert_called_once_with('live')
                 for name in ('deb_install', 'Fresh', 'export_pair'):
                     mocks[name].assert_not_called()
                 if mode == 'files':
@@ -267,6 +268,13 @@ class OfflineSetupTest(unittest.TestCase):
                 else:
                     mocks['check_acme_access'].assert_called_once()
                     mocks['cert_inputs'].assert_not_called()
+                out.truncate(0)
+                out.seek(0)
+                mocks['deb_preflight'].side_effect = setup.Refused('Offline APT plan conflict')
+                self.assertEqual(setup.main(flags + ['--check', '--tls', mode]), 1)
+                self.assertNotIn('preflight=ok', out.getvalue())
+                mocks['deb_install'].assert_not_called()
+                mocks['Fresh'].assert_not_called()
                 txn = mocks['Fresh'].return_value
                 txn.apply.side_effect = setup.Refused('untrusted media TLS')
                 self.assertEqual(setup.main(flags + ['--tls', mode]), 1)
@@ -320,6 +328,7 @@ class OfflineSetupTest(unittest.TestCase):
             patcher('json_file', return_value=config)
             patcher('doctor', return_value=True)
             preflight = patcher('addition_preflight', return_value=('compact', {'recording_secret': 'not-logged'}, 469200))
+            apt_check = patcher('deb_preflight')
             apt = patcher('deb_install')
             txn = patcher('RecorderAddition', wraps=setup.RecorderAddition)
             stack.enter_context(patch.object(setup.os, 'umask'))
@@ -332,6 +341,7 @@ class OfflineSetupTest(unittest.TestCase):
             self.assertEqual(setup.main(['--add-recorder', '--check']), 0)
             self.assertEqual(preflight.call_args.args[:2], (config, 'auto'))
             self.assertIn('add_recorder_preflight=ok profile=compact', stdout.getvalue())
+            apt_check.assert_called_once_with('compact', addition=True)
             self.assertNotIn('not-logged', stdout.getvalue())
             txn.assert_not_called()
             apt.assert_not_called()
@@ -385,7 +395,7 @@ class OfflineSetupTest(unittest.TestCase):
             subprocess.run(['bash', '-n', path], check=True)
         apt = (OFFLINE / 'apt-local.sh').read_text()
         self.assertIn('file:%s/apt', apt)
-        self.assertIn('Dir::Etc::sourceparts "-";', apt)
+        self.assertIn('Dir::Etc::sourceparts "$work/empty";', apt)
         self.assertIn('unshare --net', apt)
         self.assertIn('--no-remove', apt)
         self.assertNotIn('--allow-downgrades', apt)

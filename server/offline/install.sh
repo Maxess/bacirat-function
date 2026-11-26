@@ -10,6 +10,7 @@ if [[ ${1:-} == --help || ${1:-} == -h ]]; then
 Dedicated Ubuntu 24.04 LTS amd64 VPS only. Read START-HERE-fa.md first.
   sudo bash baci-classroom-vps-offline/install.sh
   sudo bash baci-classroom-vps-offline/install.sh --check
+Preflight includes an offline APT simulation; it does not change packages.
 Inputs are prompted if omitted: --site https://school.example.ir[/school]
   --media media.example.ir --ipv4 PUBLIC_IPV4
 TLS: no PEM files -> automatic Let’s Encrypt (direct A record and open TCP 443).
