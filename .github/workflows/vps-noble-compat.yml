@@ -17,15 +17,20 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           persist-credentials: false
-      - name: Check what dated cloud image archives are retained
+      - name: Verify the dated official Noble Server image is available
         run: |
-          for track in releases minimal/releases; do
-            base="https://cloud-images.ubuntu.com/$track/noble/"
-            if index=$(curl -fsSL --connect-timeout 5 --max-time 10 "$base" 2>/dev/null); then
-              dates=$(grep -oE 'release-[0-9]{8}(\.[0-9]+)?' <<<"$index" | sort -u | head -8 | paste -sd ' ')
-              printf '::notice title=Noble Cloud Images::%s oldest dates: %s\n' "$base" "$dates"
-            fi
+          set -euo pipefail
+          base=https://cloud-images.ubuntu.com/releases/noble/release-20240423
+          work=$(mktemp -d)
+          cd "$work"
+          for name in SHA256SUMS SHA256SUMS.gpg ubuntu-24.04-server-cloudimg-amd64.manifest; do
+            curl --disable -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 8 --max-time 25 "$base/$name" -o "$name"
           done
+          gpgv --keyring /usr/share/keyrings/ubuntu-cloudimage-keyring.gpg SHA256SUMS.gpg SHA256SUMS
+          echo "::notice title=Noble GA image::$(grep -F '*ubuntu-24.04-server-cloudimg-amd64.img' SHA256SUMS)"
+          while IFS= read -r line; do echo "::notice title=Noble GA manifest::$line"; done < <(
+            grep -E '^(dbus|dbus-user-session|gir1.2-glib-2.0|libdbus-1-3|libglib2.0-0t64|libglib2.0-bin|libpam-systemd|libpython3.12t64|python3|systemd-resolved|ubuntu-server|vim)[[:space:]]' ubuntu-24.04-server-cloudimg-amd64.manifest
+          )
       - name: Reproduce the old failure and solve with the complete signed cohorts
         run: |
           set -euo pipefail

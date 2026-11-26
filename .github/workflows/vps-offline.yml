@@ -156,6 +156,20 @@ jobs:
           rehearsal single-vps files 512 compact "$RUNNER_TEMP/class-load" 512
           rehearsal compact-auto auto 512 compact '' 512
           rehearsal live-add-on files 1024 upgrade "$RUNNER_TEMP/class-load" 0
+      - name: Verify actual offline compact install and recording on Noble GA Server
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/vps-ga-recording.log"
+          trap 'proof=$(grep -E "^QA_|^VM |^Baci VPS:|^gpgv:|^E:|^curl:|[Ee]rror:|^oom_kill" "$log" | tail -24 | paste -sd "|"); echo "::error title=GA Server recording::${proof:0:3900}"' ERR
+          BACI_QA_BASELINE=noble-ga-server bash scripts/test-vps-offline-vm.sh "$RUNNER_TEMP"/vps-release/*amd64.tar.gz \
+            files 1024 '' compact "$RUNNER_TEMP/class-load" '' 0 2>&1 | tee "$log"
+          grep -Fq 'QA_APT Real GA preflight passed without modifying dpkg state.' "$log"
+          grep -Fq 'QA_APT GA install preserved all ' "$log"
+          grep -Fq 'QA_RECORD received and decoded an approved MP4;' "$log"
+          grep -Fq 'QA_RECORD approved MP4 after the one-minute delay:' "$log"
+          grep -Fq 'VM passed: 1024 MiB profile=compact tls=files' "$log"
+          proof=$(grep -E '^QA_APT |^QA_RECORD |^VM baseline|^VM memory|^VM passed|^No VM Internet' "$log" | paste -sd '|')
+          echo "::notice title=Packaged GA Server recording::${proof:0:4100}"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: classroom-vps-offline-verified

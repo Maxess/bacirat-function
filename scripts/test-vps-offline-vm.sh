@@ -13,6 +13,11 @@ swap_mib=${8:-0}
 # Release transport QA: exercise the separately shipped helper and launcher,
 # and close UDP on two external browser peers, using the exact release payload.
 resilience=${BACI_QA_RESILIENCE:-0}
+vm_baseline=${BACI_QA_BASELINE:-minimal}
+[[ "$vm_baseline" == minimal || "$vm_baseline" == noble-ga-server ]]
+if [[ "$vm_baseline" == noble-ga-server ]]; then
+    [[ "$scenario" == compact && "$ram" == 1024 && "$mode" == files && "$swap_mib" == 0 ]]
+fi
 if [[ "$resilience" == 1 ]]; then
     [[ "$scenario" == compact && "$mode" == files && "$ram" == 512 && "$swap_mib" == 512 && -z ${4:-} && -z "$capacity" ]]
     [[ -x "${BACI_QA_CHROMIUM:?}" && -d "${BACI_QA_PLAYWRIGHT:?}" ]]
@@ -68,12 +73,23 @@ wait_vm() {
 }
 image=ubuntu-24.04-minimal-cloudimg-amd64.img
 base=https://cloud-images.ubuntu.com/minimal/releases/noble/release
-curl -fSsL --retry 3 "$base/SHA256SUMS" -o "$work/images.sha256"
-curl -fSsL --retry 3 "$base/$image" -o "$work/base.img"
+if [[ "$vm_baseline" == noble-ga-server ]]; then
+    image=ubuntu-24.04-server-cloudimg-amd64.img
+    base=https://cloud-images.ubuntu.com/releases/noble/release-20240423
+fi
+fetch_image() {
+    curl --disable -fSsL --proto '=https' --proto-redir '=https' --connect-timeout 15 --max-time 240 --retry 2 "$base/$1" -o "$2"
+}
+fetch_image SHA256SUMS "$work/images.sha256"
+if [[ "$vm_baseline" == noble-ga-server ]]; then
+    fetch_image SHA256SUMS.gpg "$work/images.sha256.gpg"
+    gpgv --keyring /usr/share/keyrings/ubuntu-cloudimage-keyring.gpg "$work/images.sha256.gpg" "$work/images.sha256"
+fi
+fetch_image "$image" "$work/base.img"
 expected=$(awk -v name="*$image" '$2 == name {print $1}' "$work/images.sha256")
 [[ "$expected" =~ ^[a-f0-9]{64}$ ]]
 printf '%s  %s\n' "$expected" "$work/base.img" | sha256sum --check
-printf 'VM baseline Ubuntu 24.04 minimal SHA-256: %s\n' "$expected"
+printf 'VM baseline Ubuntu 24.04 (%s) SHA-256: %s\n' "$vm_baseline" "$expected"
 ssh-keygen -q -t ed25519 -N '' -f "$work/ssh"
 cat > "$work/user-data" <<EOF_USER
 #cloud-config
@@ -192,9 +208,26 @@ else
     done
     send "$work/pebble" "$work/pebble-challtestsrv" "$work/acme.pem" "$work/acme.key" "$root/tests/fixtures/vps-acme-gateway.py"
 fi
-vm "ARCHIVE=$(basename "$archive") MODE=$mode RAM=$ram PROFILE=$profile SCENARIO=$scenario QA_SWAP_MIB=$swap_mib QA_RESILIENCE=$resilience bash -s" <<'GUEST'
+vm "ARCHIVE=$(basename "$archive") MODE=$mode RAM=$ram PROFILE=$profile SCENARIO=$scenario QA_SWAP_MIB=$swap_mib QA_RESILIENCE=$resilience QA_BASELINE=$vm_baseline bash -s" <<'GUEST'
 set -Eeuo pipefail
 trap 'echo "VM guest failure at line $LINENO: $BASH_COMMAND" >&2' ERR
+installed_packages() {
+    dpkg-query -W -f='${db:Status-Status}\t${binary:Package}\t${Version}\n' \
+        | awk -F '\t' '$1 == "installed" {print $2 "\t" $3}' | LC_ALL=C sort
+}
+if [[ "$QA_BASELINE" == noble-ga-server ]]; then
+    installed_packages > installed.before
+    for expected in 'systemd-resolved 255.4-1ubuntu8' 'libpam-systemd 255.4-1ubuntu8' \
+            'libdbus-1-3 1.14.10-4ubuntu4' 'libglib2.0-0t64 2.80.0-6ubuntu1' 'python3 3.12.3-0ubuntu1'; do
+        read -r package version <<< "$expected"
+        actual=$(dpkg-query -W -f='${Version}' "$package")
+        if [[ "$actual" != "$version" ]]; then
+            echo "QA_APT Expected $package=$version on the dated GA image; found $actual." >&2
+            exit 1
+        fi
+    done
+    echo 'QA_APT Dated Noble Server VM matches the old systemd, D-Bus, GLib and Python base versions.'
+fi
 if [[ "$QA_RESILIENCE" == 1 ]]; then
     sha256sum /etc/fstab > fstab.before
     sysctl -n vm.overcommit_memory > prep-overcommit.before
@@ -327,8 +360,14 @@ if [[ "$QA_RESILIENCE" == 1 ]]; then
     test ! -e /etc/school-classroom && test ! -e /run/baci-vps-install.lock
     echo 'QA_RESILIENCE offline launcher selected compact recording and local HTTPS files.'
 fi
+sha256sum /var/lib/dpkg/status > dpkg.before
 "${installer[@]}" --check | tee preflight.log
+sha256sum --check dpkg.before
 grep -Fq "preflight=ok tls=$MODE profile=$PROFILE ram_kib=$total" preflight.log
+if [[ "$QA_BASELINE" == noble-ga-server ]]; then
+    grep -Fq 'apt_plan=ok (read-only; no packages were changed)' preflight.log
+    echo 'QA_APT Real GA preflight passed without modifying dpkg state.'
+fi
 test ! -e /var/lib/school-classroom-https
 if [[ "$MODE" == auto ]] && sudo journalctl --no-pager -u baci-qa-acme -o cat | grep -F '"POST '; then
     echo 'Read-only ACME preflight unexpectedly submitted a write.' >&2
@@ -360,6 +399,32 @@ else
     "${installer[@]}" | tee installation.log
 fi
 grep -Fq "installation=ok tls=$MODE profile=$PROFILE" installation.log
+if [[ "$QA_BASELINE" == noble-ga-server ]]; then
+    installed_packages > installed.after
+    python3 - <<'PY_PACKAGES'
+from pathlib import Path
+import subprocess
+
+
+def inventory(file):
+    return dict(row.split('\t') for row in Path(file).read_text().splitlines())
+
+
+before, after = inventory('installed.before'), inventory('installed.after')
+removed = sorted(before.keys() - after.keys())
+if removed:
+    raise SystemExit(f'GA VM lost installed packages: {removed}')
+updates = {name: (old, after[name]) for name, old in before.items() if old != after[name]}
+for name, (old, new) in updates.items():
+    if name in ('systemd', 'systemd-resolved', 'libpam-systemd', 'openssh-server') or name.startswith('linux-image'):
+        raise SystemExit(f'Unexpected GA base service/kernel upgrade: {name} {old} -> {new}')
+    subprocess.run(['dpkg', '--compare-versions', new, 'gt', old], check=True)
+print(f'QA_APT GA install preserved all {len(before)} installed packages ({len(updates)} updated, none downgraded).')
+PY_PACKAGES
+    test -z "$(sudo dpkg --audit)"
+    sudo apt-get -q check
+    systemctl is-active dbus.service systemd-resolved.service
+fi
 sudo grep -Fq 'includes: [192.0.0.9/32]' /etc/school-classroom/livekit.yaml
 ss -Hlnu | grep -F '192.0.0.9:7882' >/dev/null
 sha256sum --check apt.before
