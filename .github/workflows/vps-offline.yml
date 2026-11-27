@@ -22,6 +22,7 @@ on:
       - server/recorder/native/go.mod
       - server/recorder/native/go.sum
       - tests/test_recorder_school_http.py
+      - tests/test_recorder_browser.py
       - tests/plugin-manager.php
       - artifacts/*pairing*.zip
       - artifacts/baci-classroom-site-upgrade-*.zip

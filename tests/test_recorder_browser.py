@@ -159,8 +159,8 @@ class RecorderPackageTest(unittest.TestCase):
             changed = {'board.js','frame.js','capture.py','recording.py','transport.py','README-fa.md'}
             for name in set(old.namelist()) - changed:
                 self.assertEqual(new.read(name), old.read(name))
-            # Historical ZIPs do not inherit later native/HTTP compatibility fixes.
-            pilot = {'recording.py','archive.py','movie.py','replay.js','capture.py','board.js','README-fa.md','transport.py'}
+            # Historical ZIPs do not inherit later native/HTTP, layout or credit changes.
+            pilot = {'recording.py','archive.py','movie.py','replay.js','capture.py','board.js','README-fa.md','transport.py','frame.js'}
             for name in ((changed | added | fonts) - pilot):
                 self.assertEqual(new.read(name), (ROOT / 'server/recorder' / name).read_bytes())
             with ZipFile(ROOT / 'artifacts/baci-classroom-recorder-v0.4.23.zip') as native:
