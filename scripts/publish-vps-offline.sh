@@ -45,6 +45,8 @@ gh api "repos/$repo/actions/runs/$run/jobs" | jq -e '
         and any(.steps[]; .name == "Verify the archive keeps the older Noble Server base intact"
                 and .conclusion == "success")
         and any(.steps[]; .name == "Verify actual offline compact install and recording on Noble GA Server"
+                and .conclusion == "success")
+        and any(.steps[]; .name == "Require named Recorder and both simulated group receipts from the packaged installs"
                 and .conclusion == "success"))' >/dev/null
 stage=verify-distribution-helpers
 # These are separate assets, not a modification or rebuild of the tested archive.
@@ -85,6 +87,7 @@ stage=check-published-inventory
     jq -e --arg sha "$commit" --arg ver "$version" '.git == $sha and .version == $ver and .arch == "amd64" and .ubuntu == "24.04"
         and .tls_modes == ["auto", "files"] and .minimum_visible_ram_kib == 393216
         and .install_profiles == ["live", "compact", "full"] and .full_visible_ram_kib == 1835008
+        and .recording_by_default == true and .school_recorder_user_agent == "Baci-Classroom-Recorder/0.4.23"
         and .compact_visible_ram_kib == 458752 and .compact_swap_kib == 512000
         and .compact_no_swap_visible_ram_kib == 917504' <<< "$BUILD" >/dev/null
 )
@@ -121,16 +124,17 @@ cat > "$work/notes.md" <<EOF_NOTES
 
 **[راهنمای نصب فارسی](https://github.com/$repo/releases/download/$tag/$guide)** · **[آرشیو نصب](https://github.com/$repo/releases/download/$tag/$name.tar.gz)** · **[اسکریپت نصب](https://github.com/$repo/releases/download/$tag/install-vps.sh)** · **[SHA-256](https://github.com/$repo/releases/download/$tag/$sha_file)**
 
-پس از بررسی هش، اسکریپت و آرشیو را کنار هم با SFTP بفرست؛ اجرای \`bash ./install-vps.sh --check\` و بعد \`bash ./install-vps.sh\` کافی است. می‌شود همین آرشیو را مستقیم از انتشار یا آینهٔ HTTPS دریافت کرد، ولی **VPS برای نصب کتابخانه‌ها به GitHub، مخزن Ubuntu یا CDN نیاز ندارد**. این آرشیو همان فایل تأییدشده در آزمون‌های نصب آفلاین است.
+روی VPS تازهٔ سازگار، پس از بررسی هش، اسکریپت و آرشیو را کنار هم با SFTP بفرست و \`bash ./install-vps.sh\` بزن. \`--check\` اختیاری و بدون نصب است. می‌شود همین آرشیو را مستقیم از انتشار یا آینهٔ HTTPS گرفت؛ برای نصب وابستگی‌ها به مخزن آنلاین Ubuntu یا CDN نیازی نیست. این آرشیو همان فایل آزموده‌شده در ماشین‌های ایزوله است. روی VPS ضبطِ فعلی، این مسیر را برای ارتقای درجا اجرا نکن.
 
+- **رفع ۴۰۳ Recorder داخل نصب:** درخواست‌های ضبطِ احرازشده با شناسهٔ واقعی Recorder به سایت می‌رسند؛ هیچ فایل اصلاحی جدا، غیرفعال‌کردن TLS یا تغییر مجوزهای سایت لازم نیست. بعد از جفت‌سازی و فعال‌کردن ضبط، \`sudo baci-vps doctor --online --wait\` heartbeat همان Recorder را بررسی می‌کند.
 - **پیش‌فرض ضبط را حفظ می‌کند:** \`compact\` از ۴۴۸ MiB RAM قابل‌مشاهده؛ زیر ۸۹۶ MiB، swap فعال در حد ۵۱۲ MiB لازم است. \`full\` از ۱۷۹۲ MiB قابل‌مشاهده. \`live\` فقط با انتخاب صریح، بدون ضبط. فایل \`baci-prepare-swap.sh\` اختیاری است و فقط با تأیید \`--apply\` روی VPS سازگار swap اختصاصی می‌سازد.
 - **HTTPS خودکار:** Caddy برای نام رسانه با رکورد A مستقیم و TCP 443 باز از Let’s Encrypt گواهی می‌گیرد. اگر VPS به مرجع صدور نمی‌رسد، نصب و HTTPS با گواهی عمومی آماده و \`--tls files\` بدون دسترسی به آن مرجع ممکن است. پورت ۸۰ لازم نیست. برای رسانه UDP 7882 مسیر ترجیحی است و TCP 7881 جایگزین در شبکهٔ سازگار؛ HTTPS به‌تنهایی رسانه را عبور نمی‌دهد.
-- **سایت مدرسه:** ZIP کوچک \`baci-classroom-site-pairing-v0.1.31.zip\` شامل مدیر ۰٫۱٫۳۱ و کلاس ۰٫۴٫۲۴ است. VPS تازه فایل جفت‌سازی خصوصی تازه می‌سازد. روی VPS مدیریت‌شدهٔ ۱٫۲٫۰ در حالت live می‌توان با \`--add-recorder\` در زمان بیکاری و بدون تغییر اتصال قبلی ضبط را اضافه کرد.
+- **سایت مدرسه:** ZIP کوچک \`baci-classroom-site-pairing-v0.1.31.zip\` شامل مدیر ۰٫۱٫۳۱ و کلاس ۰٫۴٫۲۴ است. VPS تازه فایل جفت‌سازی خصوصی تازه می‌سازد که تنها در پنل HTTPS مدیر کل وارد می‌شود. روی نصب مدیریت‌شدهٔ سازگار در حالت \`live\` می‌توان با \`--add-recorder\` در زمان بیکاری و بدون تغییر اتصال قبلی ضبط را اضافه کرد؛ [شرایط آن در راهنما](https://github.com/$repo/releases/download/$tag/$guide) آمده است.
 - فایل‌های \`*-ubuntu-source.tar\` و \`*.tar.part-*\` صرفاً کد منبع متناظر Ubuntu هستند؛ برای نصب دانلودشان نکن. برای استفاده از منبع، پس از تأیید هش همهٔ بخش‌ها، روی رایانه با \`cat $source_tar.part-* > $source_tar\` یکپارچه و هش بازسازی‌شده را مقایسه کن.
 
 **رفع ناسازگاری ۱٫۳٫۰ با Ubuntu اولیه:** نسخه‌های هم‌خوان D-Bus، GLib و Python از مخزن امضاشده همراه بسته‌اند. پیش‌بررسی طرح واقعی APT را بدون تغییر بسته‌ها اجرا می‌کند. حذف یا پایین‌آوردن نسخه‌ها مجاز نیست و به بازنشانی VPS یا به‌روزرسانی کلی Ubuntu نیازی نیست.
 
-[آزمون همین آرشیو]($base): نصب و ساخت MP4 روی تصویر رسمی Ubuntu Server 24.04 اولیه با ۱ GiB بدون swap و روی تصویر به‌روز با ۵۱۲ MiB و swap؛ یک دبیر و ۱۰ شاگرد مصنوعی، تحویل به مقصد آزمایشی HTTPS، و پاک‌سازی بدون ساخت و ارسال بعد از «نفرست» یا لغو مقصد. [آزمون جداگانهٔ نصب‌یار، swap و دو مرورگر روی TCP]($setup_evidence). آزمون ACME با CA آزمایشی بوده؛ پیش از کلاس واقعی، DNS، راه رسانه از دو شبکه و API گروه مدرسه را جدا بررسی کن. این نسخه برای هر سیستم‌عامل/CPU یا ظرفیت نامحدود نیست.
+[آزمون همین آرشیو]($base): نصب و ساخت MP4 روی تصویر رسمی Ubuntu Server 24.04 اولیه با ۱ GiB بدون swap و روی تصویر به‌روز با ۵۱۲ MiB و swap؛ یک دبیر و ۱۰ شاگرد مصنوعی روی UDP، ضبط با heartbeat تازه پس از ۴۰۳ کنترل‌شده، دریافت و رمزگشایی MP4 در مقصدهای شبیه‌سازی‌شدهٔ بله و روبیکا، و پاک‌سازی بدون ساخت و ارسال بعد از «نفرست» یا لغو مقصد. [آزمون جداگانهٔ نصب‌یار، swap و دو مرورگر روی TCP]($setup_evidence). آزمون ACME با CA آزمایشی بوده؛ پیش از کلاس اصلی، مسیر رسانه از دو شبکه و دریافت و پخش فیلم در گروه واقعی مدرسه را جدا بررسی کن.
 EOF_NOTES
 stage=find-or-create-draft
 find_release() {

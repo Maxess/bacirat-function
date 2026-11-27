@@ -1,9 +1,8 @@
 {
-  "version": "1.3.1",
-  "run_id": 45738233349,
-  "commit": "ed5bb15794b1e0b31f60bebeb89109e80e6c9090",
-  "checksums_sha256": "fff8060cd9b7f74850a7a44c243cdc591595d0afa25b846adfd07539f26a4c53",
-  "installer_sha256": "d00fc8c5ea6b426136b0fde3b0c9a4232407703312b89785fb83428a240a4cba",
-  "artifact_sha256": "92aef5fd0457fa86b3c53376f12c1a3f8fc88742ef47c040f591b0bbb556417e",
-  "setup_run_id": 45741920862
+  "version": "1.3.2",
+  "run_id": 45928901571,
+  "commit": "83ebbf2be92747e6ca9262f796aaf6acea5b6c6d",
+  "checksums_sha256": "d114ef344167590a300e12350a4c2dfa7f1b18f118bcf0533a8f3f702b819818",
+  "installer_sha256": "81f47e03f417489a906fcea6ab8aa79239edcb933612fbe050fd101bf1a40e37",
+  "artifact_sha256": "e6873af5652a13768ca69194c633373cb85b56aeb9266dd1e6633c02fcc68ca8"
 }
