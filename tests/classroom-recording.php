@@ -99,8 +99,6 @@ $live = $lesson($t);
 $id = $live['id'];
 foreach ([$teacher,$super,$admin] as $operator) {
     ok(cl_rec_status($s,$cfg,$live,$operator) === ['recording'=>['start'=>true]], 'assigned teacher and authorized admins see the start control');
-    ok(cl_rec_status($s,$cfg,$live + ['test'=>'friday'],$operator) === ['recording'=>null], 'Friday test never shows recording controls');
-    deny(403, fn()=>cl_rec_start($s,$cfg,$class,$live + ['test'=>'friday'],$operator,$t));
 }
 $disabled = array_replace($cfg, ['record_lessons'=>false]);
 ok(cl_rec_status($s,$disabled,$live,$admin) === ['recording'=>null], 'an admin does not bypass the opt-in');
@@ -338,4 +336,83 @@ ok($worker('plan',null,$now+5520)['work'] === null, 'a following period preempts
 cl_rec_start($s,$cfg,$class,$next,$teacher,$now+5520);
 ok($worker('plan',null,$now+5525)['capture'] === [$next['id']], 'back-to-back same class has its own recording');
 ok(cl_rec_delay(['recording_delay_minutes'=>0]) === 180 && cl_rec_delay(['recording_delay_minutes'=>720]) === 720, 'safe default and configured delay bounds');
+// Friday stays an all-day grant; capture has its own cap and never creates attendance.
+$friday = strtotime('2026-11-20T08:00:00+03:30');
+$pilot = $cfg + ['max_participants'=>12, 'friday_test'=>['date'=>'2026-11-20','id'=>str_repeat('b',32),'students'=>true],
+    'recording_delay_minutes'=>1, 'notify_school_bale'=>true];
+$practiceRpc = static function (string $method): array {
+    ok(in_array($method,['CreateRoom','DeleteRoom'],true), 'expected fixture room operation');
+    return [];
+};
+$practiceWorker = static fn(string $action, ?string $id, int $at, array $extra = [], ?array $settings = null) => cl_rec_worker($s, $settings ?? $pilot,
+    ['action'=>$action,'protocol'=>2,'worker'=>str_repeat('a',32),'id'=>$id,'available'=>true] + $extra, $at, $practiceRpc, $request);
+$openDemo = static function (int $at) use ($s,$pilot,$class,$teacher,$practiceRpc): array {
+    $live = cl_open_lesson($s,['write_runtime'=>static fn()=>null],$pilot,$class,$teacher + ['name'=>'دبیر نمونه'],
+        ['slot'=>CL_FRIDAY_SLOT],$at,$practiceRpc);
+    $live = array_replace($live, ['phase'=>'live','event_received'=>true,'sample'=>$at,'started'=>$at,'active_seconds'=>5,
+        'staff'=>['teacher-7'=>'PA_demo'],'pulses'=>['teacher-7'=>['sid'=>'PA_demo','at'=>$at]],'seen'=>['teacher-7'=>'PA_demo']]);
+    $s->put('lesson',$live['id'],$live);
+    return $live;
+};
+cl_close_lesson($s,$cfg,cl_active($s,15),$now+5526,$rpc);
+$reports = $s->rows('reports',100);
+$notices = $s->rows('host-pending',100);
+foreach (['yes','no','revoked','limit','midnight'] as $i=>$scenario) {
+    $at = $scenario === 'midnight' ? cl_tehran_midnight($friday)-12 : $friday + $i*60;
+    $live = $openDemo($at);
+    $id = $live['id']; $room = $live['room'];
+    $practiceWorker('plan',null,$at);
+    ok(cl_rec_status($s,$pilot,$live,$teacher)['recording']['start'] === true, 'Friday opener can choose to record');
+    ok(cl_rec_status($s,$pilot,$live,$student)['recording'] === null, 'pupils do not see record controls');
+    deny(403,fn()=>cl_rec_start($s,$pilot,$class,$live,$deputy,$at));
+    deny(403,fn()=>cl_rec_start($s,$pilot,$class,$live,$student,$at));
+    ok(cl_rec_start($s,$pilot,$class,$live,$admin,$at)['recording']['notice'] === 'preparing', 'admin can opt into Friday capture');
+    $live = cl_active($s,15);
+    $cap = min($at+CL_MAX_LESSON_SECONDS,cl_tehran_midnight($at));
+    ok($s->get('recording',$id)['deadline'] === $cap && $live['deadline'] === cl_tehran_midnight($at), 'bounded recording without shortening Friday');
+    ok($practiceWorker('poll',$id,$at+4)['command'] === 'hold', 'five seconds of visible warning before capture');
+    $capture = $practiceWorker('poll',$id,$at+5);
+    ok($capture['command'] === 'record' && $capture['room'] === $room && $capture['lease'] <= $cap, 'same scoped Recorder v2 command');
+    $practiceWorker('poll',$id,$at+5,['running'=>$room]);
+    ok(cl_rec_status($s,$pilot,$live,$student) === ['recording'=>['notice'=>'live']], 'visible during practice, without revealing the messenger group');
+    $scope = ['lesson'=>$id,'epoch'=>cl_epoch($live),'sid'=>'PA_demo','source'=>'board','enabled'=>true];
+    ok(cl_rec_set_source($s,$pilot,$live,$teacher,$scope,$at+6)['archive']['board'] === true, 'Friday presenter can include the board');
+    $frame = $practiceWorker('board',$id,$at+6,['room'=>$room]);
+    ok($frame['archive']['board'] === true && $frame['board']['write'] === false && !isset($frame['chat']), 'read-only Friday archive frame');
+    if (in_array($scenario,['revoked','limit','midnight'],true)) {
+        $end = match ($scenario) { 'revoked'=>$at+6, default=>$cap };
+        $settings = $pilot;
+        if ($scenario === 'revoked') unset($settings['friday_test']['students']);
+        deny(409,fn()=>$practiceWorker('board',$id,$end,['room'=>$room],$settings));
+        ok($practiceWorker('poll',$id,$end,[],$settings)['command'] === 'purge', 'expiry or revocation discards unapproved capture');
+        ok(!$s->get('record-pending',$id), 'terminal Friday capture frees the queue slot');
+        if ($scenario === 'limit') {
+            ok(cl_active($s,15)['room'] === $room, 'the two-hour capture ceiling does not close the Friday room');
+            cl_close_lesson($s,$pilot,cl_active($s,15),$end+1,$practiceRpc);
+        } else ok(!cl_active($s,15), 'when Friday ends, the room is retired too');
+    } else {
+        deny(409,fn()=>cl_rec_close_choice($s,$pilot,$live,$teacher,[],$at+6));
+        deny(403,fn()=>cl_rec_close_choice($s,$pilot,$live,$deputy,['recording'=>$id,'sendRecording'=>true],$at+6));
+        $yes = $scenario === 'yes';
+        $choice = cl_rec_close_choice($s,$pilot,$live,$teacher,['recording'=>$id,'sendRecording'=>$yes],$at+6);
+        $live['recording_consent'] = $choice === 'queued';
+        deny(409,fn()=>$practiceWorker('claim',$id,$at+6,['part'=>1,'total'=>1]));
+        cl_close_lesson($s,$pilot,$live,$at+6,$practiceRpc);
+        if ($yes) {
+            ok($choice === 'queued' && $practiceWorker('poll',$id,$at+65)['command'] === 'hold', 'only consented, confirmed closures may render after the delay');
+            ok($practiceWorker('plan',null,$at+66)['work'] === $id && $practiceWorker('poll',$id,$at+66)['command'] === 'render', 'deleted demo activity does not block approved rendering');
+            ok($practiceWorker('rendered',$id,$at+66,['total'=>1])['command'] === 'deliver', 'recording completion is accepted without any official lesson record');
+            $send = $practiceWorker('claim',$id,$at+67,['part'=>1,'total'=>1]);
+            ok($send['command'] === 'send' && $send['chat'] === '-201' && str_contains($send['caption'],CL_FRIDAY_TITLE), 'send only to the approved group and label the demo');
+            $practiceWorker('result',$id,$at+68,['attempt'=>$send['attempt'],'part'=>1,'result'=>'accepted','message'=>'Friday123']);
+            ok($s->get('recording',$id)['state']==='delivered' && $practiceWorker('poll',$id,$at+68)['command']==='purge', 'receipt settles Friday job and requests cleanup');
+        } else {
+            ok($choice === 'discarded' && $practiceWorker('poll',$id,$at+66)['command'] === 'purge', 'no Friday film without consent');
+            deny(409,fn()=>$practiceWorker('claim',$id,$at+67,['part'=>1,'total'=>1]));
+        }
+    }
+    $practiceWorker('cleaned',$id,$at+CL_MAX_LESSON_SECONDS+1);
+    ok(isset($s->get('recording',$id)['cleaned']) && !$s->get('lesson',$id) && !$s->get('activity',$id), 'cleanup keeps only recording history, no demo session or files');
+}
+ok($s->rows('reports',100) === $reports && $s->rows('host-pending',100) === $notices, 'Friday recording never creates attendance or notices');
 echo "classroom recording checks passed\n";

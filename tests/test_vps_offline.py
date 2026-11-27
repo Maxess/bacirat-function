@@ -487,9 +487,12 @@ class OfflineSetupTest(unittest.TestCase):
                 setup.write(p.with_name('fresh'), 'interrupted')
             self.assertFalse(p.with_name('fresh').exists())
 
-    def test_frozen_vps_payload_and_current_site_deliveries(self):
+    def test_frozen_vps_payload_and_pairing_companion(self):
         for name in (setup.REC_ASSET, setup.PATCH_ASSET):
             self.assertEqual(sha256((ARTIFACTS / name).read_bytes()).hexdigest(), setup.PAYLOAD[name])
+        # The installer keeps the original 1.3.2 pairing bytes, independent of future site-only updates.
+        self.assertEqual(sha256((ARTIFACTS / build.SITE).read_bytes()).hexdigest(),
+                         '9d2c3545558a0bec1e698b6bb54cf03a40b7c26db207eeb5442c6f3b525d8237')
         with ZipFile(ARTIFACTS / build.SITE) as site:
             self.assertCountEqual(site.namelist(), [SITE_UPDATER, CLASSROOM, 'START-HERE-fa.txt', 'SHA256SUMS.txt'])
             self.assertEqual(site.read(CLASSROOM), (ARTIFACTS / CLASSROOM).read_bytes())
@@ -500,7 +503,10 @@ class OfflineSetupTest(unittest.TestCase):
             with ZipFile(BytesIO(site.read(SITE_UPDATER))) as updater, ZipFile(ARTIFACTS / 'baci-plugin-manager-update-v0.1.30.zip') as previous:
                 self.assertCountEqual(updater.namelist(), previous.namelist())
                 self.assertEqual([p for p in updater.namelist() if updater.read(p) != previous.read(p)], [GATEWAY])
-                self.assertEqual(updater.read(GATEWAY), (ROOT / 'plugin-manager' / GATEWAY).read_bytes())
+                self.assertIn(b"const MPM_VERSION = '0.1.31';", updater.read(GATEWAY))
+                with ZipFile(BytesIO(site.read(CLASSROOM))) as plugin:
+                    digest = sha256(plugin.read('plugin.json')).hexdigest()
+                self.assertIn(f"'0.4.24' => '{digest}'".encode('ascii'), updater.read(GATEWAY))
 
     def test_shell_syntax_and_isolation(self):
         for path in (OFFLINE / 'install.sh', OFFLINE / 'apt-local.sh', ROOT / 'scripts/test-vps-offline-vm.sh'):

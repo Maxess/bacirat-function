@@ -925,6 +925,43 @@ must(cl_friday_window(['friday_test'=>['date'=>'2026-11-21','id'=>str_repeat('e'
 must(!cl_access_class($db,$classes[20],$priorYear) && cl_access_class($db,$classes[20],$priorYear,true)
     && !cl_access_class($db,$classes[20],$student,true), 'all active teachers are eligible during the pilot, not pupils in other classes');
 must(array_column(cl_staff_schedule($s,$trial,$classes[20],$priorYear,$fri)['choices'],'id') === [CL_FRIDAY_SLOT], 'no bell assignment required');
+// Connection errors before a CreateRoom response aren't evidence of a missing webhook.
+$createFailure = static fn() => throw new ClassroomError(502, 'simulated first HTTPS failure');
+denied(502, fn()=>cl_open_lesson($s,$ctx,$trial,$first,$teacher,['slot'=>CL_FRIDAY_SLOT],$fri,$createFailure));
+$cold = cl_active($s,10);
+must($cold['phase']==='paused' && $cold['start_failure']==='media' && empty($cold['event_received']), 'creation failure is distinct from callback timeout');
+$recovered = cl_reconcile($s,$trial,$first,$cold,$fri,$rpc);
+must($recovered['room']===null, 'retire the journaled generation before retrying');
+// First entry can span a slow callback or a single cold HTTPS/RPC miss.
+$starting = $trialOpen($teacher,$first,$fri);
+$entryRoom = $starting['room'];
+$wire($entryRoom,$teacherWire);
+$pulse(10,$teacher,'PA_Teacher',$fri+2);
+$beforeCallback = cl_reconcile($s,$trial,$first,cl_active($s,10),$fri+2,$rpc);
+must($beforeCallback['phase'] === 'starting' && !$beforeCallback['started'], 'real SFU evidence alone does not replace the signed callback');
+cl_event_apply($s,$trial,['event'=>'participant_joined','room'=>['name'=>$entryRoom]],$fri+3,$rpc);
+$outage = true;
+denied(502,fn()=>cl_reconcile($s,$trial,$first,cl_active($s,10),$fri+3,$rpc));
+$pendingEntry = cl_active($s,10);
+must($pendingEntry['phase']==='starting' && $pendingEntry['room']===$entryRoom && $pendingEntry['event_received'],
+    'a transient authenticated SFU lookup must not revoke a first, not-yet-admitted link');
+$outage = false;
+$confirmed = cl_reconcile($s,$trial,$first,cl_active($s,10),$fri+4,$rpc);
+must($confirmed['phase']==='live' && $confirmed['room']===$entryRoom && $confirmed['active_seconds']===0,
+    'same epoch becomes admitted without counting the unverified time');
+cl_close_lesson($s,$trial,$confirmed,$fri+7,$rpc);
+$missing = $trialOpen($teacher,$first,$fri+10);
+$wire($missing['room'],$teacherWire);
+$pulse(10,$teacher,'PA_Teacher',$fri+12);
+cl_reconcile($s,$trial,$first,cl_active($s,10),$fri+12,$rpc);
+$timedOut = cl_reconcile($s,$trial,$first,cl_active($s,10),$fri+10+CL_START_SECONDS,$rpc);
+must($timedOut['phase']==='paused' && $timedOut['room']===null && $timedOut['start_failure']==='callback',
+    'only an SFU-confirmed connection with no signed callback is diagnosed as a webhook timeout');
+$neverConnected = $trialOpen($teacher,$first,$fri+45);
+$timedOut = cl_reconcile($s,$trial,$first,$neverConnected,$fri+45+CL_START_SECONDS,$rpc);
+must($timedOut['start_failure']==='presence' && $timedOut['room']===null, 'no first connection is not diagnosed as a missing webhook');
+cl_close_lesson($s,$trial,$timedOut,$fri+79,$rpc);
+
 denied(403,fn()=>$trialOpen($priorYear,$classes[20],$fri-1));
 denied(403,fn()=>$trialOpen($student,$first,$fri));
 $demo = $trialOpen($priorYear,$first,$fri);

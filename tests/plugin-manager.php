@@ -613,7 +613,7 @@ try {
     submit($db,$site,'prepare-update');
     expect(mpm_install($db,$dir,__DIR__ . '/../artifacts/school-classroom-plugin-v0.4.24.zip'), 'upgrade .23 to the reviewed site-only release');
     $row = mpm_row($db,$slug);
-    expect(MPM_VERSION === '0.1.31' && $row['version'] === '0.4.24' && mpm_owned_row($db,$row)['settings'] === $beforeV24
+    expect($row['version'] === '0.4.24' && mpm_owned_row($db,$row)['settings'] === $beforeV24
         && mpm_settings($db,$dir,$row) === $schoolSettings && mpm_check_store($db,$row) === $store && $row['owner'] === $oldRow['owner']
         && mpm_query($db,"SELECT payload FROM `$store` WHERE bucket='lesson' AND item=?",[$oldId])->fetchColumn() === $finishedBefore
         && mpm_query($db,"SELECT payload FROM `$store` WHERE bucket='record-links' AND item=?",['1404/1405:22'])->fetchColumn() === $linkedGroup
@@ -662,6 +662,20 @@ try {
         && mpm_row($db,$slug)['state'] === 'disabled', 'encrypt, preserve school settings, and leave explicit activation to the admin');
     expect(!mpm_apply_vps_pair($db,$dir,$row,$pairManifest,$origin,$pairRaw) && mpm_owned_row($db,$row)['settings'] === $paired,
         'same pairing is idempotent and does not rotate or rewrite');
+    submit($db,$site,'enable');
+    mpm_query($db,"INSERT INTO `$store` (bucket,item,payload) VALUES ('record-pending',?,'{}')",[$busyId]);
+    denied(fn()=>submit($db,$site,'prepare-update'));
+    expect(mpm_row($db,$slug)['state']==='enabled', 'do not interrupt a pending recording to install .25');
+    mpm_query($db,"DELETE FROM `$store` WHERE bucket='record-pending' AND item=?",[$busyId]);
+    submit($db,$site,'prepare-update');
+    expect(mpm_install($db,$dir,__DIR__ . '/../artifacts/school-classroom-plugin-v0.4.25.zip'), 'upgrade the paired .24 site');
+    $row = mpm_row($db,$slug);
+    expect(MPM_VERSION === '0.1.32' && $row['version'] === '0.4.25' && $row['state'] === 'disabled'
+        && mpm_owned_row($db,$row)['settings'] === $paired && mpm_check_store($db,$row) === $store && $row['owner'] === $oldRow['owner']
+        && mpm_query($db,"SELECT payload FROM `$store` WHERE bucket='lesson' AND item=?",[$oldId])->fetchColumn() === $finishedBefore
+        && mpm_query($db,"SELECT payload FROM `$store` WHERE bucket='record-links' AND item=?",['1404/1405:22'])->fetchColumn() === $linkedGroup
+        && mpm_query($db,"SELECT payload FROM `$store` WHERE bucket='recording' AND item=?",[$historicId])->fetchColumn() === $historicRecording,
+        'pairing, encrypted settings, Friday grant, group mappings, recordings and reports survive the .25 site update');
     mpm_write_settings($db,$dir,$row,$savedAttendance);
     unset($GLOBALS['MPM_CLI_SITE_PATH']);
     if ($previousScript === null) unset($_SERVER['SCRIPT_NAME']); else $_SERVER['SCRIPT_NAME'] = $previousScript;

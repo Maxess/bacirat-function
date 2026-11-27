@@ -62,6 +62,7 @@ function fakeMedia(identity, remote, unsupported) {
         emit(event,...args) { this.events.get(event)?.(...args); }
         async connect() { this.state='connected'; this.emit('ConnectionStateChanged'); }
         async disconnect() { this.state='disconnected'; }
+        async startAudio() {}
     }
     class LocalVideoTrack {
         constructor(raw) { this.mediaStreamTrack=raw; this.kind='video'; }
@@ -304,10 +305,10 @@ test('only a recording presenter can compose the archive, apart from live sharin
     assert.equal(layoutRequests().length,3);
 });
 
-test('packaged teacher and admin recording controls, pupil notice and explicit yes/no on close', {skip, timeout:38000}, async t => {
+test('packaged teacher and admin recording controls, Friday retry, pupil notice and explicit yes/no on close', {skip, timeout:38000}, async t => {
     const fixture=packaged(t), pages={teacher:fixture.render('teacher',true),admin:fixture.render('admin',true),pupil:fixture.render('student',true)};
     const lesson='active-lesson', epoch='epoch', rec='a'.repeat(32), decisions=[];
-    let recording=false, closed=false, operator='teacher';
+    let recording=false, closed=false, operator='teacher', slot=11, opens=0;
     const {browser,origin}=await serveBrowser(t,async (req,res,url) => {
         const role=new URL(req.headers.referer || '/',url).pathname.slice(1);
         const staff=role==='teacher' || role==='admin';
@@ -320,8 +321,13 @@ test('packaged teacher and admin recording controls, pupil notice and explicit y
             const controls=()=>recording ? {notice:'live', ...(staff?{id:rec,confirm:true,canSend:true,group:'گروه آزمایشی',messenger:'روبیکا',delayMinutes:165}:{})}
                 : staff ? {start:true}:null;
             if (input.action==='status') {
-                Object.assign(result,closed?{phase:'idle',ready:true}:{phase:'live',lesson,epoch,ready:true,joinable:true,slot:11,
+                Object.assign(result,closed?{phase:'idle',ready:true}:{phase:'live',lesson,epoch,ready:true,joinable:true,slot,
                     admitted:input.sid===`PA_${identity}`,recording:controls(), quality:{levels:{}}});
+            } else if (input.action==='open') {
+                assert.equal(input.slot,'friday-test');
+                assert.equal(++opens,1,'other requests reuse the existing Friday room');
+                res.writeHead(503,{'Content-Type':'application/json'}).end(JSON.stringify({ok:false,message:'temporary fixture error'}));
+                return;
             } else if (input.action==='ticket') Object.assign(result,{lesson,epoch,url:'wss://fixture.invalid',token:'fixture'});
             else if (input.action==='start-recording') {
                 assert.ok(staff && role===operator && input.lesson===lesson && input.sid===`PA_${identity}` && input.epoch===epoch);
@@ -340,10 +346,17 @@ test('packaged teacher and admin recording controls, pupil notice and explicit y
     assert.equal(await pupil.locator('#record-start').count(),0);
     for (const [role,yes] of [['teacher',false],['admin',true]]) {
         operator=role;
+        const demo=role==='admin';
+        slot=demo?'friday-test':11;
         const page=await browser.newPage({viewport:{width:540,height:700},reducedMotion:role==='admin'?'reduce':'no-preference'});
         const errs=[];
         page.on('pageerror',error=>errs.push(error.message));
         await page.goto(`${origin}/${role}`);
+        if (demo) {
+            await page.getByRole('button',{name:'ورود به آزمایش جمعه',exact:true}).click();
+            await page.locator('#classroom[data-live=yes]').waitFor({timeout:5000});
+            assert.equal(opens,1);
+        }
         await page.locator('#toggle-access').click();
         const start=page.locator('#record-start');
         await start.waitFor({timeout:10000});
@@ -353,6 +366,7 @@ test('packaged teacher and admin recording controls, pupil notice and explicit y
         const pupilHeader = await pupil.locator('.room-top').boundingBox();
         await start.click();
         assert.match(await page.locator('#record-start-help').textContent(),/دبیر همین زنگ یا مدیر مجاز/);
+        assert.equal(await page.locator('#record-practice-help').isVisible(),demo);
         assert.equal(recording,false,'opening the dialog does not start capture');
         await page.locator('#record-start-yes').click();
         const activeDot = (p, timeout=8000) => p.locator('#classroom[data-recording=yes]').waitFor({timeout});
@@ -372,7 +386,7 @@ test('packaged teacher and admin recording controls, pupil notice and explicit y
         await pupil.locator('#board-expand').click();
         assert.equal(await pupil.getByText('گروه آزمایشی').count(),0,'group is private to staff');
         await page.locator('#toggle-access').click();
-        await page.getByRole('button',{name:'بستن کلاس برای همه'}).click();
+        await page.getByRole('button',{name:demo?'بستن اتاق آزمایشی برای همه':'بستن کلاس برای همه'}).click();
         const dialog=page.getByRole('dialog',{name:'فیلم کلاس بعداً ساخته و در پیام‌رسان ارسال شود؟'});
         await dialog.waitFor();
         assert.match(await dialog.textContent(),/روبیکا — گروه آزمایشی/);
@@ -381,11 +395,12 @@ test('packaged teacher and admin recording controls, pupil notice and explicit y
         await dialog.getByRole('button',{name:'انصراف از بستن کلاس'}).click();
         assert.equal(decisions.length,before,'cancel does not close, grant or send');
         await page.locator('#toggle-access').click();
-        await page.getByRole('button',{name:'بستن کلاس برای همه'}).click();
+        await page.getByRole('button',{name:demo?'بستن اتاق آزمایشی برای همه':'بستن کلاس برای همه'}).click();
         await dialog.getByRole('button',{name:yes?'بله':'خیر',exact:true}).click();
         await page.locator('#classroom[data-recording=no]').waitFor();
         await pupil.locator('#classroom[data-recording=no]').waitFor({timeout:9000});
         assert.deepEqual(decisions.at(-1),{action:'close',class:22,lesson,recording:rec,sendRecording:yes});
+        if (demo) assert.match(await page.locator('#notice').textContent(),/گزارشی ثبت نشد.*در صف/);
         assert.deepEqual(errs,[]);
         await page.close();
         recording=false; closed=false;

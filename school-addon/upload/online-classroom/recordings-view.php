@@ -99,13 +99,16 @@ $labels = ['recording'=>'در حال آماده‌سازی یا ضبط','queued'
         ?>
         <?php if (!$jobs): ?><p>هنوز ضبطی ثبت نشده است.</p><?php else: ?><ul>
         <?php foreach ($jobs as $job): ?>
-            <li><?= cl_html(cl_display_day(cl_day($job['begin'])->format('Y-m-d')) . '، ' . cl_tehran_clock($job['begin']) . ' · ' . (isset($job['rendered_at']) && $job['state'] === 'queued' ? 'ساخته شد؛ در صف ارسال' : $labels[$job['state']])) ?>
+            <li><?= cl_html(cl_display_day(cl_day($job['begin'])->format('Y-m-d')) . '، ' . cl_tehran_clock($job['begin'])
+                . (($job['friday'] ?? false) ? ' · ' . CL_FRIDAY_TITLE : '')
+                . ' · ' . (isset($job['rendered_at']) && $job['state'] === 'queued' ? 'ساخته شد؛ در صف ارسال' : $labels[$job['state']])) ?>
                 <?= $job['state'] === 'queued' && isset($job['not_before']) && !isset($job['rendered_at'])
                     ? ' · زودترین شروع ساخت: ' . cl_html(cl_display_day(cl_day($job['not_before'])->format('Y-m-d')) . '، ' . cl_tehran_clock($job['not_before'])) : '' ?>
                 <?= $job['total'] ? ' (' . cl_persian_digits($job['sent'] . '/' . $job['total']) . ')' : '' ?>
                 <?= ($job['reason'] ?? '') === 'destination' ? ' · گروه یا دسترسی ربات تأیید نشد' : '' ?>
                 <?= ($job['reason'] ?? '') === 'space' ? ' · سقف فضای موقت' : '' ?>
                 <?= ($job['reason'] ?? '') === 'capture' ? ' · ضبط کامل نشد' : '' ?>
+                <?= ($job['reason'] ?? '') === 'limit' ? ' · مهلت ضبط بدون تأیید ارسال پایان یافت' : '' ?>
                 <?= isset($job['cleaned']) ? ' · فایل موقت VPS پاک شد' : '' ?></li>
         <?php endforeach; ?></ul><?php endif; ?>
     </section>

@@ -8,6 +8,7 @@ require_once __DIR__ . '/notifications.php';
 
 const CL_SAMPLE_TTL = 11;
 const CL_SAMPLE_INTERVAL = 3;
+const CL_START_SAMPLE_INTERVAL = 1;
 const CL_PULSE_TTL = 12;
 const CL_START_SECONDS = 32;
 const CL_MAX_LESSON_SECONDS = 7200;
@@ -301,7 +302,7 @@ function cl_open_lesson(ClassroomStore $s, array $ctx, array $cfg, array $class,
     $lesson['sample'] = 0;
     $lesson['last_attempt'] = 0;
     $lesson['event_received'] = false;
-    unset($lesson['camera_codec'], $lesson['media_pending'], $lesson['screen'], $lesson['screen_used']);
+    unset($lesson['camera_codec'], $lesson['media_pending'], $lesson['screen'], $lesson['screen_used'], $lesson['start_probe'], $lesson['start_failure']);
     // Record this generation before asking the SFU; a failed reply must not orphan it.
     ($ctx['write_runtime'])('scheduled-v2');
     $s->tx(static function () use ($s, $class, $lesson, $id) {
@@ -312,6 +313,7 @@ function cl_open_lesson(ClassroomStore $s, array $ctx, array $cfg, array $class,
         $lesson['camera_codec'] = cl_camera_codec(cl_create_room($lesson['room'], $cfg['max_participants'], $rpc));
         $s->put('lesson', $id, $lesson);
     } catch (ClassroomError $error) {
+        $lesson['start_failure'] = 'media';
         cl_pause($lesson);
         $s->put('lesson', $id, $lesson);
         throw $error;
@@ -456,24 +458,43 @@ function cl_reconcile(ClassroomStore $s, array $cfg, ?array $class, array $lesso
     }
     $priorPhase = $lesson['phase'];
     if ($lesson['phase'] === 'live' && !cl_lesson_live($lesson, $now)) cl_pause($lesson);
-    if ($lesson['phase'] === 'starting' && !cl_starting($lesson, $now)) cl_pause($lesson);
-    // The last presence sample must not delay the first attempt to close a bell at its deadline.
-    if (!$closingNow && $now - ($lesson['last_attempt'] ?? 0) < CL_SAMPLE_INTERVAL) {
+    $startTimedOut = $lesson['phase'] === 'starting' && !cl_starting($lesson, $now);
+    if ($startTimedOut) {
+        $probe = $lesson['start_probe'] ?? 'presence';
+        $lesson['start_failure'] = $probe === 'callback' && !empty($lesson['event_received']) ? 'presence' : $probe;
+        cl_pause($lesson);
+    }
+    $starting = $lesson['phase'] === 'starting';
+    // A signed, not-yet-admitted start is the only fast path. Steady classes still share one sample per three seconds.
+    $interval = $starting && !empty($lesson['event_received']) ? CL_START_SAMPLE_INTERVAL : CL_SAMPLE_INTERVAL;
+    // Don't throttle the first retirement at a bell deadline or an expired startup.
+    if (!$closingNow && !$startTimedOut && $now - ($lesson['last_attempt'] ?? 0) < $interval) {
         if ($priorPhase !== $lesson['phase']) $s->put('lesson', $lesson['id'], $lesson); // cl_touch already saved the pulse.
         return $lesson;
     }
     if ($lesson['phase'] === 'closing' || ($lesson['phase'] === 'paused' && $lesson['room'] !== null)) {
         return cl_retire_transport($s, $cfg, $lesson, $now, $rpc);
     }
-    if ($lesson['room'] === null) return $lesson;
-    if (empty($lesson['event_received'])) return $lesson;
+    if ($lesson['room'] === null || (!$starting && empty($lesson['event_received']))) return $lesson;
+    // A waiting tab alone shouldn't hit the SFU or contend with the native callback for the class lock.
+    if ($starting && !array_filter($lesson['pulses'], static fn($pulse, $id) => cl_media_identity($id) && !cl_media_identity($id, true)
+        && $pulse['at'] >= $now - CL_PULSE_TTL, ARRAY_FILTER_USE_BOTH)) return $lesson;
     if (cl_room_class($cfg, $lesson['room']) !== $lesson['class_id']) throw new LogicException('Invalid owned room record');
     $lesson['last_attempt'] = $now;
     $peers = [];
     try { $observed = cl_room_presence($lesson, $now, $rpc, $peers); }
     catch (ClassroomError $error) {
+        if ($starting) {
+            // Keep the journaled room during a transient first lookup. No one has been admitted yet.
+            // The normal startup cutoff still retires it; a definitively absent room can retire now.
+            $lesson['start_probe'] = 'media';
+            if ($error->status !== 409) {
+                $s->put('lesson', $lesson['id'], $lesson);
+                throw $error;
+            }
+            $lesson['start_failure'] = 'media';
+        }
         cl_pause($lesson);
-        // A definitive absent room retires immediately; other errors are retried by the next page request.
         if ($error->status === 409) return cl_retire_transport($s, $cfg, $lesson, $now, $rpc, true);
         $s->put('lesson', $lesson['id'], $lesson);
         throw $error;
@@ -485,6 +506,13 @@ function cl_reconcile(ClassroomStore $s, array $cfg, ?array $class, array $lesso
         $account = cl_school_account($s->db, $role, cl_id($pk), $lesson['year']);
         if ($account && cl_can_lesson($lesson, $account)) $staff[$identity] = true;
     }
+    if ($starting && empty($lesson['event_received'])) {
+        // Use actual staff presence only to diagnose missing delivery. It is not a substitute for a signed event.
+        $lesson['start_probe'] = $staff ? 'callback' : 'presence';
+        $s->put('lesson', $lesson['id'], $lesson);
+        return $lesson;
+    }
+    if ($starting) unset($lesson['start_probe']);
     // Only observed, active classmates count in pupil practice; never copy a school's roster into a demo.
     $roster = $test && ($lesson['test_students'] ?? false) !== true ? [] : cl_roster($s->db, $class, $students);
     if (count($observed) !== count($staff) + count($roster)) cl_pause($lesson);

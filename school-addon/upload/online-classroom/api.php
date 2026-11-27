@@ -67,11 +67,12 @@ cl_json_reply(static function (): array {
             $phase = $expired ? 'closing' : ($live ? 'live' : ($lesson['phase'] === 'live' ? 'paused' : $lesson['phase']));
             $allowed = $live && cl_match_transport($lesson, $body) && cl_entered($lesson, $actor, $body['sid'] ?? null, $now);
             $result = ['phase'=>$phase,'ready'=>$ready, 'lesson'=>$lesson['id'], 'epoch'=>cl_epoch($lesson),
-                'callbackMissing'=>$lesson['phase'] === 'paused' && empty($lesson['event_received']),
+                'callbackMissing'=>$phase === 'paused' && ($lesson['start_failure'] ?? null) === 'callback',
                 'period'=>$lesson['period'], 'subject'=>$lesson['subject'], 'slot'=>cl_lesson_choice($lesson), 'bell'=>$lesson['bell'] ?? null, 'admitted'=>$allowed,
                 'startTime'=>isset($lesson['started']) ? cl_tehran_clock($lesson['started']) : null,
                 'joinable'=>$ready && !$expired && cl_joinable($lesson, $actor, $now),
                 'resumable'=>$ready && !$expired && $lesson['phase'] === 'paused' && $lesson['room'] === null];
+            if ($phase === 'paused' && isset($lesson['start_failure'])) $result['startFailure'] = $lesson['start_failure'];
             $result += cl_rec_status($s, $cfg, $lesson, $actor, $allowed && cl_controls_board($lesson, $actor, $now));
             if ($allowed) {
                 $result += ['cameraCodec'=>cl_webcam_codec($cfg, $lesson), 'screen'=>cl_screen_state($cfg, $lesson),

@@ -112,6 +112,7 @@ function cl_room_icon(string $name): string
     <dialog class="quality-dialog" id="record-start-dialog" aria-labelledby="record-start-title" aria-describedby="record-start-help">
         <h2 id="record-start-title">ضبط کلاس</h2>
         <p id="record-start-help">صدای میکروفون‌ها، تصویر دوربین‌ها و صفحهٔ مشترکِ فعال، به همراه تخته و PDF ضبط می‌شود؛ نه چت یا فهرست حاضران. همه نشان ضبط را می‌بینند. ساخت فیلم حین کلاس انجام نمی‌شود. فقط با تأیید دبیر همین زنگ یا مدیر مجاز هنگام بستن کلاس، فیلم به گروه تعیین‌شدهٔ مدرسه ارسال می‌شود.</p>
+        <p id="record-practice-help" hidden>در آزمایش جمعه، ضبط حداکثر دو ساعت و تا پیش از نیمه‌شب تهران مجاز است. برای دریافت فیلم، قبل از پایان مهلت اتاق را ببند و ارسال را تأیید کن؛ در غیر این صورت فیلم ارسال نمی‌شود. آزمایش گزارش حضور و غیاب ندارد.</p>
         <div class="actions"><button type="button" id="record-start-yes">شروع ضبط</button><button type="button" class="secondary" id="record-start-cancel" autofocus>انصراف</button></div>
     </dialog>
     <dialog class="quality-dialog" id="record-close-dialog" aria-labelledby="record-close-title" aria-describedby="record-close-help">

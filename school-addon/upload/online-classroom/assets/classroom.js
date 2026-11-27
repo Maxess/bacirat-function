@@ -13,7 +13,7 @@
             let body;
             if (multipart) body = data;
             else { headers['Content-Type'] = 'application/json'; body = JSON.stringify({action, ...data}); }
-            const priority = ['status','ticket','leave'].includes(action) ? 'high' : 'auto';
+            const priority = ['status','open','ticket','leave'].includes(action) ? 'high' : 'auto';
             const res = await fetch(root.dataset.api, {method:'POST', credentials:'same-origin', cache:'no-store',
                 headers, body, signal:ctl.signal, keepalive, priority});
             const reply = await res.json().catch(() => ({}));
@@ -30,6 +30,8 @@
     const fridaySlot = 'friday-test';
     const boardWire = 1, boardCueTopic = 'baci.board.cue.v1', boardCueLimit = 512;
     const snapshotPeriod = 12000;
+    const confirmationTimeout = 38000; // Last resort if status goes away; the server's startup cutoff remains authoritative.
+    const openTimeout = 75000; // At most the original startup and one fresh transport.
     const isRepeatSlot = value => typeof value === 'string' && /^repeat-[a-f0-9]{32}$/.test(value);
     const staff = root.dataset.moderator === 'yes';
     const roomClass = Number(root.dataset.class);
@@ -60,7 +62,8 @@
             ? 'این مرورگر امکان اشتراک صفحه ندارد. این محدودیت از مرورگر است، نه اجازهٔ کلاس؛ برای اشتراک از یک مرورگر سازگار روی رایانه وارد شو.' : '';
     const attention = window.ClassroomAttention(changeWake);
     let active = null, connecting = false, busy = false, polling = false, needsRefresh = false, permanent = false, stopped = false;
-    let wanted = true, autoStart = staff, optedIntoTest = false, state = {phase:'idle', ready:null}, chatCursor = 0, seconds = {}, admitted = false;
+    let wanted = true, autoStart = staff, optedIntoTest = false, opening = null;
+    let state = {phase:'idle', ready:null}, chatCursor = 0, seconds = {}, admitted = false;
     let pollTimer, flow = 0, retryAt = 0, attempts = 0;
     let statusAt = 0, inkAt = Infinity, aimAt = Infinity, inkRead = 0, inkRetryAt = 0, checkpointAt = Infinity;
     let peopleKey = '', peopleRows = new Map(), speakersKey = '', slotKey = null;
@@ -662,7 +665,7 @@
     function render() {
         const live = hasAccess();
         const phase = state.phase;
-        const connectingNow = connecting || (!!active && !live);
+        const connectingNow = connecting || (!!active && !live) || (wanted && (!!opening || retryAt > performance.now()));
         const recording = state.recording;
         const capture = recording?.notice;
         root.dataset.recording = capture === 'live' ? 'yes' : 'no';
@@ -687,9 +690,9 @@
         if (staff) {
             const slot = el('slot');
             const currentSlot = state.slot || 0;
-            slot.disabled = !!currentSlot || busy;
+            slot.disabled = !!currentSlot || busy || !!opening;
             el('staff-start').hidden = live;
-            el('open').disabled = busy || !!active || connecting || state.ready === null || permanent || phase === 'closing'
+            el('open').disabled = busy || !!active || connecting || !!opening || state.ready === null || permanent || phase === 'closing'
                 || phase === 'reserved' || (!currentSlot && !slot.value) || (phase === 'paused' && !state.resumable);
             const test = (currentSlot || slot.value) === fridaySlot;
             el('open').textContent = test ? 'ورود به آزمایش جمعه' : phase === 'paused' ? 'ادامهٔ زنگ' : currentSlot ? 'پیوستن به زنگ'
@@ -701,12 +704,14 @@
             el('close').disabled = busy || phase === 'closing';
             renderAccessMenu(live);
         } else el('join').hidden = wanted || permanent;
-        put(el('wait-title'), phase === 'paused' ? 'کلاس موقتاً متوقف است' : phase === 'closing' ? 'کلاس در حال پایان است'
-            : connectingNow ? 'در حال تأیید ورود…' : staff ? 'در انتظار شروع زنگ' : 'در انتظار ورود دبیر یا مسئول مدرسه');
+        put(el('wait-title'), phase === 'closing' ? 'کلاس در حال پایان است' : connectingNow ? 'در حال تأیید ورود…'
+            : phase === 'paused' ? 'کلاس موقتاً متوقف است' : staff ? 'در انتظار شروع زنگ' : 'در انتظار ورود دبیر یا مسئول مدرسه');
         put(el('wait-message'), permanent ? 'برای دسترسی دوباره صفحه را از پنل مدرسه باز کن.'
             : phase === 'reserved' ? (staff ? 'اتاق این کلاس در اختیار جلسهٔ دیگری است.' : 'اتاق این کلاس هنوز برای ورود دانش‌آموز باز نیست.')
-            : state.ready === false ? 'ارتباط با سرور رسانه برقرار نیست. دسترسی موقتاً بسته است.'
-            : state.callbackMissing ? 'رویداد اتصال از LiveKit تأیید نشده است. مدیر مدرسه نشانی وب‌هوک در تنظیمات افزونه را بررسی کند.'
+            : connectingNow ? 'برای تأیید اتصال صبر کن؛ نیازی به زدن دوبارهٔ دکمهٔ ورود نیست.'
+            : state.ready === false || state.startFailure === 'media' ? 'ارتباط هاست مدرسه با سرور رسانه تأیید نشد.'
+            : state.callbackMissing ? 'اتصال دبیر به رسانه دیده شد، اما رویداد امضاشدهٔ LiveKit نرسید. مدیر مدرسه دریافت وب‌هوک را بررسی کند.'
+            : state.startFailure === 'presence' ? 'ورود اولیه در مهلت تعیین‌شده تأیید نشد. اتصال دستگاه را بررسی کن.'
             : phase === 'paused' ? 'با خروج آخرین مسئول، تایمر حضور متوقف می‌شود. بعد از بازگشت مسئول و تأیید اتصال، کلاس ادامه پیدا می‌کند.'
             : staff ? bellMessage()
             : !wanted ? 'برای ورود دوباره، «بازگشت به اتاق انتظار» را بزن.'
@@ -815,17 +820,39 @@
             publishDefaults:{audioPreset:{maxBitrate:12000,priority:'high'},dtx:true,red:false,forceStereo:false},
         });
     }
+    const temporaryEntryError = error => !(error instanceof PublicError) || [408,409,429].includes(error.status) || error.status >= 500;
+    const awaitingConfirmation = () => active && !active.confirmed && performance.now() < active.confirmBy;
+    function stopEntry(message) {
+        wanted = false; autoStart = false; optedIntoTest = false; opening = null;
+        if (message) note(message);
+    }
+    function retryEntry(error) {
+        if (!wanted || stopped || permanent) return;
+        if (!temporaryEntryError(error) || ++attempts >= 3) {
+            stopEntry(error instanceof PublicError ? error.message : 'ورود به کلاس پس از چند تلاش تأیید نشد. اتصال را بررسی کن و دوباره وارد شو.');
+            return;
+        }
+        retryAt = performance.now() + 450 * (2 ** (attempts - 1)) + Math.random()*180;
+    }
+    function openSlot(slot, gesture = false) {
+        // The click authorizes this slot only, even if the reply is lost before it identifies a lesson.
+        opening ??= {slot, lesson:state.slot === slot ? state.lesson : null, until:performance.now() + openTimeout, restarted:false};
+        return enter(() => api('open',{slot}), gesture);
+    }
     async function enter(getTicket, gesture = false) {
         if (active || connecting || !wanted || stopped || permanent || !lk || !window.isSecureContext) return;
         const pending = ++flow;
         connecting = true;
+        render();
         const room = makeRoom();
         if (gesture) room.startAudio().catch(() => {});
         let link = null;
         try {
             const ticket = await getTicket();
             if (pending !== flow || !wanted || stopped || permanent) { await room.disconnect(); return; }
-            link = {room, lesson:ticket.lesson, epoch:ticket.epoch, speakers:[], cameraAttempt:0, cameraTrack:null, cameraCapture:null, cameraBusy:false,
+            if (opening) opening.lesson ??= ticket.lesson;
+            link = {room, lesson:ticket.lesson, epoch:ticket.epoch, confirmed:false, confirmBy:performance.now()+confirmationTimeout,
+                speakers:[], cameraAttempt:0, cameraTrack:null, cameraCapture:null, cameraBusy:false,
                 screenAttempt:0, screenTrack:null, screenBusy:false, cueSeen:new Map()};
             active = link;
             flow++; // Ignore status requests made before this transport was installed.
@@ -865,8 +892,10 @@
             });
             const retrying = () => {
                 if (active !== link) return;
-                if (staff) release(link, true); // Stop the staff lease at the first signal-loss event, not just after ICE timeout.
-                else {
+                if (staff) {
+                    if (!link.confirmed && !connecting) retryEntry();
+                    release(link, true); // Stop the staff lease at the first signal-loss event, not just after ICE timeout.
+                } else {
                     const last = scope(link);
                     clearActivity();
                     if (last.sid) api('leave', last, {keepalive:true}).catch(() => {});
@@ -881,24 +910,20 @@
                 if (active !== link) return;
                 const code = Number.isInteger(reason) ? lk.DisconnectReason?.[reason] : '';
                 if (code === 'DUPLICATE_IDENTITY') {
-                    wanted = false;
-                    note('این حساب در دستگاه یا صفحهٔ دیگری وارد شده است. (DUPLICATE_IDENTITY)');
-                } else if (!['ROOM_DELETED','CLIENT_INITIATED'].includes(code)) {
-                    note(`ارتباط رسانه قطع شد. هر زمان کلاس آماده باشد، دوباره وصل می‌شویم. (${code || 'ROOM-DISCONNECTED'})`);
-                }
-                retryAt = Date.now() + 1700 + Math.random()*850;
+                    stopEntry('این حساب در دستگاه یا صفحهٔ دیگری وارد شده است. (DUPLICATE_IDENTITY)');
+                } else if (link.confirmed) {
+                    if (!['ROOM_DELETED','CLIENT_INITIATED'].includes(code)) {
+                        note(`ارتباط رسانه قطع شد. هر زمان کلاس آماده باشد، دوباره وصل می‌شویم. (${code || 'ROOM-DISCONNECTED'})`);
+                    }
+                    retryAt = performance.now() + 1700 + Math.random()*850;
+                } else if (!connecting && code !== 'ROOM_DELETED') retryEntry();
                 release(link, true); refresh();
             });
             await room.connect(ticket.url, ticket.token, {autoSubscribe:false});
-            attempts = 0; retryAt = 0;
         } catch (error) {
-            if (link && active === link) release(link);
+            if (link && active === link) release(link, true);
             else await room.disconnect().catch(() => {});
-            attempts++;
-            retryAt = Date.now() + Math.min(15000, 1600 * (2 ** Math.min(4, attempts - 1))) + Math.random()*850;
-            if (error instanceof PublicError && error.status === 403) { if (gesture) wanted = false; }
-            if (gesture) throw error;
-            if (!(error instanceof PublicError && error.status === 409)) note(error instanceof PublicError ? error.message : 'ورود رسانه ممکن نشد؛ اتصال را بررسی کن. (ROOM-CONNECT)');
+            if (link || pending === flow) retryEntry(error);
         } finally {
             connecting = false;
             render(); refresh();
@@ -929,7 +954,7 @@
         inkAt = inkRead + (view.more ? 85 : (view.moving || view.viewMoving || freshLaser ? 280 : 850)) + Math.random()*(view.more ? 35 : 140);
     }
     async function poll(boardOnly) {
-        if (polling || stopped || permanent) return;
+        if (polling || stopped || permanent || (connecting && !active)) return; // Don't contend with our own open/ticket.
         boardOnly &&= hasAccess() && !document.hidden;
         polling = true;
         if (!boardOnly) needsRefresh = false;
@@ -955,33 +980,52 @@
             }
             state = result;
             syncSlots();
-            if (active && (active.epoch !== state.epoch || active.lesson !== state.lesson || !result.ready
+            if (opening && (state.phase === 'closing' || state.phase === 'reserved'
+                || (state.lesson ? (state.slot !== opening.slot || (opening.lesson && state.lesson !== opening.lesson)) : opening.lesson))) {
+                stopEntry(); // Never follow a different bell or reopen a finished demo/repeat from an old click.
+            }
+            if (opening && state.lesson) opening.lesson ??= state.lesson;
+            if (active && (active.epoch !== state.epoch || active.lesson !== state.lesson || (!result.ready && !awaitingConfirmation())
                 || !['live', ...(staff ? ['starting'] : [])].includes(state.phase))) release(active);
-            if (staff && prior.lesson && state.phase === 'idle') { wanted = false; optedIntoTest = false; }
+            if (staff && prior.lesson && state.phase === 'idle') stopEntry();
             // Repeat choices never auto-open and don't change the ordinary timetable's auto-open rules.
             const regularChoices = (state.schedule?.choices || []).filter(choice => !isRepeatSlot(choice.id));
             // Observe/rejoin one lesson per entry. An old tab never starts the next lesson on its own.
             if (state.lesson || state.phase === 'reserved' || regularChoices.some(choice => choice.id === fridaySlot || choice.manual)
                 || (!state.schedule?.timed && regularChoices.length > 1)) autoStart = false;
             if (active && local.sid && scope().sid === local.sid && connected() && result.admitted === true) {
+                active.confirmed = true;
+                opening = null; attempts = retryAt = 0;
                 admitted = true; seconds = result.seconds || {};
                 render();
                 attention.snapshot(result.profiles, pushChat(result.chat), result.chatMore, active.room.localParticipant.identity);
                 receiveBoard(result.board, scope(), requestedAt);
                 needsRefresh ||= !!result.chatMore;
-            } else clearActivity();
-            if (!active && !connecting && wanted && state.ready && Date.now() >= retryAt
+            } else {
+                clearActivity();
+                if (active && !active.confirmed && !awaitingConfirmation()) {
+                    release(active, true);
+                    retryEntry();
+                }
+            }
+            if (opening && performance.now() >= opening.until) stopEntry('ورود در زمان مقرر تأیید نشد؛ وضعیت اتصال را بررسی کن.');
+            if (!active && !connecting && wanted && state.ready && performance.now() >= retryAt
                 && (!staff || state.slot !== fridaySlot || optedIntoTest)) {
                 if (state.joinable) {
                     const info = {lesson:state.lesson,epoch:state.epoch};
                     enter(() => api('ticket',info));
-                } else if (staff && state.resumable && state.slot && !state.callbackMissing) {
-                    const slot = state.slot;
-                    enter(() => api('open',{slot}));
-                } else if (autoStart && state.phase === 'idle' && !document.hidden && state.schedule?.date === root.dataset.bellDate
+                } else if (staff && state.resumable && state.slot) {
+                    // Try one fresh generation after an unconfirmed start, never after a lasting error.
+                    if (!state.startFailure && !state.callbackMissing) openSlot(state.slot);
+                    else if (opening && !opening.restarted) {
+                        opening.restarted = true;
+                        openSlot(state.slot);
+                    } else if (opening) stopEntry();
+                } else if (opening && state.phase === 'idle') openSlot(opening.slot);
+                else if (autoStart && state.phase === 'idle' && !document.hidden && state.schedule?.date === root.dataset.bellDate
                     && regularChoices.length === 1) {
                     autoStart = false;
-                    enter(() => api('open',{slot:regularChoices[0].id}));
+                    openSlot(regularChoices[0].id);
                 }
             }
         } catch (error) {
@@ -992,27 +1036,33 @@
                 needsRefresh = true;
                 return;
             }
+            if (wanted && temporaryEntryError(error) && (!active || !active.confirmed)
+                && (awaitingConfirmation() || (!active && opening && performance.now() < opening.until))) return;
+            if (opening) stopEntry();
+            if (active && !active.confirmed && temporaryEntryError(error)) retryEntry(error);
             release(active, true);
             clearActivity();
             state = {...state, ready:false, phase:state.lesson ? 'paused' : 'idle', resumable:false};
             permanent = error instanceof PublicError && [401,403,404].includes(error.status);
-            if (permanent) wanted = false;
+            if (permanent) stopEntry();
             note(error instanceof PublicError ? error.message : 'ارتباط با سایت قطع است؛ تا بازگشت اتصال، کلاس در انتظار می‌ماند.');
         } finally {
             polling = false;
             if (!boardOnly) {
                 // Keep the supervisor pulse and first admission quick. Steady pupils can
                 // poll less often, still comfortably inside the unchanged 12 s pulse TTL.
-                const quick = (active || connecting) && (staff || !hasAccess());
-                statusAt = performance.now() + (quick ? 1900 : hasAccess() ? 3500 : 4200)
-                    + Math.random()*(quick ? 270 : 900);
+                const now = performance.now();
+                const pending = awaitingConfirmation() || !!opening;
+                const quick = (active || connecting || (wanted && state.phase === 'starting')) && (staff || !hasAccess());
+                statusAt = wanted && !active && !connecting && retryAt > now ? Math.max(now+60,retryAt)
+                    : now + (pending ? 760 : quick ? 1900 : hasAccess() ? 3500 : 4200) + Math.random()*(pending ? 190 : quick ? 270 : 900);
                 render();
             }
             schedulePoll();
         }
     }
     function schedulePoll() {
-        if (stopped || permanent || polling) return;
+        if (stopped || permanent || polling || (connecting && !active)) return;
         const now = performance.now();
         const heartbeat = needsRefresh ? 30 : Math.max(0,statusAt-now);
         const requested = Math.min(inkAt, Math.max(aimAt,inkRead+260));
@@ -1337,8 +1387,9 @@
             optedIntoTest = slot === fridaySlot;
             wanted = true;
             autoStart = false;
-            retryAt = 0;
-            await enter(() => api('open',{slot}), true);
+            attempts = retryAt = 0;
+            note();
+            await openSlot(slot, true);
         }));
         el('toggle-access').addEventListener('click', () => setAccessMenu(el('access-menu').hidden));
         document.addEventListener('click', event => {
@@ -1355,13 +1406,17 @@
             recordButton.addEventListener('click', () => {
                 if (!hasAccess() || busy || !state.recording?.start) return;
                 setAccessMenu(false);
+                const demo = state.slot === fridaySlot;
+                const help = el('record-practice-help');
+                if (help) help.hidden = !demo;
+                recordStart.setAttribute('aria-describedby', `record-start-help${demo ? ' record-practice-help' : ''}`);
                 recordStart.showModal();
             });
             el('record-start-cancel').addEventListener('click', () => recordStart.close());
             recordStart.addEventListener('close', () => el('toggle-access').focus());
             el('record-start-yes').addEventListener('click', () => {
                 recordStart.close();
-                run(async () => {
+                return run(async () => {
                     if (!hasAccess() || !state.recording?.start) return;
                     const local = scope();
                     const result = await api('start-recording',local);
@@ -1375,24 +1430,26 @@
                 el(id).addEventListener('click', () => {
                     const intent = closeIntent;
                     recordClose.close();
-                    if (intent && state.lesson === intent.lesson) finishClass(intent.lesson,false,{recording:intent.recording,sendRecording});
+                    if (intent && state.lesson === intent.lesson) return finishClass(intent.lesson,intent.test,{recording:intent.recording,sendRecording});
                 });
             }
         }
         function finishClass(lesson, test, choice = {}) {
-            run(async () => {
+            return run(async () => {
                 setAccessMenu(false, true);
-                const wasWanted = wanted;
-                wanted = false; optedIntoTest = false; flow++;
+                const prior = {wanted,optedIntoTest,opening};
+                wanted = false; optedIntoTest = false; opening = null; flow++;
                 let reply;
                 try { reply = await api('close',{lesson,...choice}); }
-                catch (error) { wanted = wasWanted; refresh(); throw error; }
+                catch (error) { ({wanted,optedIntoTest,opening} = prior); refresh(); throw error; }
                 release(active,true);
                 state = {phase:'idle', ready:null};
                 syncSlots();
-                note(test ? 'اتاق آزمایشی بسته شد؛ گزارشی ثبت نشد.' : reply.recording === 'queued'
-                    ? 'زنگ پایان یافت؛ ساخت و ارسال فیلم به گروه کلاس در صف قرار گرفت.' : reply.recording === 'discarded'
-                    ? 'زنگ پایان یافت؛ فیلم ارسال نمی‌شود و نسخهٔ موقت حذف خواهد شد.' : 'زنگ پایان یافت؛ گزارش حضور در پنل ثبت شد.');
+                const base = test ? 'اتاق آزمایشی بسته شد؛ گزارشی ثبت نشد.' : 'زنگ پایان یافت.';
+                const completion = reply.recording === 'queued' ? 'ساخت و ارسال فیلم به گروه کلاس در صف قرار گرفت.'
+                    : reply.recording === 'discarded' ? 'فیلم ارسال نمی‌شود و نسخهٔ موقت حذف خواهد شد.'
+                    : test ? '' : 'گزارش حضور در پنل ثبت شد.';
+                note(completion ? `${base} ${completion}` : base);
                 refresh();
             });
         }
@@ -1401,7 +1458,7 @@
             const test = state.slot === fridaySlot;
             if (!lesson || busy) return;
             if (recording?.confirm && recordClose) {
-                closeIntent = {lesson,recording:recording.id};
+                closeIntent = {lesson,test,recording:recording.id};
                 put(el('record-close-help'), recording.canSend
                     ? `مقصد: ${recording.messenger} — ${recording.group}. ساخت فیلم زودتر از ${persian.format(recording.delayMinutes ?? 180)} دقیقه پس از پایان کلاس شروع نمی‌شود و ممکن است در صف بماند. «خیر» کلاس را بدون ساخت فیلم می‌بندد.`
                     : 'فقط دبیر همین زنگ یا مدیر مجاز می‌تواند ارسال فیلم را تأیید کند. با «خیر» کلاس بدون ارسال بسته می‌شود.');
@@ -1412,7 +1469,7 @@
                 finishClass(lesson,test);
             }
         });
-    } else el('join').addEventListener('click', () => { wanted = true; retryAt = 0; note(); render(); refresh(); });
+    } else el('join').addEventListener('click', () => { wanted = true; attempts = retryAt = 0; note(); render(); refresh(); });
     window.addEventListener('pagehide', () => { stopped = true; clearTimeout(pollTimer); release(active,true); });
     window.addEventListener('pageshow', event => { if (event.persisted) { stopped = false; refresh(); } });
     document.addEventListener('visibilitychange', () => { render(); if (!document.hidden) refresh(); });

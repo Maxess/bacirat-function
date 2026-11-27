@@ -16,10 +16,14 @@ HOST = ROOT / 'plugin-manager'
 SRC = ROOT / 'school-addon/upload/online-classroom'
 LEGACY = ARTIFACTS / 'school-classroom-pilot-v0.1.0.zip'
 LEGACY_SHA = 'bebc35a02f57346880373a034ee493b757a8017a12812a133ab957358d9de161'
-VERSION = '0.4.24'
-MANAGER_VERSION = '0.1.30'  # Published with the unchanged .24 site bundle.
+VERSION = '0.4.25'
+MANAGER_VERSION = '0.1.32'
+# The pairing companion in the published VPS archives stays at 0.1.31 / 0.4.24.
+PAIRING_CLASSROOM_VERSION = '0.4.24'
 PAIRING_MANAGER_VERSION = '0.1.31'
-PUBLISHED_MANAGER_SHA = '385e475accd7583efceb9d1decd509c64d126835a3531dcb9c5bded32e2c13bc'
+PAIRING_MANAGER_SHA = 'bc7f98340b56b23cdf540a9175b63a5d8ab070ed551cff680b2f6439842a84b0'
+FULL_MANAGER_BASE = 'baci-plugin-manager-v0.1.30.zip'
+FULL_MANAGER_BASE_SHA = '4d51ff9cdca5f71b7348c36ba08c2c8cab787a496e3583c2f97ddd33c76b8982'
 # Reuse byte-verified SDK/PDF assets; ship the same board implementation as the site.
 RECORDER_BASE = 'baci-classroom-recorder-v0.4.21.zip'
 RECORDER_BASE_SHA = 'ca64a9057dfbb758502f5ca89850fb9256f4a4c30266a7f8dd09864d08612cfe'
@@ -132,7 +136,7 @@ def plugin_entries(pdf_archive):
         'report_menus': {role: 'حضور و غیاب کلاس مجازی' for role in ('teacher', 'admin', 'deputy')},
         'routes': {'page': 'index.php', 'api': 'api.php', 'content': 'content.php', 'events': 'events.php', 'job': 'job.php', 'recording': 'recording-api.php'},
         'store': True, 'pdf_resources': 'assets/pdf-resources.zip',
-        'preserve_settings_from': ['0.2.0', '0.2.1', '0.2.2', '0.2.3', '0.3.0', '0.4.0', '0.4.1', '0.4.2', '0.4.3', '0.4.4', '0.4.5', '0.4.6', '0.4.7', '0.4.8', '0.4.9', '0.4.10', '0.4.11', '0.4.12', '0.4.13', '0.4.14', '0.4.15', '0.4.16', '0.4.17', '0.4.18', '0.4.19', '0.4.20', '0.4.21', '0.4.22', '0.4.23'],
+        'preserve_settings_from': ['0.2.0', '0.2.1', '0.2.2', '0.2.3', '0.3.0', '0.4.0', '0.4.1', '0.4.2', '0.4.3', '0.4.4', '0.4.5', '0.4.6', '0.4.7', '0.4.8', '0.4.9', '0.4.10', '0.4.11', '0.4.12', '0.4.13', '0.4.14', '0.4.15', '0.4.16', '0.4.17', '0.4.18', '0.4.19', '0.4.20', '0.4.21', '0.4.22', '0.4.23', '0.4.24'],
         'hooks': {'deactivate': 'deactivate.php'},
         'settings': [
             {'key': 'signal_url', 'type': 'wss', 'label': 'آدرس رسانه (wss://)'},
@@ -247,29 +251,48 @@ def recorder_release(output_dir, native_build):
     return path
 
 
+def checksums(items):
+    return ''.join(f'{hashlib.sha256(data).hexdigest()}  {name}\n' for name, data in sorted(items)).encode('ascii')
+
+
+def verified_release(name, digest):
+    raw = (ARTIFACTS / name).read_bytes()
+    if hashlib.sha256(raw).hexdigest() != digest:
+        raise ValueError(f'Expected the unchanged published archive: {name}')
+    return raw
+
+
 def pairing_manager(output_dir):
-    gateway = 'plugins/school-plugins.php'
-    previous = ARTIFACTS / f'baci-plugin-manager-update-v{MANAGER_VERSION}.zip'
-    if hashlib.sha256(previous.read_bytes()).hexdigest() != PUBLISHED_MANAGER_SHA:
-        raise ValueError('Expected the exact previously reviewed Manager updater')
-    with ZipFile(previous) as archive:
-        files = {name: archive.read(name) for name in archive.namelist()}
-    files[gateway] = (HOST / gateway).read_bytes()
-    if f"const MPM_VERSION = '{PAIRING_MANAGER_VERSION}';".encode() not in files[gateway]:
-        raise ValueError('Pairing Manager source and package versions differ')
-    classroom = f'school-classroom-plugin-v{VERSION}.zip'
-    with ZipFile(ARTIFACTS / classroom) as archive:
-        pin = hashlib.sha256(archive.read('plugin.json')).hexdigest()
-        if f"'{VERSION}' => '{pin}'".encode() not in files[gateway]:
-            raise ValueError('Pairing Manager must trust the published Classroom ZIP')
-    output_dir.mkdir(parents=True, exist_ok=True)
     upgrade = f'baci-plugin-manager-update-v{PAIRING_MANAGER_VERSION}.zip'
-    write_zip(output_dir / upgrade, files)
-    companion = {upgrade: (output_dir / upgrade).read_bytes(), classroom: (ARTIFACTS / classroom).read_bytes(),
+    updater = verified_release(upgrade, PAIRING_MANAGER_SHA)
+    classroom = f'school-classroom-plugin-v{PAIRING_CLASSROOM_VERSION}.zip'
+    plugin = (ARTIFACTS / classroom).read_bytes()
+    with ZipFile(BytesIO(updater)) as manager, ZipFile(BytesIO(plugin)) as archive:
+        pin = hashlib.sha256(archive.read('plugin.json')).hexdigest()
+        if f"'{PAIRING_CLASSROOM_VERSION}' => '{pin}'".encode() not in manager.read('plugins/school-plugins.php'):
+            raise ValueError('Frozen pairing manager must trust the published classroom ZIP')
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / upgrade).write_bytes(updater)
+    companion = {upgrade: updater, classroom: plugin,
                  'START-HERE-fa.txt': (ROOT / 'server/offline/SITE-PAIRING-fa.txt').read_bytes()}
-    companion['SHA256SUMS.txt'] = ''.join(f'{hashlib.sha256(data).hexdigest()}  {name}\n'
-                                        for name, data in sorted(companion.items())).encode('ascii')
-    write_zip(output_dir / f'baci-classroom-site-pairing-v{PAIRING_MANAGER_VERSION}.zip', companion)
+    write_zip(output_dir / f'baci-classroom-site-pairing-v{PAIRING_MANAGER_VERSION}.zip',
+              companion | {'SHA256SUMS.txt': checksums(companion.items())})
+
+
+def site_managers(output_dir, gateway):
+    if f"const MPM_VERSION = '{MANAGER_VERSION}';".encode() not in gateway:
+        raise ValueError('Site Manager source and package versions differ')
+    archives = (
+        (f'baci-plugin-manager-update-v{PAIRING_MANAGER_VERSION}.zip', PAIRING_MANAGER_SHA, 'baci-plugin-manager-update'),
+        (FULL_MANAGER_BASE, FULL_MANAGER_BASE_SHA, 'baci-plugin-manager'),
+    )
+    for base, digest, stem in archives:
+        with ZipFile(BytesIO(verified_release(base, digest))) as archive:
+            entries = {name: archive.read(name) for name in archive.namelist()}
+        entries['plugins/school-plugins.php'] = gateway
+        if stem == 'baci-plugin-manager':
+            entries['README-fa.md'] = (HOST / 'README-fa.md').read_bytes()
+        write_zip(output_dir / f'{stem}-v{MANAGER_VERSION}.zip', entries)
 
 
 def main():
@@ -279,7 +302,7 @@ def main():
     mode.add_argument('--recorder-only', action='store_true', help='rebuild the unchanged standalone VPS release')
     mode.add_argument('--renderer-candidate', action='store_true', help='build an offline test ZIP, not a production upgrade')
     mode.add_argument('--renderer-repair', action='store_true', help='rebuild the pinned renderer-only r1 repair ZIP')
-    mode.add_argument('--pairing-manager', action='store_true', help='build Manager with the VPS pairing form from the frozen .24 site release')
+    mode.add_argument('--pairing-manager', action='store_true', help='reproduce the frozen 0.1.31 / 0.4.24 VPS companion')
     parser.add_argument('--approve-reviewed-manifest', action='store_true', help='replace the trusted manifest pin after reviewing the payload')
     parser.add_argument('--pdf-archive', type=Path, help='use a local copy of the same pinned PDF.js npm archive')
     parser.add_argument('--native-build', type=Path, help='output of scripts/build-recorder-native.py (Linux x86-64)')
@@ -321,19 +344,13 @@ def main():
     upgrade = f'baci-plugin-manager-update-v{MANAGER_VERSION}.zip'
     full_manager = f'baci-plugin-manager-v{MANAGER_VERSION}.zip'
     write_zip(opts.output_dir / classroom, entries)
-    for name in (upgrade, full_manager):
-        frozen = (ARTIFACTS / name).read_bytes()
-        if name == upgrade and hashlib.sha256(frozen).hexdigest() != PUBLISHED_MANAGER_SHA:
-            raise ValueError('Previously published Manager updater changed')
-        (opts.output_dir / name).write_bytes(frozen)
+    site_managers(opts.output_dir, code.encode('utf-8'))
     # This site-only update must not carry a VPS installer or payload. Existing
     # Recorder 0.4.23 / Renderer r1 services keep the same HTTP protocol and files.
     outer = f'baci-classroom-site-upgrade-v{VERSION}.zip'
     site_names = (upgrade, classroom)
     bundle = {name: (opts.output_dir / name).read_bytes() for name in site_names}
     bundle['START-HERE-fa.txt'] = (ROOT / f'docs/baci-classroom-site-v{VERSION}.fa.txt').read_bytes()
-    def checksums(items):
-        return ''.join(f'{hashlib.sha256(data).hexdigest()}  {name}\n' for name, data in sorted(items)).encode('ascii')
     write_zip(opts.output_dir / outer, bundle | {'SHA256SUMS.txt': checksums(bundle.items())})
     (opts.output_dir / f'SHA256SUMS-v{VERSION}.txt').write_bytes(checksums(
         (name, (opts.output_dir / name).read_bytes()) for name in (*site_names, full_manager, outer)))

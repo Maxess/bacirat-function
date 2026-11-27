@@ -28,9 +28,11 @@ class Element {
 function fixture(staff, autoSlot = 0) {
     const elements = Object.fromEntries(['classroom','status','status-dot','notice','people','live-panel','waiting','wait-title','wait-message',
         'camera','screen-toggle','camera-strip','camera-preview','camera-preview-video','camera-preview-name','screen-panel','screen-video','screen-label','audio-tracks','chat-log','chat-form','chat-text','leave','microphone','enable-audio','people-count',
-        'toggle-people','toggle-chat','people-panel','chat-panel','chat-empty','lesson-start','lesson-start-time','speaker-strip','speakers',
+        'toggle-people','toggle-chat','people-panel','chat-panel','chat-empty','lesson-start','lesson-start-time','speaker-strip','speakers','recording-status',
         ...(staff ? ['slot','open','close','close-label','staff-start','toggle-access','room-permissions','access-menu','access-features','access-camera','camera-unavailable','pupil-screen-hint','permission-icons',
             'quality-open','quality-dialog','quality-form','quality-message','quality-save','quality-cancel',
+            'record-start','record-start-dialog','record-start-yes','record-start-cancel',
+            'record-close-dialog','record-close-help','record-close-yes','record-close-no','record-close-cancel',
             ...['teacherCamera','studentCamera','teacherScreen','studentScreen'].map(k=>`quality-${k}`),
             ...['mic','camera','board'].flatMap(f=>[`all-${f}-give`,`all-${f}-cut`])] : ['join'])].map(id => [id,new Element(id)]));
     elements['speaker-strip'].hidden = elements.notice.hidden = true;
@@ -87,7 +89,11 @@ function fixture(staff, autoSlot = 0) {
             this.remoteParticipants=new Map((staff?['student-1','student-2','admin-1']:['teacher-1','student-2']).map(n=>[n,person(n)]));
             this.canPlaybackAudio=true;
         }
-        async connect(url,token,opts) { this.connectOptions=opts; this.state='connected'; this.emit('ConnectionStateChanged'); }
+        async connect(url,token,opts) {
+            this.connectOptions=opts; this.state='connecting';
+            await srv.onConnect?.();
+            this.state='connected'; this.emit('ConnectionStateChanged');
+        }
         async disconnect() { this.state='disconnected'; this.emit('Disconnected',1); }
         async startAudio() {}
     }
@@ -149,11 +155,15 @@ function fixture(staff, autoSlot = 0) {
         async fetch(url,opt){
             assert.equal(url,'/fixture'); assert.equal(opt.headers['X-Classroom-CSRF'],'session');
             const input=JSON.parse(opt.body); assert.equal(input.class,22); requests.push(input);
+            const fault = srv.fault?.(input);
+            if (fault) return {ok:false,status:fault,json:async()=>({ok:false,message:'fixture connection error'})};
             let reply={ok:true}, status=200;
             if(input.action==='status'){
                 if (srv.beforeStatus) await srv.beforeStatus();
                 const phased = ['idle','reserved'].includes(srv.phase) ? {phase:srv.phase} : {phase:srv.phase,slot:srv.slot ?? 11, lesson:srv.lesson,epoch:srv.epoch,resumable:srv.resumable,startTime:srv.startTime ?? null,subject:'ریاضی',period:'زنگ یک'};
                 reply={...reply,ready:srv.ready,...phased,joinable:srv.phase==='live'||(staff&&srv.phase==='starting'&&srv.staffCanJoin)};
+                if (srv.startFailure) Object.assign(reply,{startFailure:srv.startFailure,callbackMissing:srv.startFailure==='callback'});
+                if (srv.recording) reply.recording=srv.recording;
                 if (staff && srv.phase==='idle') reply.schedule=srv.schedule;
                 if (!staff && srv.phase==='idle' && srv.practiceAvailable) reply.practiceAvailable=true;
                 if(input.sid && srv.phase==='live' && input.epoch===srv.epoch) {
@@ -205,7 +215,12 @@ function fixture(staff, autoSlot = 0) {
                 else srv.screen=null;
                 change(p.identity,{canPublish:!!src.length,canPublishSources:src});
                 reply.screen=srv.screen;
+            } else if (input.action==='start-recording') {
+                srv.recording={id:'fixture-recording',notice:'preparing',confirm:true,canSend:true,group:'گروه کلاس',messenger:'بله',delayMinutes:60};
+                reply.recording=srv.recording;
             } else if(input.action==='close') {
+                if (typeof input.sendRecording==='boolean') reply.recording=input.sendRecording ? 'queued' : 'discarded';
+                srv.recording=null;
                 srv.phase='idle'; srv.schedule={...srv.schedule, choices:srv.schedule.choices.filter(n=>n.id!==11)};
             }
             return {ok:status===200,status,json:async()=>reply};
@@ -434,6 +449,101 @@ test('a waiting tab left open overnight does not auto-start the following day', 
 });
 
 
+test('the first staff click retries a temporary open failure with the same selected bell', async()=>{
+    const f=fixture(true);
+    await f.status();
+    f.elements.slot.value='12'; f.elements.slot.handlers.change(); f.srv.slot=12;
+    let remaining=1;
+    f.srv.fault=input=>input.action==='open' && remaining-- > 0 ? 502 : 0;
+    f.srv.onConnect=()=>{ f.srv.phase='live'; };
+    await f.elements.open.click();
+    await f.advance(2200);
+    assert.deepEqual(f.requests.filter(r=>r.action==='open').map(r=>r.slot), [12,12]);
+    assert.equal(f.elements['live-panel'].hidden,false);
+    assert.equal(f.elements.notice.textContent,'');
+});
+
+test('a lost open response reuses the room and a transient confirmation error cannot drop the first link', async()=>{
+    const f=fixture(true);
+    f.srv.slot=11;
+    await f.status();
+    f.elements.slot.value='11'; f.elements.slot.handlers.change();
+    let firstPulse=true;
+    f.srv.fault=input=>{
+        if (input.action==='open') { f.srv.phase='starting'; f.srv.staffCanJoin=true; return 503; }
+        if (input.action==='status' && input.sid && firstPulse) { firstPulse=false; return 409; }
+    };
+    f.srv.onConnect=()=>{ f.srv.phase='live'; };
+    await f.elements.open.click();
+    await f.advance(2600);
+    assert.deepEqual(f.requests.filter(r=>['open','ticket','leave'].includes(r.action)).map(r=>r.action), ['open','ticket']);
+    assert.equal(f.elements['live-panel'].hidden,false);
+    assert.equal(f.elements.notice.textContent,'');
+});
+
+test('one pupil entry survives transient ticket and first pulse errors but an admitted pupil still fails closed', async()=>{
+    const f=fixture(false);
+    f.srv.phase='live';
+    let badTicket=true, badPulse=true;
+    f.srv.fault=input=>{
+        if (input.action==='ticket' && badTicket) { badTicket=false; return 502; }
+        if (input.action==='status' && input.sid && badPulse) { badPulse=false; return 503; }
+    };
+    await f.advance(3250);
+    assert.equal(f.requests.filter(r=>r.action==='ticket').length,2);
+    assert.equal(f.requests.filter(r=>r.action==='leave').length,0);
+    assert.equal(f.elements['live-panel'].hidden,false);
+    f.srv.fault=input=>input.action==='status' ? 503 : 0;
+    await f.status();
+    assert.equal(f.elements['live-panel'].hidden,true);
+    assert.equal(f.room.state,'disconnected');
+});
+
+test('the first signal failure reuses the same lesson and waits for authoritative admission', async()=>{
+    const f=fixture(true,'friday-test'); f.srv.slot='friday-test'; f.srv.staffCanJoin=true;
+    let connects=0;
+    f.srv.onConnect=()=>{ if (++connects===1) throw Error('temporary signaling failure'); };
+    await f.status(); await f.elements.open.click();
+    await f.advance(1500);
+    assert.equal(f.requests.filter(r=>r.action==='open').length,1);
+    assert.equal(f.requests.filter(r=>r.action==='ticket').length,1);
+    assert.equal(f.elements['live-panel'].hidden,true, 'WebRTC connection by itself is not admission');
+    assert.match(f.elements['wait-message'].textContent,/نیازی به زدن دوباره/);
+    f.srv.phase='live'; await f.status();
+    assert.equal(f.elements['live-panel'].hidden,false);
+});
+
+test('an unconfirmed startup gets one fresh generation, then shows the actual callback warning', async()=>{
+    const f=fixture(true,'friday-test'); f.srv.slot='friday-test'; f.srv.staffCanJoin=true;
+    let opens=0;
+    f.srv.fault=input=>{
+        if (input.action==='open') { f.srv.epoch=`epoch-${++opens}`; f.srv.startFailure=null; }
+    };
+    await f.status(); await f.elements.open.click(); await f.status();
+    for (let i=0;i<2;i++) {
+        f.srv.phase='paused'; f.srv.resumable=true; f.srv.startFailure='callback'; f.srv.epoch=null;
+        await f.status();
+    }
+    await f.advance(4500);
+    assert.deepEqual(f.requests.filter(r=>r.action==='open').map(r=>r.slot),['friday-test','friday-test']);
+    assert.equal(f.elements['live-panel'].hidden,true);
+    assert.match(f.elements['wait-message'].textContent,/رویداد امضاشدهٔ LiveKit نرسید/);
+    assert.equal(f.elements.open.disabled,false);
+});
+
+test('entry retries are bounded and a refused action is not retried', async()=>{
+    for (const [failure,expected] of [[502,3],[403,1]]) {
+        const f=fixture(true);
+        await f.status(); f.elements.slot.value='12'; f.elements.slot.handlers.change();
+        f.srv.fault=input=>input.action==='open' ? failure : 0;
+        await f.elements.open.click();
+        await f.advance(20000);
+        assert.equal(f.requests.filter(r=>r.action==='open').length,expected);
+        assert.equal(f.elements['live-panel'].hidden,true);
+        assert.equal(f.elements.open.disabled,false, 'manual entry remains available after the bounded recovery');
+    }
+});
+
 test('Friday test requires a click on both idle and running rooms and has no report message', async()=>{
     const slot='friday-test';
     const f=fixture(true,slot);
@@ -458,6 +568,33 @@ test('Friday test requires a click on both idle and running rooms and has no rep
     assert.equal(arriving.requests.find(r=>r.action==='open').slot,slot);
 });
 
+
+test('Friday recording is explicit and preserves the no-attendance close message for yes and no', async()=>{
+    for (const send of [true,false]) {
+        const f=fixture(true,'friday-test');
+        f.srv.slot='friday-test'; f.srv.recording={start:true};
+        f.srv.onConnect=()=>{ f.srv.phase='live'; };
+        await f.status();
+        await f.elements.open.click(); await f.status();
+        await f.elements['toggle-access'].click();
+        await f.elements['record-start'].click();
+        assert.equal(f.elements['record-start-dialog'].open,true);
+        assert.equal(f.requests.filter(r=>r.action==='start-recording').length,0);
+        await f.elements['record-start-yes'].click(); await f.status();
+        assert.equal(f.requests.find(r=>r.action==='start-recording').sid,'PA_teacher-1');
+        assert.match(f.elements['recording-status'].textContent,/در حال آماده‌سازی/);
+        f.srv.recording.notice='live'; await f.status();
+        assert.equal(f.elements.classroom.dataset.recording,'yes');
+        await f.elements.close.click();
+        assert.equal(f.elements['record-close-dialog'].open,true);
+        assert.match(f.elements['record-close-help'].textContent,/گروه کلاس/);
+        await f.elements[send?'record-close-yes':'record-close-no'].click();
+        await f.advance(150);
+        assert.deepEqual(f.requests.find(r=>r.action==='close'),{action:'close',class:22,lesson:'lesson-11',recording:'fixture-recording',sendRecording:send});
+        assert.match(f.elements.notice.textContent,/آزمایشی.*گزارشی ثبت نشد/);
+        assert.match(f.elements.notice.textContent,send ? /در صف/ : /ارسال نمی‌شود/);
+    }
+});
 
 test('opted-in pupil waits for the teacher, sees a server-timed demo, and returns to waiting without adding time', async()=>{
     const f = fixture(false);

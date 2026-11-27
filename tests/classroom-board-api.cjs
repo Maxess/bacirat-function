@@ -2,13 +2,14 @@
 // containing node_modules/@php-wasm/{node,universal}; no external site or SFU is used.
 const assert = require('node:assert/strict');
 const {execFileSync} = require('node:child_process');
+const {createHash,createHmac} = require('node:crypto');
 const {readFileSync} = require('node:fs');
 const {createRequire} = require('node:module');
 const {join, resolve} = require('node:path');
 const test = require('node:test');
 const {twoPageBoardPDF} = require('./fixtures/classroom-board-docs.cjs');
 
-const {MPM_TEST_PHP_WASM:runtime, MPM_TEST_CLASSROOM_ZIP:archive=join(__dirname,'../artifacts/school-classroom-plugin-v0.4.24.zip')} = process.env;
+const {MPM_TEST_PHP_WASM:runtime, MPM_TEST_CLASSROOM_ZIP:archive=join(__dirname,'../artifacts/school-classroom-plugin-v0.4.25.zip')} = process.env;
 
 test('packaged API restores board controls for the admitted manager in normal and Friday lessons', {skip:!runtime,timeout:25000}, async t=>{
     const load = createRequire(resolve(runtime,'package.json'));
@@ -65,10 +66,9 @@ test('packaged API restores board controls for the admitted manager in normal an
         assert.equal(manager.admitted,true);
         assert.equal(manager.board.navigate,true,'the admitted manager sees the restored controls');
         assert.equal(manager.wakeControl,false,'presenting does not confer assigned-teacher privileges');
-        if (demo) assert.equal(manager.recording,null);
-        else assert.equal(manager.recording.start,true);
+        assert.equal(manager.recording.start,true);
         await api('manager','set-wake',{mode:'system'},403);
-        if (demo) await api('manager','start-recording',{},403);
+        if (demo) await api('manager','start-recording',{},409); // No recording group until configured.
         await api('unauthorized','board-sync',{},403);
         await api('deputy','board-sync',{view:crop},403);
         await api('manager','board-sync',{sid:'PA_Stale',view:crop},409);
@@ -110,6 +110,43 @@ test('packaged API restores board controls for the admitted manager in normal an
         if (demo) {
             assert.equal((await api('manager','board-sync')).board.navigate,true);
             assert.equal((await api('teacher','board-sync')).board.navigate,undefined);
+            const room = `test-${'a'.repeat(20)}-v4-c22-${epoch}`;
+            const event = Buffer.from(JSON.stringify({event:'participant_joined', room:{name:room}}));
+            const part = value=>Buffer.from(JSON.stringify(value)).toString('base64url');
+            const payload = `${part({alg:'HS256',typ:'JWT'})}.${part({iss:'k'.repeat(16),exp:now/1000+300,sha256:createHash('sha256').update(event).digest('base64')})}`;
+            const signed = `${payload}.${createHmac('sha256','s'.repeat(48)).update(payload).digest('base64url')}`;
+            assert.match((await reply('pupil','events',{method:'GET'},405,'webhook GET')).json.message,/POST/);
+            const callback = {method:'POST',headers:{'Content-Type':'application/webhook+json',Authorization:signed},body:event};
+            await reply('pupil','events',{...callback,body:Buffer.concat([event,Buffer.from(' ')])},403,'modified native event');
+            await reply('pupil','events',callback,200,'signed POST');
+
+            await seed('record-ready');
+            const worker = '9'.repeat(32);
+            const recorder = async (action,data,expected=200) => (await reply('pupil','recording-api',{
+                method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${'r'.repeat(48)}`},
+                body:Buffer.from(JSON.stringify({action,protocol:2,worker,...data})),
+            },expected,action)).json;
+            await api('manager','start-recording',{},503); // Link alone doesn't prove worker readiness.
+            await recorder('plan',{available:true});
+            await api('pupil','start-recording',{},403);
+            await api('deputy','start-recording',{},403);
+            const started = (await api('manager','start-recording')).recording;
+            assert.equal(started.notice,'preparing');
+            assert.deepEqual((await api('pupil','status')).recording,{notice:'preparing'});
+            assert.equal((await recorder('poll',{id:lesson})).command,'hold');
+            now += 5000;
+            await seed('teacher'); // Fresh fixture presence; the worker still enforces the real lease/scope.
+            const permit = await recorder('poll',{id:lesson});
+            assert.equal(permit.command,'record');
+            assert.equal(permit.room,room);
+            assert.ok(permit.expires <= now/1000 + 26*3600);
+            await recorder('poll',{id:lesson,running:room});
+            assert.deepEqual((await api('pupil','status')).recording,{notice:'live'});
+            await api('manager','record-source',{source:'board',enabled:true});
+            await recorder('board',{id:lesson,room:'stale'},409);
+            const view = await recorder('board',{id:lesson,room});
+            assert.equal(view.board.write,false);
+            assert.equal(view.archive.board,true);
         } else {
             const handoff=(await api('teacher','board-sync')).board;
             assert.equal(handoff.navigate,true);

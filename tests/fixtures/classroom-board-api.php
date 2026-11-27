@@ -8,6 +8,8 @@ $table = 'mtg_plug_store_' . str_repeat('1', 32);
 $db = new PDO('sqlite:/tmp/board-' . ($demo ? 'practice' : 'bell') . '.sqlite');
 $ctx = ['pdo'=>$db,'store'=>$table,'csrf'=>'fixture-token','plugin_dir'=>'/classroom',
     'write_runtime'=>static fn(string $runtime) => null,
+    'recording_bot'=>static fn(string $platform) => $platform === 'bale'
+        ? ['revision'=>str_repeat('b',64),'prefix'=>'https://bale.example.test/botQA/'] : null,
     'config'=>['enabled'=>true,'site_origin'=>'https://school.example.test','signal_url'=>'wss://media.example.test',
         'api_key'=>str_repeat('k',16),'api_secret'=>str_repeat('s',48),'room_prefix'=>'test-' . str_repeat('a',20),
         'record_lessons'=>true,'recording_secret'=>str_repeat('r',48),
@@ -31,6 +33,8 @@ if ($seed === 'open') {
         INSERT INTO admins VALUES (1,'Fixture Manager','admin','[\"manage_classes\"]',1),(2,'Unauthorized','admin','[]',1);
         CREATE TABLE teachers (id INT,full_name TEXT,status INT,is_deputy INT);
         INSERT INTO teachers VALUES (1,'Fixture Teacher',1,0),(2,'Fixture Deputy',1,1);
+        CREATE TABLE bot_chats (platform TEXT,chat_id TEXT,title TEXT,chat_type TEXT,status TEXT);
+        INSERT INTO bot_chats VALUES ('bale','-100','Fixture group','group','member');
         CREATE TABLE class_schedules (id INT,teacher_id INT,class_name TEXT,academic_year TEXT,day_of_week TEXT,period_num TEXT,subject_name TEXT);
         INSERT INTO class_schedules VALUES (11,1,'7/1','1405/1406','چهارشنبه','زنگ 1','ریاضی');");
     $class = cl_classes($db, cl_current_year($db))[22];
@@ -47,6 +51,10 @@ foreach ($peers as $identity=>$sid) {
 $lesson = cl_observe($lesson,$peers,array_diff_key($peers,['student-1'=>true]),$now,$now);
 $lesson['event_received'] = true;
 $lesson['last_attempt'] = $now; // Recent SFU sample: status doesn't need an external RPC.
+if ($seed === 'record-ready') {
+    cl_rec_set_link($s,$cfg,cl_classes($db,cl_current_year($db))[22],'bale:-100',
+        static fn()=>['ok'=>true,'result'=>['id'=>-100,'type'=>'group','title'=>'Fixture group']]);
+}
 if ($seed === 'record') {
     // A narrowly scoped active recorder for testing the authenticated rendering path, without a live worker.
     $id = $lesson['id'];
@@ -54,7 +62,7 @@ if ($seed === 'record') {
     $lesson['camera_codec'] = 'vp8';
     $lesson['screen'] = ['identity'=>'student-1','sid'=>'PA_Pupil','until'=>$now+60];
     $s->put('recording',$id,['id'=>$id,'class'=>22,'worker'=>str_repeat('9',32),'state'=>'recording',
-        'protocol'=>CL_REC_PROTOCOL,'layout_capable'=>true,'live'=>true,'begin'=>$now-6,'target'=>['title'=>'test','provider'=>'bale']]);
+        'protocol'=>CL_REC_PROTOCOL,'layout_capable'=>true,'live'=>true,'begin'=>$now-6,'deadline'=>$lesson['deadline'],'target'=>['title'=>'test','provider'=>'bale']]);
 }
 $s->put('lesson',$lesson['id'],$lesson);
 echo json_encode(['lesson'=>$lesson['id'],'epoch'=>$epoch,'teacher'=>$lesson['teacher']], JSON_THROW_ON_ERROR);

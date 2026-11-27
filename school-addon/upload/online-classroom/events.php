@@ -46,6 +46,8 @@ function cl_event_apply(ClassroomStore $s, array $cfg, array $event, int $now, c
         if (in_array($event['event'], ['room_started','participant_joined'], true)) {
             if ($lesson['phase'] === 'starting' && empty($lesson['event_received'])) {
                 $lesson['event_received'] = true;
+                // A pre-callback diagnostic sample shouldn't delay the first real admission.
+                $lesson['last_attempt'] = 0;
                 $s->put('lesson', $lesson['id'], $lesson);
             }
             return false;
