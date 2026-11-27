@@ -46,36 +46,75 @@
             catch (error) { clearTimeout(timer); reject(error); }
         });
     }
-    function onSound(frame) {
+    function placeSound(item, at, ts, samples) {
+        let pos = at*48, slew = 0;
+        if (item.ts !== null) {
+            const predicted = item.pos + ((ts-item.ts)|0);
+            const drift = pos-predicted;
+            if (Math.abs(drift) <= (nativeClock ? 5760 : 12000)) {
+                pos = predicted;
+                if (nativeClock && samples.length >= 120 && Math.abs(drift) > 480) {
+                    slew = Math.sign(drift)*Math.max(1,Math.round(samples.length/320));
+                }
+            }
+        }
+        item.ts = ts;
+        item.pos = pos+slew;
+        if (slew) {
+            // Slew the duration, not the start: shifting consecutive packets
+            // leaves holes or sums them at a boundary, both audible as clicks.
+            // Keep the decoded endpoints so this small correction joins smoothly.
+            const adjusted = new Float32Array(samples.length+slew);
+            const last = adjusted.length-1, scale = (samples.length-1)/last;
+            for (let i=0;i<last;i++) {
+                const offset = i*scale, left = Math.floor(offset);
+                adjusted[i] = samples[left] + (samples[left+1]-samples[left])*(offset-left);
+            }
+            adjusted[last] = samples[samples.length-1];
+            samples = adjusted;
+        }
+        sound.push([pos,samples]);
+    }
+    function onSound(item, frame) {
         try {
-            const n = frame.numberOfFrames;
-            if (frame.sampleRate !== 48000 || n > 5760 || sound.length >= 12000) { fail(); return; }
+            const n = frame.numberOfFrames, timing = item.timing[item.decoded++];
+            // Raw Opus yields one ordered PCM block per packet. Chromium may
+            // synthesize contiguous decoder timestamps, even across an RTP gap.
+            if (!timing || frame.sampleRate !== 48000 || !n || n > 5760 || sound.length >= 12000) { fail(); return; }
             const samples = new Float32Array(n), plane = new Float32Array(n);
             for (let ch=0; ch<frame.numberOfChannels; ch++) {
                 frame.copyTo(plane,{planeIndex:ch,format:'f32-planar'});
                 for (let i=0;i<n;i++) samples[i] += plane[i]/frame.numberOfChannels;
             }
-            sound.push([Math.round(frame.timestamp*0.048),samples]);
-        } finally { frame.close(); }
+            placeSound(item,...timing,samples);
+        } catch (_) { fail(); }
+        finally {
+            frame.close();
+            if (failure || item.decoded === item.timing.length) item.settle?.();
+        }
+    }
+    async function waitAudio(item) {
+        // Do not flush per video frame: that resets Opus prediction and
+        // makes the resulting sound depend on how the reader batched RTP.
+        if (!failure && item.decoded < item.timing.length) await new Promise(resolve => {
+            const timer = setTimeout(() => { fail(); item.settle?.(); }, 8000);
+            item.settle = () => { clearTimeout(timer); item.settle = null; resolve(); };
+        });
+        if (failure || item.decoded !== item.timing.length) throw new Error('archived audio decode incomplete');
+        item.timing.length = item.decoded = 0;
     }
     function decodeAudio(id, at, ts, encoded) {
+        if (!Number.isSafeInteger(at) || !Number.isSafeInteger(ts)) throw new Error('invalid archived audio time');
         let item = audio.get(id);
         if (!item) {
-            const decoder = new AudioDecoder({output:onSound,error:fail});
-            decoder.configure(opus);
-            audio.set(id,item = {decoder,ts,pos:at*48});
-        } else {
-            item.pos += (ts-item.ts)|0;
-            // Preserve continuous Opus samples through arrival jitter. Native
-            // sources carry a shared sender-report clock: slowly correct drift
-            // without a single jump for each small correction.
-            const drift = at*48-item.pos;
-            if (Math.abs(drift) > (nativeClock ? 5760 : 12000)) item.pos = at*48;
-            else if (nativeClock && Math.abs(drift) > 480) item.pos += Math.sign(drift)*3;
-            item.ts = ts;
+            item = {ts:null,pos:0,timing:[],decoded:0,settle:null};
+            item.decoder = new AudioDecoder({output:frame => onSound(item,frame),error:() => { fail(); item.settle?.(); }});
+            item.decoder.configure(opus);
+            audio.set(id,item);
         }
-        item.decoder.decode(new EncodedAudioChunk({type:'key',timestamp:Math.round(item.pos/0.048),data:Uint8Array.fromBase64(encoded)}));
-        return item.decoder;
+        item.timing.push([at,ts]);
+        item.decoder.decode(new EncodedAudioChunk({type:'key',timestamp:at*1000,data:Uint8Array.fromBase64(encoded)}));
+        return item;
     }
     async function load(updates) {
         const pending = new Set(), ended = [];
@@ -85,7 +124,7 @@
             else queue.push(update);
             if (type === 'end') ended.push(id);
         }
-        await Promise.all(Array.from(pending, decoder => decoder.flush()));
+        await Promise.all(Array.from(pending, waitAudio));
         for (const id of ended) {
             const item = audio.get(id);
             if (item?.decoder.state === 'configured') item.decoder.close();

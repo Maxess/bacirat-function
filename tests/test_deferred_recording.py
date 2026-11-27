@@ -337,6 +337,9 @@ class MediaTest(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp, ZipFile(ROOT/'artifacts/baci-classroom-recorder-v0.4.22.zip') as zipped:
             temp = Path(tmp)
             zipped.extractall(temp)
+            # Keep the recorded source and fixtures compatible with old archives,
+            # but exercise the current renderer with real encoded WebRTC inputs.
+            (temp / 'replay.js').write_bytes((ROOT / 'server/recorder/replay.js').read_bytes())
             spool = temp/'spool'; spool.mkdir()
             for job in rooms: (spool/job).mkdir()
             renderer = ArchiveRenderer(temp)

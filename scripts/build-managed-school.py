@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Build the managed classroom site release or reproduce the separate VPS archives."""
 import argparse
+import base64
 from io import BytesIO
 import hashlib
 import json
@@ -34,6 +35,7 @@ FROZEN_RECORDER_SHA = '663da68a85bdfac47ae2a0fbb48628d856f567e116bf367bdbd28ff93
 RENDERER_FIX = ('movie.py', 'postprocess.py')
 RENDERER_REPAIR = f'baci-classroom-renderer-v{RECORDER_VERSION}-r1.zip'
 RENDERER_INSTALLER = f'repair-renderer-v{RECORDER_VERSION}-r1.py'
+AUDIO_REPAIR = f'baci-recorder-audio-repair-v{RECORDER_VERSION}-r2.py'
 MAINTENANCE_SHA = '2782b003fb54886777e2ea3e06b76d9587d1b3ef89bcc0e736e15283ca5782f6'
 # Go 1.26.2, linux/amd64, same bytes as the verified GitHub Actions build.
 NATIVE = {
@@ -180,7 +182,7 @@ def renderer_candidate(output_dir):
     # Test bundle, deliberately not named/pinned as the production 0.4.23 payload.
     with frozen_recorder() as base:
         entries = {name: base.read(name) for name in base.namelist()}
-    entries.update({name: (RECORDER_SRC / name).read_bytes() for name in RENDERER_FIX})
+    entries.update({name: (RECORDER_SRC / name).read_bytes() for name in (*RENDERER_FIX, 'replay.js')})
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / f'baci-classroom-recorder-v{RECORDER_VERSION}-renderer-candidate.zip'
     write_zip(path, entries)
@@ -212,6 +214,30 @@ def renderer_repair(output_dir):
     return path
 
 
+def audio_repair(output_dir):
+    template = (RECORDER_SRC / f'repair-audio-v{RECORDER_VERSION}-r2.py').read_bytes()
+    with frozen_recorder() as base:
+        stock = base.read('replay.js')
+    reviewed = (RECORDER_SRC / 'replay.js').read_bytes()
+    for label, data in (('STOCK', stock), ('AFTER', reviewed)):
+        pin = hashlib.sha256(data).hexdigest()
+        if f"{label}_SHA = '{pin}'".encode('ascii') not in template:
+            raise ValueError('Audio repair only builds with the reviewed replay bytes')
+    for key, data in ((b'@@STOCK_REPLAY@@', stock), (b'@@FIXED_REPLAY@@', reviewed)):
+        if template.count(key) != 1:
+            raise ValueError('Unexpected audio repair template')
+        # Wrap one adjacent bytes literal per line so both source and artifact
+        # remain readable without imposing a zlib version on reproducibility.
+        content = base64.b64encode(data)
+        literal = b'(\n' + b''.join(b"    b'" + content[i:i + 100] + b"'\n" for i in range(0, len(content), 100)) + b')'
+        template = template.replace(b"b'" + key + b"'", literal)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / AUDIO_REPAIR
+    path.write_bytes(template)
+    print(f'{path}: {hashlib.sha256(template).hexdigest()}')
+    return path
+
+
 def recorder_release(output_dir, native_build):
     previous = (ARTIFACTS / RECORDER_BASE).read_bytes()
     if hashlib.sha256(previous).hexdigest() != RECORDER_BASE_SHA:
@@ -222,13 +248,13 @@ def recorder_release(output_dir, native_build):
     assets['board.js'] = (SRC / 'assets/board.js').read_bytes()
     files = {name: (RECORDER_SRC / name).read_bytes() for name in ('README-fa.md', 'requirements.txt',
              'capture.py', 'recording.py', 'transport.py', 'view.html', 'view.css', 'view.js', 'frame.js',
-             'archive.py', 'clock.py', 'disk_writer.py', 'native_capture.py', 'ingest.html', 'ingest.js', 'encoded.js', 'replay.js',
+             'archive.py', 'clock.py', 'disk_writer.py', 'native_capture.py', 'ingest.html', 'ingest.js', 'encoded.js',
              'school-classroom-recorder.service', 'school-classroom-postprocess.service',
              'school-classroom-recorder.service.d/10-recorder-credential.conf',
              'school-classroom-recorder.service.d/60-native-recorder.conf', 'fonts/README.md')}
-    # Standalone repairs never change the published 0.4.23 ZIP or updater checksums.
+    # Renderer candidates and HTTP repairs never change the published 0.4.23 ZIP.
     with frozen_recorder() as published:
-        files.update({name: published.read(name) for name in (*RENDERER_FIX, 'transport.py')})
+        files.update({name: published.read(name) for name in (*RENDERER_FIX, 'replay.js', 'transport.py')})
     for name, digest in NATIVE.items():
         data = (native_build / name).read_bytes()
         if hashlib.sha256(data).hexdigest() != digest:
@@ -302,15 +328,17 @@ def main():
     mode.add_argument('--recorder-only', action='store_true', help='rebuild the unchanged standalone VPS release')
     mode.add_argument('--renderer-candidate', action='store_true', help='build an offline test ZIP, not a production upgrade')
     mode.add_argument('--renderer-repair', action='store_true', help='rebuild the pinned renderer-only r1 repair ZIP')
+    mode.add_argument('--audio-repair', action='store_true', help='build the standalone renderer-only r2 audio repair for VPS 1.3.2')
     mode.add_argument('--pairing-manager', action='store_true', help='reproduce the frozen 0.1.31 / 0.4.24 VPS companion')
     parser.add_argument('--approve-reviewed-manifest', action='store_true', help='replace the trusted manifest pin after reviewing the payload')
     parser.add_argument('--pdf-archive', type=Path, help='use a local copy of the same pinned PDF.js npm archive')
     parser.add_argument('--native-build', type=Path, help='output of scripts/build-recorder-native.py (Linux x86-64)')
     opts = parser.parse_args()
-    if opts.renderer_candidate or opts.renderer_repair:
+    if opts.renderer_candidate or opts.renderer_repair or opts.audio_repair:
         if not opts.output_dir or opts.approve_reviewed_manifest or opts.pdf_archive or opts.native_build:
             parser.error('renderer-only builds need an explicit --output-dir and no release build options')
-        (renderer_repair if opts.renderer_repair else renderer_candidate)(opts.output_dir)
+        build = audio_repair if opts.audio_repair else renderer_repair if opts.renderer_repair else renderer_candidate
+        build(opts.output_dir)
         return
     opts.output_dir = opts.output_dir or ARTIFACTS
     if opts.pairing_manager:

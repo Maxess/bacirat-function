@@ -582,6 +582,12 @@ sudo systemctl enable baci-qa-media-address.service
 cat /proc/sys/kernel/random/boot_id > boot.before
 GUEST
 if [[ "$scenario" == upgrade ]]; then profile=compact; fi
+if [[ ${BACI_QA_AUDIO_REPAIR:-0} == 1 ]]; then
+    [[ "$profile" != live ]]
+    # shellcheck source=vps-audio-repair-rehearsal.sh
+    source "$root/scripts/vps-audio-repair-rehearsal.sh"
+    run_audio_repair_rehearsal
+fi
 if [[ -n "$capacity" ]]; then
     # shellcheck source=vps-recording-rehearsal.sh
     source "$root/scripts/vps-recording-rehearsal.sh"

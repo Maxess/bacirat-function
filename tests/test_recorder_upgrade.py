@@ -91,7 +91,7 @@ class ReleaseTest(unittest.TestCase):
             with ZipFile(path) as candidate:
                 self.assertEqual(candidate.namelist(), published.namelist())
                 changed = {name for name in candidate.namelist() if candidate.read(name) != published.read(name)}
-                self.assertEqual(changed, {'movie.py', 'postprocess.py'})
+                self.assertEqual(changed, {'movie.py', 'postprocess.py', 'replay.js'})
                 for name in changed:
                     self.assertEqual(candidate.read(name), (SOURCE / name).read_bytes())
                 # Preserve executable permissions on the unchanged native receiver.

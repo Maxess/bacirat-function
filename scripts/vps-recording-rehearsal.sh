@@ -121,6 +121,10 @@ PY_HTTP
         school status "$bell" | grep -Fq '"live":true'
         vm "sudo test -f '$spool/$id/.capturing'"
         if [[ "$bell" == approve ]]; then
+            if [[ ${BACI_QA_AUDIO_REPAIR:-0} == 1 ]]; then
+                vm 'set -e; if sudo /usr/bin/python3 -IB ./baci-recorder-audio-repair-v0.4.23-r2.py --rollback > audio-busy.log 2>&1; then exit 1; fi; grep -F "spool still has jobs" audio-busy.log; sudo sha256sum -c --quiet audio-r2.sha'
+                echo 'QA_AUDIO active recording refused the update; fixed replay and capture remained intact.'
+            fi
             school layout "$bell"
             vm "for n in \$(seq 1 8); do if sudo test -s '$spool/$id/doc-cccccccccccccccccccccccccccccccc.pdf'; then exit; fi; sleep 1; done; exit 1"
         fi
@@ -173,6 +177,10 @@ print(f"QA_RECORD approved MP4 after the one-minute delay: render_after_eligible
 PY_RECEIPT
     # Decode received bytes, not the check_encoder MP4 or a filesystem-only export.
     python3 "$root/tests/fixtures/vps-record-verify.py" "$q/received.mp4"
+    if [[ ${BACI_QA_AUDIO_REPAIR:-0} == 1 ]]; then
+        vm 'sudo sha256sum -c --quiet audio-r2.sha audio-config.before && systemctl show -p InvocationID school-classroom-{sfu,admission,https,recorder,postprocess}.service | cmp audio-invocations.before -'
+        echo 'QA_AUDIO approved film with r2 passed the existing AAC/video decode and delivery checks.'
+    fi
     test "$(wc -l < "$q/uploads.log")" -eq 1
     if [[ "$provider" == rubika ]]; then
         cmp "$q/uploaded.mp4" "$q/received.mp4"

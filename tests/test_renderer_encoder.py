@@ -133,7 +133,7 @@ OPUS_FIXTURE = '''async () => {
         packet.copyTo(bytes);
         packets.push([Math.max(0, Math.round(packet.timestamp / 1000)), bytes.toBase64()]);
     }});
-    encoder.configure({codec:'opus', sampleRate:48000, numberOfChannels:1, bitrate:32000});
+    encoder.configure({codec:'opus', sampleRate:48000, numberOfChannels:1, bitrate:12000});
     for (let i=0; i<150; i++) {
         const data = Float32Array.from({length:960}, (_,j) => .2*Math.sin(2*Math.PI*480*(i*960+j)/48000));
         const frame = new AudioData({data,format:'f32',sampleRate:48000,numberOfChannels:1,numberOfFrames:960,timestamp:i*20000});
@@ -144,6 +144,29 @@ OPUS_FIXTURE = '''async () => {
     encoder.close();
     if (error || !packets.length) throw new Error('synthetic Opus encoding is unavailable');
     return packets;
+}'''
+
+
+def opus_with_gap(packets):
+    # Receiver batching and the RTP clock are separate. Use a wrap and a gap
+    # inside the first replay batch (within the 780 ms native lookahead).
+    return [['media', 1, ms + 20, 'audio/opus', (0xffffefa0 + ms * 48) & 0xffffffff, True, raw]
+            for ms, raw in packets if not 320 <= ms < 420]
+
+
+OPUS_REPLAY_PCM = '''async ({packets, paced}) => {
+    await replay.start({lesson:'a'.repeat(32), epoch:'c'.repeat(24), clock:'rtcp-v1'});
+    const output = new Uint8Array(40 * 8000);
+    let cursor = 0;
+    for (let index=0; index<40; index++) {
+        const batch=[];
+        while (cursor < packets.length && (!paced || packets[cursor][2] <= index*1000/12 + 760)) {
+            batch.push(packets[cursor++]);
+        }
+        const frame = await replay.frame(index, batch);
+        if (frame.pcm) output.set(Uint8Array.fromBase64(frame.pcm),index*8000);
+    }
+    return output.toBase64();
 }'''
 
 
@@ -161,13 +184,61 @@ def seal_fixture(spool, packets):
     log.append([['start', 0, 0, {'lesson': JOB, 'epoch': 'c' * 24, 'title': {'subject': 'آزمایش'},
                                 'teacher': 'teacher-1', 'clock': 'rtcp-v1', 'archive': archive}],
                 ['board', 0, 0, state, archive, 0], ['open', 1, 0, 'microphone', 'teacher-1', 'PA_test', 'TR_test', False]])
-    log.append([['media', 1, ms, 'audio/opus', ms * 48, True, raw] for ms, raw in packets])
+    for event in opus_with_gap(packets):
+        # Simulate transport batches rather than exposing the whole bell at frame zero.
+        log.elapsed = lambda at=event[2]: (at // 120 + 1) * 120
+        log.append([event])
+    log.append([['end', 1, 3180]])
     log.close(3300)
     return path
 
 
 @unittest.skipUnless(CHROMIUM and FFMPEG, 'needs local Chromium (MPM_TEST_CHROMIUM), Playwright and FFmpeg')
 class BrowserReplayTest(unittest.IsolatedAsyncioTestCase):
+    async def test_continuous_opus_has_no_clicks_at_batch_or_clock_adjustments(self):
+        from playwright.async_api import async_playwright
+
+        with tempfile.TemporaryDirectory() as tmp, ZipFile(PUBLISHED) as archive:
+            assets = Path(tmp)
+            archive.extractall(assets)
+            (assets / 'replay.js').write_bytes((ROOT / 'server/recorder/replay.js').read_bytes())
+            async with async_playwright() as playwright:
+                browser = await playwright.chromium.launch(executable_path=CHROMIUM, chromium_sandbox=True)
+                try:
+                    renderer = ArchiveRenderer(assets)
+                    async with renderer.open(browser) as page:
+                        packets = await page.evaluate(OPUS_FIXTURE)
+
+                    async def pcm(skew, paced):
+                        # Every 20 ms packet is present. A sender report can shift
+                        # the estimated time while the RTP sample count is continuous.
+                        updates = [['media', 1, ms + 40 + skew * min(35, max(0, (ms - 60) // 4)), 'audio/opus',
+                                    (0xffffff60 + ms * 48) & 0xffffffff, True, raw] for ms, raw in packets]
+                        async with renderer.open(browser) as page:
+                            encoded = await page.evaluate(OPUS_REPLAY_PCM, {'packets': updates, 'paced': paced})
+                        return [val for val, in struct.iter_unpack('<h', base64.b64decode(encoded))]
+
+                    reference = await pcm(0, False)
+                    self.assertTrue(await pcm(0, True) == reference, 'batching must not alter continuous Opus audio')
+
+                    def pulse_peak(values):
+                        # Second difference detects sharp edges but not the steady tone.
+                        # Inspect only the middle; no leading/trailing pauses are involved.
+                        return max(abs(values[i - 1] - 2 * values[i] + values[i + 1]) for i in range(24_000, 132_000))
+
+                    def endpoint(values):
+                        return next(i for i in range(len(values) - 1, -1, -1) if abs(values[i]) > 2000)
+
+                    for skew in (-1, 1):
+                        with self.subTest(skew=skew):
+                            adjusted = await pcm(skew, True)
+                            self.assertGreater((endpoint(adjusted) - endpoint(reference)) * skew, 160,
+                                               'the soundtrack still follows the corrected clock')
+                            self.assertLess(pulse_peak(adjusted), 5 * pulse_peak(reference),
+                                            'a skew correction must not stamp a sharp peak over voiced samples')
+                finally:
+                    await browser.close()
+
     async def test_archived_board_and_opus_replay_export_through_lease(self):
         from playwright.async_api import async_playwright
 
@@ -178,13 +249,20 @@ class BrowserReplayTest(unittest.IsolatedAsyncioTestCase):
             spool.mkdir(mode=0o700)
             with ZipFile(PUBLISHED) as archive:
                 archive.extractall(assets)
+            (assets / 'replay.js').write_bytes((ROOT / 'server/recorder/replay.js').read_bytes())
             async with async_playwright() as playwright:
                 browser = await playwright.chromium.launch(**launch)
                 try:
                     async with ArchiveRenderer(assets).open(browser) as page:
                         packets = await page.evaluate(OPUS_FIXTURE)
+                    results = []
+                    for paced in (False, True):
+                        async with ArchiveRenderer(assets).open(browser) as page:
+                            results.append(base64.b64decode(await page.evaluate(OPUS_REPLAY_PCM,
+                                {'packets': opus_with_gap(packets), 'paced': paced})))
                 finally:
                     await browser.close()
+            self.assertTrue(results[0] == results[1], 'Opus decode and placement must not depend on the compositor batch')
             path = await asyncio.to_thread(seal_fixture, spool, packets)
             source = path / 'source-000.baci'
             original = source.read_bytes()
@@ -198,7 +276,15 @@ class BrowserReplayTest(unittest.IsolatedAsyncioTestCase):
                 '-f', 's16le', '-'], timeout=8)
             pcm = [val for val, in struct.iter_unpack('<h', raw)]
             self.assertGreater(len(pcm), 150_000)
-            self.assertGreater(max(pcm), 2000)  # AAC includes the decoded Opus tone, not only inserted silence.
+
+            def rms(start, end):
+                window = pcm[start * 48:end * 48]
+                return math.sqrt(sum(x * x for x in window) / len(window))
+
+            # Allow AAC priming/window bleed at the edges, not a moved or lost gap.
+            self.assertLess(rms(375, 420), 240, 'an actual RTP gap stays at the correct time')
+            self.assertGreater(min(rms(t, t + 20) for t in range(480, 2900, 20)), 2400,
+                               'later audio has no false dropouts between compositor batches')
             pixels = await asyncio.to_thread(subprocess.check_output, [FFMPEG, '-v', 'error', '-i', str(part), '-map', '0:v:0',
                 '-frames:v', '1', '-pix_fmt', 'rgb24', '-threads:v', '1', '-f', 'rawvideo', '-'], timeout=8)
             self.assertEqual(len(pixels), WIDTH * HEIGHT * 3)
