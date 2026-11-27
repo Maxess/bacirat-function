@@ -11,9 +11,6 @@ const QA_BELLS = [
 ];
 const QA_ROOM_PREFIX = 'test-aaaaaaaaaaaaaaaaaaaa-v4-c15-';
 const QA_DOC = 'cccccccccccccccccccccccccccccccc';
-const QA_GROUP = '-100321';
-const QA_PREFIX = 'https://school.example.test/fixture-bot/';
-
 function qa_need(bool $ready, string $why): void {
     if (!$ready) throw new RuntimeException($why);
 }
@@ -30,15 +27,31 @@ $db = new PDO('sqlite:' . $dir . '/school.db', null, null, [PDO::ATTR_ERRMODE=>P
 $db->exec('PRAGMA busy_timeout=2000');
 $table = 'mtg_plug_store_' . str_repeat('0', 32);
 $s = new ClassroomStore($db, $table);
-$GLOBALS['MTAG_PLUGIN_CONTEXT'] = ['plugin_dir'=>$dir,'recording_bot'=>static fn(string $name) => $name === 'telegram'
-    ? ['revision'=>hash('sha256', QA_PREFIX), 'prefix'=>QA_PREFIX] : null];
-// Stub only the provider's group metadata. The worker's multipart upload still
-// traverses HTTPS to the fixture's provider endpoint and requires a real permit.
-$provider = static fn(string $url, array $data) => match (basename($url)) {
-    'getChat' => ['ok'=>true,'result'=>['id'=>(int)QA_GROUP,'type'=>'supergroup','title'=>'گروه آزمایشی']],
-    'getMe' => ['ok'=>true,'result'=>['id'=>9]],
-    'getChatMember' => ['ok'=>true,'result'=>['status'=>'member','user'=>['id'=>9]]],
-    default => throw new RuntimeException('unexpected provider action'),
+$platform = getenv('BACI_QA_PROVIDER') ?: 'telegram';
+[$prefix, $group] = match ($platform) {
+    'bale' => ['https://tapi.bale.ai/botQA-fixture/', '-100321'],
+    'rubika' => ['https://botapi.rubika.ir/v3/QA-fixture/', 'g0fixture321'],
+    'telegram' => ['https://school.example.test/fixture-bot/', '-100321'],
+    default => throw new RuntimeException('unknown QA provider'),
+};
+$GLOBALS['MTAG_PLUGIN_CONTEXT'] = ['plugin_dir'=>$dir,'recording_bot'=>static fn(string $name) => $name === $platform
+    ? ['revision'=>hash('sha256', $prefix), 'prefix'=>$prefix] : null];
+// Stub only group metadata. The installed worker still needs a real school
+// permit and performs the provider-specific upload over isolated HTTPS.
+$provider = static function (string $url, array $data) use ($platform, $prefix, $group): array {
+    qa_need(str_starts_with($url, $prefix), 'unexpected provider URL');
+    if (basename($url) === 'getChat') {
+        qa_need($data === ['chat_id'=>$group], 'wrong group metadata request');
+        return $platform === 'rubika'
+            ? ['status'=>'OK','data'=>['chat'=>['chat_id'=>$group,'chat_type'=>'Group','title'=>'گروه آزمایشی']]]
+            : ['ok'=>true,'result'=>['id'=>(int)$group,'type'=>'supergroup','title'=>'گروه آزمایشی']];
+    }
+    qa_need($platform === 'telegram', 'unexpected provider action');
+    return match (basename($url)) {
+        'getMe' => ['ok'=>true,'result'=>['id'=>9]],
+        'getChatMember' => ['ok'=>true,'result'=>['status'=>'member','user'=>['id'=>9]]],
+        default => throw new RuntimeException('unexpected provider action'),
+    };
 };
 $rooms = array_map(static fn(string $id): string => QA_ROOM_PREFIX . substr($id, -24), QA_BELLS);
 $rpc = static function (string $method, string $room, array $data) use ($cfg, $rooms): array {
@@ -61,9 +74,9 @@ try {
                 INSERT INTO settings VALUES ('current_academic_year','1405/1406'), ('school_name','مدرسهٔ آزمایشی');
                 CREATE TABLE classes (id INT PRIMARY KEY,name TEXT,academic_year TEXT);
                 INSERT INTO classes VALUES (15,'تمرین ظرفیت','1405/1406');
-                CREATE TABLE bot_chats (platform TEXT,chat_id TEXT,title TEXT,chat_type TEXT,status TEXT);
-                INSERT INTO bot_chats VALUES ('telegram','-100321','آزمایش تحویل','supergroup','member')");
-            cl_rec_set_link($s, $cfg, cl_classes($db, '1405/1406')[15], 'telegram:' . QA_GROUP, $provider);
+                CREATE TABLE bot_chats (platform TEXT,chat_id TEXT,title TEXT,chat_type TEXT,status TEXT)");
+            $db->prepare("INSERT INTO bot_chats VALUES (?,?,'آزمایش تحویل','supergroup','member')")->execute([$platform,$group]);
+            cl_rec_set_link($s, $cfg, cl_classes($db, '1405/1406')[15], $platform . ':' . $group, $provider);
         } elseif ($cmd === 'tickets') {
             // Use the same grants and five-second nbf allowance as the real site.
             $tickets = ['teacher-7'=>cl_join_ticket($cfg, $room, $teacher)];

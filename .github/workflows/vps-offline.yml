@@ -18,8 +18,10 @@ on:
       - tests/fixtures/vps-offline-peer.py
       - tests/fixtures/vps-acme-gateway.py
       - tests/fixtures/vps-live-media.go
+      - server/recorder/transport.py
       - server/recorder/native/go.mod
       - server/recorder/native/go.sum
+      - tests/test_recorder_school_http.py
       - tests/plugin-manager.php
       - artifacts/*pairing*.zip
 permissions:
@@ -108,7 +110,7 @@ jobs:
           set -euo pipefail
           log="$RUNNER_TEMP/vps-ga-recording.log"
           trap 'proof=$(grep -E "^QA_|^VM |^Baci VPS:|^gpgv:|^E:|^curl:|[Ee]rror:|^oom_kill" "$log" | tail -24 | paste -sd "|"); echo "::error title=GA Server recording::${proof:0:3900}"' ERR
-          BACI_QA_BASELINE=noble-ga-server bash scripts/test-vps-offline-vm.sh "$RUNNER_TEMP"/vps-release/*amd64.tar.gz \
+          BACI_QA_BASELINE=noble-ga-server BACI_QA_PROVIDER=bale bash scripts/test-vps-offline-vm.sh "$RUNNER_TEMP"/vps-release/*amd64.tar.gz \
             files 1024 '' compact "$RUNNER_TEMP/class-load" '' 0 2>&1 | tee "$log"
           grep -Fq 'QA_APT Real GA preflight passed without modifying dpkg state.' "$log"
           grep -Fq 'QA_APT GA install preserved all ' "$log"
@@ -143,10 +145,10 @@ jobs:
             'https://github.com/Maxess/bacirat-function/releases/download/vps-offline-v1.2.0/baci-classroom-vps-offline-v1.2.0-ubuntu24.04-amd64.tar.gz' -o "$baseline"
           printf '%s  %s\n' 9a79d791d38e2277b5fb29f9d05ae223338bb4c25ae30ab83ffb7c9d148c1cb4 "$baseline" | sha256sum -c --strict
           rehearsal() {
-            local label=$1 tls=$2 ram=$3 scenario=$4 client=$5 swap=$6 log
+            local label=$1 tls=$2 ram=$3 scenario=$4 client=$5 swap=$6 provider=${7:-telegram} log
             log="$RUNNER_TEMP/verified-$label.log"
             local rc=0
-            bash scripts/test-vps-offline-vm.sh "$candidate" "$tls" "$ram" '' "$scenario" "$client" "$baseline" "$swap" 2>&1 | tee "$log" || rc=$?
+            BACI_QA_PROVIDER=$provider bash scripts/test-vps-offline-vm.sh "$candidate" "$tls" "$ram" '' "$scenario" "$client" "$baseline" "$swap" 2>&1 | tee "$log" || rc=$?
             if (( rc != 0 )); then
               proof=$(grep -E '^QA_|^VM guest failure|^VM rehearsal|^Baci VPS:|^oom_kill|^recorder:|^postprocess:|[Ee]rror:' "$log" | tail -25 | paste -sd '|')
               echo "::error title=Packaged $label::${proof:0:4000}"
@@ -167,9 +169,22 @@ jobs:
             proof=$(grep -E '^QA_|^VM memory|^VM passed|^Real ACME' "$log" | paste -sd '|')
             echo "::notice title=Packaged $label::${proof:0:4100}"
           }
-          rehearsal single-vps files 512 compact "$RUNNER_TEMP/class-load" 512
+          rehearsal single-vps files 512 compact "$RUNNER_TEMP/class-load" 512 rubika
           rehearsal compact-auto auto 512 compact '' 512
           rehearsal live-add-on files 1024 upgrade "$RUNNER_TEMP/class-load" 0
+      - name: Require named Recorder and both simulated group receipts from the packaged installs
+        run: |
+          set -euo pipefail
+          for platform in bale rubika; do
+            case "$platform" in
+              bale) log="$RUNNER_TEMP/vps-ga-recording.log" ;;
+              rubika) log="$RUNNER_TEMP/verified-single-vps.log" ;;
+            esac
+            grep -Fx 'QA_RECORDER_HTTP no identity: HTTP 403; named with bad bearer: HTTP 403; installed Recorder: fresh authenticated heartbeat.' "$log"
+            grep -Fx "QA_PROVIDER $platform: simulated group accepted the approved video; received MP4 decoded." "$log"
+            grep -F 'QA_RECORD refuse: no film/upload;' "$log"
+            grep -F 'QA_RECORD revoke: no film/upload;' "$log"
+          done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: classroom-vps-offline-verified

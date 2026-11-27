@@ -14,7 +14,9 @@ swap_mib=${8:-0}
 # and close UDP on two external browser peers, using the exact release payload.
 resilience=${BACI_QA_RESILIENCE:-0}
 vm_baseline=${BACI_QA_BASELINE:-minimal}
+provider=${BACI_QA_PROVIDER:-telegram}
 [[ "$vm_baseline" == minimal || "$vm_baseline" == noble-ga-server ]]
+[[ "$provider" == telegram || "$provider" == bale || "$provider" == rubika ]]
 if [[ "$vm_baseline" == noble-ga-server ]]; then
     [[ "$scenario" == compact && "$ram" == 1024 && "$mode" == files && "$swap_mib" == 0 ]]
 fi
@@ -177,7 +179,16 @@ for target in "${targets[@]}"; do
     if [[ "$target" == acme ]]; then name=acme-v02.api.letsencrypt.org; fi
     openssl req -new -newkey rsa:2048 -nodes -subj "/CN=$name" \
         -keyout "$work/$target.key" -out "$work/$target.csr" >/dev/null 2>&1
-    printf 'subjectAltName=DNS:%s\nextendedKeyUsage=serverAuth\n' "$name" > "$work/$target.ext"
+    san="DNS:$name"
+    if [[ "$target" == school && -n "$capacity" ]]; then
+        # Only trusted by this throwaway VM. Provider API names are mapped to
+        # the isolated TAP fixture; no requests are sent to real group APIs.
+        case "$provider" in
+            bale) san+=',DNS:tapi.bale.ai' ;;
+            rubika) san+=',DNS:botapi.rubika.ir,DNS:upload.rubika.ir' ;;
+        esac
+    fi
+    printf 'subjectAltName=%s\nextendedKeyUsage=serverAuth\n' "$san" > "$work/$target.ext"
     openssl x509 -req -days 3 -in "$work/$target.csr" -CA "$work/qa.crt" -CAkey "$work/ca.key" -CAcreateserial \
         -extfile "$work/$target.ext" -out "$work/$target.pem" >/dev/null 2>&1
 done
@@ -296,11 +307,14 @@ sha256sum /etc/apt/sources.list.d/* > apt.before
 sysctl -n kernel.apparmor_restrict_unprivileged_userns > apparmor.before
 tar xzf "$ARCHIVE"
 installer=(sudo bash baci-classroom-vps-offline/install.sh --site https://school.example.test/campus --media "$media" --ipv4 192.0.0.9)
-if [[ "$SCENARIO" == compact ]]; then installer+=(--profile compact); fi
+if [[ "$SCENARIO" == compact ]] && ! grep -Fq '"recording_by_default": true' baci-classroom-vps-offline/BUILD.json; then
+    installer+=(--profile compact)  # Rehearsals against a historical installer.
+fi
 if [[ "$PROFILE" == live ]]; then
     if "${installer[@]}" --check --profile full > rejected.log 2>&1; then exit 1; fi
     grep -Fq 'use --profile live' rejected.log
     dpkg-query -W -f='${binary:Package} ${db:Status-Abbrev}\n' ffmpeg python3-venv > render-debs.before 2>/dev/null || true
+    installer+=(--profile live)
 fi
 if [[ "$MODE" == files ]]; then
     mv media.pem fullchain.pem

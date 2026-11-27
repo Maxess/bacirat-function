@@ -30,11 +30,12 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))  # python -I: only the verified staging or root-owned install directory.
 import vps_media as media
 
-VERSION = '1.3.1'
+VERSION = '1.3.2'
 APP, CFG, SYSTEMD = media.APP, media.CFG, media.SYSTEMD
 REC = Path('/opt/school-classroom-recorder')
 RECORDER_RELEASE = '0.4.23'
 REC_CFG = Path('/etc/school-classroom-recorder.json')
+REC_CREDENTIAL = Path('/run/school-classroom-recorder-credential/config.json')
 SPOOL = Path('/var/lib/school-classroom-recorder')
 HTTPS_STATE = Path('/var/lib/school-classroom-https')
 CLI = Path('/usr/local/sbin/baci-vps')
@@ -68,12 +69,14 @@ CADDY_ASSET = f'caddy_{CADDY_VERSION}_linux_amd64.tar.gz'
 CHROME_ASSET = BROWSER_TOP + '.zip'
 REC_ASSET = 'baci-classroom-recorder-v0.4.23.zip'
 PATCH_ASSET = 'baci-classroom-renderer-v0.4.23-r1.zip'
+SCHOOL_HTTP_ASSET = 'baci-classroom-recorder-school-http-v0.4.23.py'
 PAYLOAD = {
     media.ASSET: media.SHA256,
     CADDY_ASSET: '5b8cb7faf8726a2028ad96a66e54e6e81e8f361bc6175e5d22bbd997cc5177fb',
     CHROME_ASSET: '88817c574c1838a39f88fda0bbd043b4481fd385fb10e92c323e230844d636ce',
     REC_ASSET: '663da68a85bdfac47ae2a0fbb48628d856f567e116bf367bdbd28ff935b490d1',
     PATCH_ASSET: '07d51104f5fa7bbfd90d6329931fa0e9d03967b9c8fc617c8fe08f10b4d38cfd',
+    SCHOOL_HTTP_ASSET: '72550ec6cb374a0e86e618e65b84a455fbeb506a7b8cafdf4c5c8e6736c953c4',
 }
 ENV = {'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LC_ALL': 'C', 'HOME': '/root'}
 GIB = 1024**3
@@ -89,6 +92,12 @@ LIVE_DEBS = ('ca-certificates', 'openssl', 'python3')
 
 class Refused(Exception):
     pass
+
+
+class RecorderProbeFailed(Refused):
+    def __init__(self, reason, message):
+        super().__init__(message)
+        self.reason = reason
 
 
 def need(ok, message):
@@ -212,7 +221,9 @@ def swap_size(meminfo):
 
 def install_profile(requested, total_kib, swap_kib=0):
     need(requested == 'auto' or requested in PROFILES, 'Unknown VPS installation profile.')
-    profile = ('full' if total_kib >= FULL_RAM_KIB else 'live') if requested == 'auto' else requested
+    # The archive and the download launcher both default to recording; never
+    # hide a failed recording requirement by silently installing live-only.
+    profile = ('full' if total_kib >= FULL_RAM_KIB else 'compact') if requested == 'auto' else requested
     if profile == 'full':
         need(total_kib >= FULL_RAM_KIB, f'Linux sees {total_kib} KiB of RAM. '
              'Full recording and film rendering need a larger VPS; use --profile live for live classes without local recording.')
@@ -458,8 +469,11 @@ def renderer_program():
         for name in archive.namelist():  # whole upstream ZIP already pinned; keep original service files.
             if name in (RECORDER, RENDERER) or name.startswith(RECORDER + '.d/'):
                 units[name] = archive.read(name)
-            else:
+            elif name != 'transport.py':
                 write(REC_PROGRAM / name, archive.read(name), 0o755 if name == 'baci-native-receiver' else 0o644)
+    # Install the named school HTTP client from the start, without repacking
+    # the frozen Recorder ZIP or touching the renderer/worker protocol.
+    write(REC_PROGRAM / 'transport.py', school_http_bytes(HERE / 'payload' / SCHOOL_HTTP_ASSET))
     mkdir(PATCH)
     with ZipFile(HERE / 'payload' / PATCH_ASSET) as archive:
         for name in ('movie.py', 'postprocess.py'):
@@ -737,14 +751,38 @@ class Fresh:
 
 
 
+def school_http_bytes(path):
+    data = read_limited(path, limit=64 * 1024)
+    need(hashlib.sha256(data).hexdigest() == PAYLOAD[SCHOOL_HTTP_ASSET], 'The reviewed Recorder HTTP client did not match its SHA-256.')
+    return data
+
+
 def recorder_status(config, keys, worker):
+    # The installed doctor and the service use the exact same transport bytes.
+    # The add-on must also be able to probe before the Recorder is installed.
+    path = REC_PROGRAM / 'transport.py' if HERE == APP else HERE / 'payload' / SCHOOL_HTTP_ASSET
     try:
-        result = media.post_json(config['school'] + media.EVENT_ROUTE.replace('route=events', 'route=recording'),
-                                 json.dumps({'action': 'maintenance', 'protocol': 2, 'worker': worker, 'id': None}).encode(),
-                                 'application/json', 'Bearer ' + keys['recording_secret'], 7)
-    except (OSError, ValueError, http.client.HTTPException):
-        raise Refused('The school did not confirm the Recorder. Verify the existing pairing, turn on recording in the school panel and check HTTPS.') from None
-    need(result.get('ok') is True and result.get('release') == RECORDER_RELEASE, 'Unexpected school Recorder response.')
+        code = school_http_bytes(path)
+    except Refused:
+        raise RecorderProbeFailed('local_client_invalid', 'The installed Recorder HTTP client could not be verified.') from None
+    client = {'__name__': '_baci_recorder_http'}
+    exec(compile(code, '<verified Recorder HTTP client>', 'exec'), client)
+    try:
+        result = client['School'](config['school'], keys['recording_secret'], worker)('maintenance')
+    except client['ProtocolError'] as error:
+        if error.status == 403:
+            reason = 'http_403'
+            message = 'HTTP 403: check the recording switch, pairing and school hosting rules for the authenticated recording route.'
+        elif error.status == 200:
+            reason, message = 'unexpected_reply', 'The school returned HTTP 200 without a valid Recorder response.'
+        elif not error.status:
+            reason, message = 'https_unreachable', 'The verified HTTPS Recorder request did not complete.'
+        else:
+            reason = f'http_{error.status}'
+            message = f'The school did not confirm the Recorder (HTTP {error.status}). Check the school HTTPS endpoint and activation.'
+        raise RecorderProbeFailed(reason, message) from None
+    if result.get('release') != RECORDER_RELEASE or any(type(result.get(k)) is not bool for k in ('idle', 'worker_ok', 'native_ready')):
+        raise RecorderProbeFailed('unexpected_reply', 'Unexpected school Recorder response. Check the Classroom version and site URL.')
     return result
 
 
@@ -770,12 +808,11 @@ def replacement(path, data, mode):
 
 
 def addition_preflight(config, requested, worker):
-    need(config.get('version') in ('1.2.0', '1.3.0', VERSION) and config.get('profile') == 'live' and config.get('tls_mode') in ('files','auto'),
-         'This add-on is only for a completed Baci offline live install (v1.2.0, v1.3.0 or this release).')
+    need(config.get('version') in ('1.2.0', '1.3.0', '1.3.1', VERSION) and config.get('profile') == 'live' and config.get('tls_mode') in ('files','auto'),
+         'This add-on is only for a completed Baci offline live install (v1.2.0, v1.3.0, v1.3.1 or this release).')
     meminfo = Path('/proc/meminfo').read_text()
     total_kib = check_memory(meminfo)
-    selected = ('full' if total_kib >= FULL_RAM_KIB else 'compact') if requested == 'auto' else requested
-    profile = install_profile(selected, total_kib, swap_size(meminfo))
+    profile = install_profile(requested, total_kib, swap_size(meminfo))
     need(profile != 'live', 'Use a recording profile with --add-recorder.')
     for path in (APP, CFG, SYSTEMD, REC.parent, SPOOL.parent, PROFILE.parent):
         if path == PROFILE.parent and not path.exists():
@@ -875,19 +912,38 @@ def export_pair():
     return True
 
 
-def doctor_recorder(config):
+def doctor_recorder(config, *, wait=False):
     try:
         keys = json_file(PAIR)
         worker = json_file(SPOOL / 'worker.json')['id']
-        result = recorder_status(config, keys, worker)
-        print('school_recorder=' + ('ready' if result.get('native_ready') is True else 'paired_waiting_for_heartbeat'))
-    except http.client.HTTPException:
-        print('school_recorder=not_verified')
-    except (Refused, OSError, ValueError):
-        print('school_recorder=not_verified_or_disabled (check the optional recording switch and allow 30 seconds)')
+        expected = {'site': config['school'], 'secret': keys['recording_secret']}
+        need(keys['site'] == expected['site'] and re.fullmatch(r'[a-f0-9]{64}', expected['secret'])
+             and re.fullmatch(r'[a-f0-9]{32}', worker) and json_file(REC_CFG) == expected
+             and json_file(REC_CREDENTIAL) == expected, 'Pairing and Recorder service credential differ.')
+    except (Refused, OSError, ValueError, KeyError, TypeError):
+        print('school_recorder=not_verified reason=local_pairing_mismatch (no files changed; do not regenerate keys)')
+        return False
+    deadline = time.monotonic() + (35 if wait else 0)
+    while True:
+        try:
+            result = recorder_status(config, keys, worker)
+        except RecorderProbeFailed as error:
+            print(f'school_recorder=not_verified reason={error.reason} ({error})')
+            return False
+        if not result['worker_ok']:
+            print('school_recorder=another_worker (the school recently heard a different Recorder; do not delete its queue)')
+            return False
+        if result['native_ready']:
+            print('school_recorder=ready')
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            print('school_recorder=paired_waiting_for_heartbeat (authenticated; check Recorder journal, spool space and any previous worker)')
+            return False
+        time.sleep(min(2, remaining))
 
 
-def doctor(config, online):
+def doctor(config, online, *, wait=False):
     try:
         local_checks(config)
         expires = edge_certificate(config)
@@ -895,7 +951,7 @@ def doctor(config, online):
         raise Refused('Local readiness check failed (media, HTTPS, or installed Recorder).') from None
     status = (f"profile={config.get('profile', 'full')} recorder=ok renderer=ok" if with_recording(config)
               else 'profile=live recorder=not_installed renderer=not_installed')
-    print('local=ok https=ok admission=ok media_api=ok ' + status)
+    print(f'local=ok https=ok admission=ok media_api=ok version={VERSION} ' + status)
     print(f"tls={config.get('tls_mode', 'files')} expires={expires}")
     if not online:
         return True
@@ -914,8 +970,11 @@ def doctor(config, online):
         print('school_webhook=not_verified (check the school URL, import, activation, HTTPS and Authorization header)')
         ok = False
     if with_recording(config):
-        doctor_recorder(config)
+        recorder_ok = doctor_recorder(config, wait=wait)
+        ok = ok and recorder_ok
     print('Still required: open https://' + config['media'] + '/healthz from another network and try two test devices (real UDP/media).')
+    if with_recording(config):
+        print('Also verify a consented MP4 in the actual configured group after the school delay and with no open class.')
     return ok
 
 
@@ -924,7 +983,9 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     if installed:
         sub = parser.add_subparsers(dest='action', required=True)
-        sub.add_parser('doctor', help='local read-only checks').add_argument('--online', action='store_true', help='also verify DNS and the school endpoints')
+        check = sub.add_parser('doctor', help='local read-only checks', allow_abbrev=False)
+        check.add_argument('--online', action='store_true', help='also verify DNS, signed school webhook and the actual Recorder protocol')
+        check.add_argument('--wait', action='store_true', help='after pairing, wait briefly for a fresh heartbeat (requires --online)')
         sub.add_parser('export', help='copy the private connection file to your SSH home without overwriting anything')
     else:
         parser.add_argument('--site')
@@ -934,10 +995,12 @@ def main(argv=None):
         parser.add_argument('--cert', type=Path, help='in files mode: default ./fullchain.pem')
         parser.add_argument('--key', type=Path, help='in files mode: default ./privkey.pem, mode 0600')
         parser.add_argument('--profile', choices=('auto', *PROFILES), default='auto',
-                            help='auto selects live for low RAM; compact adds local recording for a small class; full has more headroom')
+                            help='auto selects compact/full with recording; choose live explicitly for live classes without recording')
         parser.add_argument('--check', action='store_true', help='read-only install or add-on preflight')
         parser.add_argument('--add-recorder', action='store_true', help='add recording to an idle offline live install; reuse pairing and HTTPS')
     args = parser.parse_args(argv)
+    if installed and args.action == 'doctor' and args.wait and not args.online:
+        parser.error('--wait requires --online')
     os.umask(0o077)
     txn = None
     try:
@@ -963,8 +1026,13 @@ def main(argv=None):
                 print(f'add_recorder=ok profile={profile} renderer_mp4=ok school_recorder=ready; existing pairing and HTTPS retained.')
                 return 0
             if not installed:
-                print('Already installed. No settings, keys or services were changed. Use sudo baci-vps export if needed.')
-            return 0 if doctor(config, installed and args.online) else 1
+                print('Already installed. No settings, keys or services were changed. This fresh installer is not an in-place upgrade.')
+                # Do not run the candidate's checks against older installed files.
+                if config.get('recorder_bundle', config.get('version')) != VERSION:
+                    print('Use the existing sudo baci-vps doctor; do not reset the VPS to retry an installation.')
+                    return 1
+                return 0 if doctor(config, False) else 1
+            return 0 if doctor(config, args.online, wait=args.wait) else 1
         need(not installed and not args.add_recorder, 'No completed offline installation was found.')
         total_kib, profile = fresh_preflight(args.profile)
         verify_payloads()
@@ -1011,8 +1079,12 @@ def main(argv=None):
         txn.apply(config, cert_files)
         txn = None  # The durable install is complete; do not undo it if exporting fails.
         recording = 'renderer_mp4=ok' if with_recording(config) else 'recorder=not_installed'
-        print(f"installation=ok tls={mode} profile={profile} local_https=ok {recording}. فایل اتصال را فقط در پنل مدرسه بارگذاری کن.")
-        return 0 if export_pair() else 1
+        print(f'installation=ok tls={mode} profile={profile} local_https=ok {recording} school_pairing=required')
+        if not export_pair():
+            return 1
+        print('گام بعد: فایل خصوصی اتصال را در پنل همان مدرسه وارد و کلاس و ضبط را فعال کن. سپس روی VPS:')
+        print('  sudo baci-vps doctor --online --wait')
+        return 0
     except (Refused, OSError, ValueError, KeyboardInterrupt, EOFError, KeyError, http.client.HTTPException, sp.SubprocessError, tarfile.TarError, BadZipFile) as error:
         if txn:
             try:

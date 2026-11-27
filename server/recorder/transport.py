@@ -92,7 +92,8 @@ class School:
         if origin.query or not re.fullmatch(r'(?:/[A-Za-z0-9_-][A-Za-z0-9_.-]{0,63})*/', origin.path):
             raise ProtocolError()
         self.url = site + '/plugins/school-plugins.php?plugin=school-classroom&route=recording'
-        self.headers = {'Authorization': 'Bearer ' + secret}
+        # Identify the machine client: some school hosts reject requests without User-Agent.
+        self.headers = {'Authorization': 'Bearer ' + secret, 'User-Agent': 'Baci-Classroom-Recorder/0.4.23'}
         self.worker, self.protocol = worker, protocol
 
     def __call__(self, action, job=None, **data):

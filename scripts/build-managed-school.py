@@ -222,9 +222,9 @@ def recorder_release(output_dir, native_build):
              'school-classroom-recorder.service', 'school-classroom-postprocess.service',
              'school-classroom-recorder.service.d/10-recorder-credential.conf',
              'school-classroom-recorder.service.d/60-native-recorder.conf', 'fonts/README.md')}
-    # The 0.4.23 release and updater checksums must not change with the renderer repair.
+    # Standalone repairs never change the published 0.4.23 ZIP or updater checksums.
     with frozen_recorder() as published:
-        files.update({name: published.read(name) for name in RENDERER_FIX})
+        files.update({name: published.read(name) for name in (*RENDERER_FIX, 'transport.py')})
     for name, digest in NATIVE.items():
         data = (native_build / name).read_bytes()
         if hashlib.sha256(data).hexdigest() != digest:

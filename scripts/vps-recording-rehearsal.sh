@@ -12,7 +12,7 @@ run_recording_rehearsal() (
     python3 "$root/tests/fixtures/vps-record-inputs.py" "$q"
     local php="$root/tests/fixtures/vps-record-school.php"
     in_net() { sudo ip netns exec "$net" "$@"; }
-    as_runner() { in_net runuser -u "$(id -un)" -- env "BACI_QA_DIR=$q" "SSL_CERT_FILE=$q/qa.crt" "$@"; }
+    as_runner() { in_net runuser -u "$(id -un)" -- env "BACI_QA_DIR=$q" "BACI_QA_PROVIDER=$provider" "SSL_CERT_FILE=$q/qa.crt" "$@"; }
     school() { as_runner php -d "curl.cainfo=$q/qa.crt" "$php" "$@"; }
     stop_fixture() {
         local code=$?
@@ -41,12 +41,56 @@ ip link set "$iface" up
 sed -i -E 's/^172\.30\.123\.2 school\.example\.test$/172.30.124.2 school.example.test/' /etc/hosts
 systemctl stop baci-fixture-peer
 GUEST
-    echo "QA_STAGE isolated school and synthetic inputs on runner, VPS on guest"
+    # Resolve the shipping provider names only in this disposable guest;
+    # their TLS certificates are signed by the guest's disposable QA root.
+    case "$provider" in
+        bale) vm 'echo "172.30.124.2 tapi.bale.ai" | sudo tee -a /etc/hosts >/dev/null' ;;
+        rubika) vm 'echo "172.30.124.2 botapi.rubika.ir upload.rubika.ir" | sudo tee -a /etc/hosts >/dev/null' ;;
+    esac
+    echo "QA_STAGE isolated school, $provider fixture and synthetic inputs on runner, VPS on guest"
     school init
     as_runner php -S 127.0.0.1:18391 "$php" > "$q/php.log" 2>&1 &
-    in_net python3 "$root/tests/fixtures/vps-record-tls.py" "$q" > "$q/tls.log" 2>&1 &
-    # Wait for the new site's heartbeat before opening a normal bell.
-    vm 'for n in $(seq 1 24); do if sudo baci-vps doctor --online 2>&1 | grep -q "^school_recorder=ready"; then exit; fi; sleep 1; done; exit 1'
+    in_net python3 "$root/tests/fixtures/vps-record-tls.py" "$q" "$provider" > "$q/tls.log" 2>&1 &
+    fixture_ready() {
+        in_net curl --disable --noproxy '*' -fsS --max-time 2 --cacert "$q/qa.crt" \
+            --resolve school.example.test:443:172.30.124.2 https://school.example.test/readyz >/dev/null 2>&1
+    }
+    for n in $(seq 1 12); do
+        if fixture_ready; then break; fi
+        sleep 1
+    done
+    fixture_ready
+    # The school was initialized with no heartbeat. Only the installed service
+    # can send a plan and mark the matching native worker ready; doctor is read-only.
+    vm 'set -o pipefail; sudo baci-vps doctor --online --wait | tee recording-online.log; grep -Fxq school_recorder=ready recording-online.log'
+    vm 'sudo /usr/bin/python3 -IB -' <<'PY_HTTP'
+import http.client
+import json
+from pathlib import Path
+
+pair = json.loads(Path('/etc/school-classroom/site-pairing.json').read_text())
+worker = json.loads(Path('/var/lib/school-classroom-recorder/worker.json').read_text())['id']
+body = json.dumps({'action': 'maintenance', 'protocol': 2, 'worker': worker, 'id': None}).encode()
+route = '/campus/plugins/school-plugins.php?plugin=school-classroom&route=recording'
+headers = {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + pair['recording_secret']}
+identity = {'User-Agent': 'Baci-Classroom-Recorder/0.4.23'}
+
+def check(extra, status):
+    conn = http.client.HTTPSConnection('school.example.test', timeout=7)
+    try:
+        conn.request('POST', route, body, headers | extra)
+        with conn.getresponse() as response:
+            assert response.status == status, (response.status, status)
+            return response.read(16384)
+    finally:
+        conn.close()
+
+check({}, 403)
+check(identity | {'Authorization': 'Bearer invalid-fixture-secret'}, 403)
+reply = json.loads(check(identity, 200))
+assert reply['ok'] is True and reply['worker_ok'] is True and reply['native_ready'] is True
+print('QA_RECORDER_HTTP no identity: HTTP 403; named with bad bearer: HTTP 403; installed Recorder: fresh authenticated heartbeat.')
+PY_HTTP
     vm 'sudo systemd-run --quiet --unit=baci-qa-sample /bin/bash -c '\''while true; do grep -E "^MemAvailable:|^SwapTotal:|^SwapFree:" /proc/meminfo | xargs; sleep 1; done'\'''
     expect_no_browser() {
         vm 'set -e; films=$(sudo find /var/lib/school-classroom-recorder \( -name "*.mp4" -o -name ".render" \) -print -quit); test -z "$films"; ! pgrep -u school-recorder -x chrome-headless >/dev/null'
@@ -130,6 +174,10 @@ PY_RECEIPT
     # Decode received bytes, not the check_encoder MP4 or a filesystem-only export.
     python3 "$root/tests/fixtures/vps-record-verify.py" "$q/received.mp4"
     test "$(wc -l < "$q/uploads.log")" -eq 1
+    if [[ "$provider" == rubika ]]; then
+        cmp "$q/uploaded.mp4" "$q/received.mp4"
+    fi
+    echo "QA_PROVIDER $provider: simulated group accepted the approved video; received MP4 decoded."
     if [[ "$scenario" == compact ]]; then
         run_bell refuse 4
         wait_purged "$(school id refuse)" ''

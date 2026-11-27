@@ -61,9 +61,11 @@ def non_deb(bundle):
         if filename in origins:
             fetch(origins[filename], path, digest)
         else:
-            shutil.copyfile(ROOT / 'artifacts' / filename, path)
+            source = (ROOT / 'server/recorder/transport.py' if filename == setup.SCHOOL_HTTP_ASSET
+                      else ROOT / 'artifacts' / filename)
+            shutil.copyfile(source, path)
             if sha(path) != digest:
-                raise ValueError(f'Frozen Recorder payload changed: {filename}')
+                raise ValueError(f'Reviewed Recorder payload changed: {filename}')
     with ZipFile(payload / setup.CHROME_ASSET) as chrome:
         notice = chrome.read(setup.BROWSER_TOP + '/LICENSE.headless_shell')
         if b'Redistribution and use in source and binary forms' not in notice or any('widevine' in n.lower() for n in chrome.namelist()):
@@ -215,7 +217,9 @@ def main():
         (bundle / 'BUILD.json').write_text(json.dumps({'version': setup.VERSION, 'ubuntu': '24.04', 'arch': 'amd64',
             'git': run('git', 'rev-parse', 'HEAD', cwd=ROOT, text=True, capture_output=True).strip(),
             'tls_modes': ['auto', 'files'], 'minimum_visible_ram_kib': setup.MIN_RAM_KIB,
-            'install_profiles': list(setup.PROFILES), 'full_visible_ram_kib': setup.FULL_RAM_KIB,
+            'install_profiles': list(setup.PROFILES), 'recording_by_default': True,
+            'school_recorder_user_agent': 'Baci-Classroom-Recorder/' + setup.RECORDER_RELEASE,
+            'full_visible_ram_kib': setup.FULL_RAM_KIB,
             'compact_visible_ram_kib': setup.COMPACT_RAM_KIB, 'compact_swap_kib': setup.COMPACT_SWAP_KIB,
             'compact_no_swap_visible_ram_kib': setup.COMPACT_NOSWAP_RAM_KIB,
             'deb_count': count, 'apt_origin': ARCHIVE, 'pinned_payload_sha256': setup.PAYLOAD, 'payload_origins': origins},

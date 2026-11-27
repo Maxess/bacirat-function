@@ -64,6 +64,7 @@ jobs:
           tar -xzf "$w/baseline-v1.2.0.tar.gz" -C "$w"
           p="$w/baci-classroom-vps-offline"
           cp server/offline/{apt-local.sh,setup.py,install.sh,compact-renderer.py,compact-ffmpeg.py} "$p/"
+          cp server/recorder/transport.py "$p/payload/baci-classroom-recorder-school-http-v0.4.23.py"
           ( cd "$p"; find . -type f ! -name SHA256SUMS -printf '%P\0' | sort -z | xargs -0 sha256sum > SHA256SUMS )
           tar -cf - -C "$w" baci-classroom-vps-offline | gzip -n -1 > "$w/compact-trial.tar.gz"
           case '${{ matrix.tls }}' in

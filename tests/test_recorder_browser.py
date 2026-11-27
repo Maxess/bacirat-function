@@ -159,10 +159,12 @@ class RecorderPackageTest(unittest.TestCase):
             changed = {'board.js','frame.js','capture.py','recording.py','transport.py','README-fa.md'}
             for name in set(old.namelist()) - changed:
                 self.assertEqual(new.read(name), old.read(name))
-            # 0.4.22 ZIP is held unchanged while the native-source pilot is developed.
-            pilot = {'recording.py','archive.py','movie.py','replay.js','capture.py','board.js','README-fa.md'}
+            # Historical ZIPs do not inherit later native/HTTP compatibility fixes.
+            pilot = {'recording.py','archive.py','movie.py','replay.js','capture.py','board.js','README-fa.md','transport.py'}
             for name in ((changed | added | fonts) - pilot):
                 self.assertEqual(new.read(name), (ROOT / 'server/recorder' / name).read_bytes())
+            with ZipFile(ROOT / 'artifacts/baci-classroom-recorder-v0.4.23.zip') as native:
+                self.assertEqual(new.read('transport.py'), native.read('transport.py'))
             with ZipFile(ROOT / 'artifacts/school-classroom-plugin-v0.4.22.zip') as site:
                 self.assertEqual(new.read('board.js'), site.read('assets/board.js'))
             if site := os.environ.get('MPM_TEST_BACI'):

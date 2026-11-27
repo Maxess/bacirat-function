@@ -4,6 +4,7 @@ from email.message import Message
 from hashlib import sha256
 import importlib.util
 from io import BytesIO, StringIO
+import json
 from pathlib import Path
 import runpy
 import subprocess
@@ -35,9 +36,14 @@ class OfflineSetupTest(unittest.TestCase):
         with self.assertRaisesRegex(setup.Refused, 'Cannot determine the RAM'):
             setup.check_memory('MemAvailable: 600000 kB\n')
 
-    def test_install_profile_is_independent_of_tls(self):
-        self.assertEqual(setup.install_profile('auto', 469200), 'live')
-        self.assertEqual(setup.install_profile('auto', setup.FULL_RAM_KIB - 1), 'live')
+    def test_default_keeps_recording_or_refuses_instead_of_silently_installing_live(self):
+        self.assertEqual(setup.install_profile('auto', 469200, 524284), 'compact')
+        self.assertEqual(setup.install_profile('auto', 984740), 'compact')
+        self.assertEqual(setup.install_profile('auto', setup.FULL_RAM_KIB - 1), 'compact')
+        with self.assertRaisesRegex(setup.Refused, '512 MiB of active swap'):
+            setup.install_profile('auto', 469200)
+        with self.assertRaisesRegex(setup.Refused, 'not swap'):
+            setup.install_profile('auto', setup.COMPACT_RAM_KIB - 1, 524284)
         self.assertEqual(setup.install_profile('auto', setup.FULL_RAM_KIB), 'full')
         self.assertEqual(setup.install_profile('full', 4194304), 'full')
         self.assertEqual(setup.install_profile('live', 4194304), 'live')
@@ -49,6 +55,100 @@ class OfflineSetupTest(unittest.TestCase):
             setup.install_profile('compact', setup.COMPACT_RAM_KIB - 1)
         with self.assertRaisesRegex(setup.Refused, 'use --profile live'):
             setup.install_profile('full', 469200)
+
+    def test_installer_stages_the_verified_school_client_without_changing_the_frozen_zip(self):
+        with tempfile.TemporaryDirectory() as folder, ExitStack() as stack:
+            root = Path(folder)
+            rec = root / 'installed-recorder'
+            rec.mkdir()
+            program = rec / 'releases/0.4.23'
+            fix = program.with_name('0.4.23-renderer-r1')
+            payload = root / 'payload'
+            payload.mkdir()
+            for name in (setup.REC_ASSET, setup.PATCH_ASSET):
+                (payload / name).symlink_to(ARTIFACTS / name)
+                self.assertEqual(sha256((payload / name).read_bytes()).hexdigest(), setup.PAYLOAD[name])
+            school_client = payload / setup.SCHOOL_HTTP_ASSET
+            school_client.write_bytes((ROOT / 'server/recorder/transport.py').read_bytes())
+            for field, path in [('HERE', root), ('REC', rec), ('REC_PROGRAM', program), ('PATCH', fix)]:
+                stack.enter_context(patch.object(setup, field, path))
+            stack.enter_context(patch.object(setup.os, 'chown'))
+            stack.enter_context(patch.object(setup.os, 'fchown'))
+            setup.renderer_program()
+            with ZipFile(ARTIFACTS / setup.REC_ASSET) as stock:
+                self.assertNotEqual(stock.read('transport.py'), school_client.read_bytes())
+                self.assertEqual(stock.read('recording.py'), (program / 'recording.py').read_bytes())
+            self.assertEqual((program / 'transport.py').read_bytes(), school_client.read_bytes())
+            school_client.write_bytes(school_client.read_bytes() + b'\n')
+            with self.assertRaisesRegex(setup.Refused, 'did not match its SHA-256'):
+                setup.school_http_bytes(school_client)
+
+    def test_maintenance_uses_the_installed_transport_and_does_not_leak_replies(self):
+        cfg = {'school': 'https://school.example.ir/campus'}
+        keys = {'recording_secret': 'a' * 64}
+        worker = 'b' * 32
+        response = {'ok': True, 'release': '0.4.23', 'idle': True, 'worker_ok': True, 'native_ready': True}
+        with tempfile.TemporaryDirectory() as folder, ExitStack() as stack:
+            program = Path(folder)
+            transport = program / 'transport.py'
+            transport.write_bytes((ROOT / 'server/recorder/transport.py').read_bytes())
+            stack.enter_context(patch.object(setup, 'HERE', setup.APP))
+            stack.enter_context(patch.object(setup, 'REC_PROGRAM', program))
+            connect = stack.enter_context(patch.object(setup.http.client, 'HTTPSConnection'))
+            conn = connect.return_value
+            reply = conn.getresponse.return_value
+            reply.status, reply.length, reply.getheaders.return_value = 200, 0, []
+            reply.read1.side_effect = [json.dumps(response).encode(), b'']
+            self.assertEqual(setup.recorder_status(cfg, keys, worker), response)
+            self.assertEqual(connect.call_args.args, ('school.example.ir',))
+            conn.putrequest.assert_called_once_with('POST', '/campus/plugins/school-plugins.php?plugin=school-classroom&route=recording',
+                                                    skip_accept_encoding=True)
+            conn.putheader.assert_any_call('User-Agent', 'Baci-Classroom-Recorder/0.4.23')
+            conn.putheader.assert_any_call('Authorization', 'Bearer ' + keys['recording_secret'])
+            self.assertEqual(json.loads(conn.send.call_args.args[0]), {'action': 'maintenance', 'protocol': 2, 'worker': worker, 'id': None})
+            reply.status, reply.read1.side_effect = 403, [b'private server reply', b'']
+            with self.assertRaises(setup.RecorderProbeFailed) as denied:
+                setup.recorder_status(cfg, keys, worker)
+            self.assertEqual(denied.exception.reason, 'http_403')
+            self.assertNotIn('private server reply', str(denied.exception))
+            transport.write_bytes(b'invalid')
+            connect.reset_mock()
+            with self.assertRaises(setup.RecorderProbeFailed) as invalid:
+                setup.recorder_status(cfg, keys, worker)
+            self.assertEqual(invalid.exception.reason, 'local_client_invalid')
+            connect.assert_not_called()
+
+    def test_online_doctor_requires_the_matching_worker_heartbeat(self):
+        cfg = {'media': 'media.example.test', 'origin': 'https://school.example.test',
+               'school': 'https://school.example.test', 'site_path': '', 'profile': 'compact'}
+        secret, worker = 'a' * 64, 'b' * 32
+        expected = {'site': cfg['school'], 'secret': secret}
+        values = {setup.PAIR: {'site': cfg['school'], 'recording_secret': secret},
+                  setup.SPOOL / 'worker.json': {'id': worker}, setup.REC_CFG: expected, setup.REC_CREDENTIAL: expected.copy()}
+        with ExitStack() as stack:
+            for name in ('local_checks', 'edge_certificate', 'check_media_dns'):
+                stack.enter_context(patch.object(setup, name, return_value='certificate'))
+            for name in ('pilot_deployment', 'verify_receiver'):
+                stack.enter_context(patch.object(setup.media, name))
+            stack.enter_context(patch.object(setup, 'json_file', side_effect=values.__getitem__))
+            clock = stack.enter_context(patch.object(setup.time, 'sleep'))
+            check = stack.enter_context(patch.object(setup, 'recorder_status'))
+            out = stack.enter_context(redirect_stdout(StringIO()))
+            waiting = {'worker_ok': True, 'native_ready': False}
+            check.return_value = waiting
+            self.assertFalse(setup.doctor(cfg, True))
+            self.assertIn('school_recorder=paired_waiting_for_heartbeat', out.getvalue())
+            clock.assert_not_called()
+            check.side_effect = [waiting, {'worker_ok': True, 'native_ready': True}]
+            self.assertTrue(setup.doctor(cfg, True, wait=True))
+            self.assertIn('school_recorder=ready', out.getvalue())
+            clock.assert_called_once_with(2)
+            check.reset_mock(side_effect=True)
+            values[setup.REC_CREDENTIAL] = expected | {'secret': 'c' * 64}
+            self.assertFalse(setup.doctor(cfg, True))
+            self.assertIn('reason=local_pairing_mismatch', out.getvalue())
+            self.assertNotIn(secret, out.getvalue())
+            check.assert_not_called()
 
     def test_compact_encoder_preserves_r1_streams_and_segment_rules(self):
         compact = runpy.run_path(str(OFFLINE / 'compact-ffmpeg.py'))['command']
@@ -334,7 +434,8 @@ class OfflineSetupTest(unittest.TestCase):
             stack.enter_context(patch.object(setup.os, 'umask'))
             stdout = stack.enter_context(redirect_stdout(StringIO()))
             stack.enter_context(redirect_stderr(StringIO()))
-            self.assertEqual(setup.main(['--profile', 'compact']), 0)
+            self.assertEqual(setup.main(['--profile', 'compact']), 1)
+            self.assertIn('not an in-place upgrade', stdout.getvalue())
             preflight.assert_not_called()
             self.assertEqual(setup.main(['--add-recorder', '--check', '--site', 'https://other.example.ir']), 1)
             preflight.assert_not_called()
@@ -345,6 +446,17 @@ class OfflineSetupTest(unittest.TestCase):
             self.assertNotIn('not-logged', stdout.getvalue())
             txn.assert_not_called()
             apt.assert_not_called()
+
+    def test_v131_live_is_still_eligible_for_the_guarded_addon(self):
+        class ReachedMemoryCheck(Exception):
+            pass
+
+        with patch.object(setup.Path, 'read_text', side_effect=ReachedMemoryCheck):
+            for version in ('1.2.0', '1.3.0', '1.3.1', setup.VERSION):
+                with self.subTest(version=version), self.assertRaises(ReachedMemoryCheck):
+                    setup.addition_preflight({'version': version, 'profile': 'live', 'tls_mode': 'files'}, 'auto', 'b' * 32)
+            with self.assertRaisesRegex(setup.Refused, 'only for a completed Baci offline live install'):
+                setup.addition_preflight({'version': '1.3.1', 'profile': 'compact', 'tls_mode': 'files'}, 'auto', 'b' * 32)
 
     def test_add_recorder_fences_both_the_sfu_and_school(self):
         inputs = {'school': 'https://school.example.ir'}
