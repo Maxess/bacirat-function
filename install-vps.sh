@@ -6,8 +6,8 @@ unset BASH_ENV ENV CDPATH TAR_OPTIONS
 umask 077
 
 # This pin names the exact archive that passed the packaged classroom rehearsal.
-readonly VERSION=1.3.2
-readonly SHA256=81f47e03f417489a906fcea6ab8aa79239edcb933612fbe050fd101bf1a40e37
+readonly VERSION=1.3.3
+readonly SHA256=33f90e0fa350078bdfaa487adda3ba66f0182eb272f0f15e1b67a927ad3fe176
 readonly BUNDLE=baci-classroom-vps-offline
 readonly ARCHIVE="${BUNDLE}-v${VERSION}-ubuntu24.04-amd64.tar.gz"
 readonly URL="https://github.com/Maxess/bacirat-function/releases/download/vps-offline-v${VERSION}/${ARCHIVE}"
