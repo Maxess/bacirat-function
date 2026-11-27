@@ -10,8 +10,10 @@ def ffmpeg(*args):
 
 
 p = Path(sys.argv[1])
-for name, size, rate, source in [('camera', '640x360', '260k', 'testsrc2'), ('screen', '1280x720', '420k', 'testsrc')]:
-    ffmpeg('-f', 'lavfi', '-i', f'{source}=size={size}:rate=10', '-t', '3', '-an', '-c:v', 'libvpx',
+for name, size, rate, source, color in [('camera', '640x360', '260k', 'testsrc2', '0xe000ce'),
+                                       ('screen', '1280x720', '420k', 'testsrc', '0x25dc30')]:
+    ffmpeg('-f', 'lavfi', '-i', f'{source}=size={size}:rate=10', '-t', '3', '-an',
+           '-vf', f'drawbox=x=3*iw/8:y=3*ih/8:w=iw/4:h=ih/4:color={color}:t=fill', '-c:v', 'libvpx',
            '-pix_fmt', 'yuv420p', '-deadline', 'realtime', '-cpu-used', '6', '-threads', '2', '-g', '15',
            '-b:v', rate, '-f', 'ivf', str(p / f'{name}.ivf'))
 for name, hz in [('teacher', 440), ('pupil', 730)]:

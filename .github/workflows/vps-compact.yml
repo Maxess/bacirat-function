@@ -10,6 +10,7 @@ on:
       - tests/fixtures/vps-class-load.go
       - tests/fixtures/vps-offline-peer.py
       - tests/test_vps_offline.py
+      - artifacts/baci-classroom-recorder-*-r3.zip
 permissions:
   contents: read
 jobs:
@@ -64,6 +65,8 @@ jobs:
           tar -xzf "$w/baseline-v1.2.0.tar.gz" -C "$w"
           p="$w/baci-classroom-vps-offline"
           cp server/offline/{apt-local.sh,setup.py,install.sh,compact-renderer.py,compact-ffmpeg.py} "$p/"
+          rm -f "$p/payload/baci-classroom-recorder-v0.4.23.zip" "$p/payload/baci-classroom-renderer-v0.4.23-r1.zip"
+          cp artifacts/baci-classroom-recorder-v0.4.23-r3.zip "$p/payload/"
           cp server/recorder/transport.py "$p/payload/baci-classroom-recorder-school-http-v0.4.23.py"
           ( cd "$p"; find . -type f ! -name SHA256SUMS -printf '%P\0' | sort -z | xargs -0 sha256sum > SHA256SUMS )
           tar -cf - -C "$w" baci-classroom-vps-offline | gzip -n -1 > "$w/compact-trial.tar.gz"
@@ -73,7 +76,7 @@ jobs:
           esac
           log="$w/rehearsal.log"
           set +e
-          bash scripts/test-vps-offline-vm.sh "$w/compact-trial.tar.gz" '${{ matrix.tls }}' '${{ matrix.ram }}' '' '${{ matrix.scenario }}' "$load" "$w/baseline-v1.2.0.tar.gz" '${{ matrix.swap }}' 2>&1 | tee "$log"
+          BACI_QA_CAMERA=1 bash scripts/test-vps-offline-vm.sh "$w/compact-trial.tar.gz" '${{ matrix.tls }}' '${{ matrix.ram }}' '' '${{ matrix.scenario }}' "$load" "$w/baseline-v1.2.0.tar.gz" '${{ matrix.swap }}' 2>&1 | tee "$log"
           rc=${PIPESTATUS[0]}
           set -e
           if (( rc != 0 )); then
@@ -81,5 +84,7 @@ jobs:
             echo "::error title=Compact VM rehearsal::${proof:0:3800}"
             exit "$rc"
           fi
+          grep -Fq 'QA_R3 profile=compact running services' "$log"
+          if [[ -n "$load" ]]; then grep -Fq 'QA_CAMERA uploaded MP4:' "$log"; fi
           proof=$(grep -E '^QA_|^VM memory|^VM passed|^Real ACME' "$log" | paste -sd '|')
           echo "::notice title=Compact VM measurements::${proof:0:4100}"

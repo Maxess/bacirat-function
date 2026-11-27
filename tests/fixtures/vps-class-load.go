@@ -281,7 +281,7 @@ func run() error {
 			step/50, minimum, float64(sent[2]-previous[2])*8/10000, float64(sent[3]-previous[3])*8/10000)
 		previous = sent
 		if step == 1000 {
-			status, err := json.Marshal(map[string]string{"teacherSID": rooms[0].LocalParticipant.SID(), "screenSID": streams[3].publication.SID()})
+			status, err := json.Marshal(map[string]string{"teacherSID": rooms[0].LocalParticipant.SID(), "screenSID": streams[3].publication.SID(), "cameraSID": streams[2].publication.SID()})
 			if err != nil {
 				return err
 			}

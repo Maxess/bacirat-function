@@ -25,7 +25,7 @@ from postprocess import PostProcess, request_render
 FFMPEG = os.environ.get('MPM_REC_FFMPEG') or shutil.which('ffmpeg')
 FFPROBE = os.environ.get('MPM_TEST_FFPROBE') or shutil.which('ffprobe')
 CHROMIUM = os.environ.get('MPM_TEST_CHROMIUM')
-PUBLISHED = ROOT / 'artifacts/baci-classroom-recorder-v0.4.23.zip'
+PUBLISHED = ROOT / 'artifacts/baci-classroom-recorder-v0.4.23-r3.zip'
 JOB = 'a' * 32
 
 
@@ -170,6 +170,44 @@ OPUS_REPLAY_PCM = '''async ({packets, paced}) => {
 }'''
 
 
+CAMERA_REPLAY = '''async () => {
+    const video = async color => {
+        const canvas = document.createElement('canvas'); canvas.width = 64; canvas.height = 48;
+        const ctx = canvas.getContext('2d'); ctx.fillStyle = color; ctx.fillRect(0,0,64,48);
+        let encoded, failure;
+        const encoder = new VideoEncoder({output(chunk) {
+            const bytes = new Uint8Array(chunk.byteLength); chunk.copyTo(bytes); encoded = bytes.toBase64();
+        }, error(error) { failure = error; }});
+        encoder.configure({codec:'vp8',width:64,height:48,framerate:12,latencyMode:'realtime'});
+        const frame = new VideoFrame(canvas,{timestamp:0});
+        encoder.encode(frame,{keyFrame:true}); frame.close(); await encoder.flush(); encoder.close();
+        if (!encoded || failure) throw new Error('VP8 fixture failed');
+        return encoded;
+    };
+    const [teacher, cam, screen] = await Promise.all(['#3030ee','#e000ce','#25dc30'].map(video));
+    const prefs = {board:true,screen:'TR_screen',screenOwner:{identity:'teacher-1',sid:'PA_teacher'},
+                   camera:{identity:'student-1',sid:'PA_pupil',track:'TR_pupil'}};
+    await replay.start({lesson:'a'.repeat(32),epoch:'b'.repeat(24),teacher:'teacher-1',archive:prefs});
+    const source = (id, at, type, who, sid, track, data) => [
+        ['open',id,at,type,who,sid,track,false], ['media',id,at,'video/vp8',at*90,true,data]];
+    const first = [...source(1,0,'camera','teacher-1','PA_teacher','TR_teacher',teacher),
+        ...source(2,0,'camera','student-1','PA_pupil','TR_pupil',cam),
+        ...source(3,0,'screen_share','teacher-1','PA_teacher','TR_screen',screen)];
+    const change = (at, archive) => ['board',0,at,{rev:1,cursor:0,reset:true,ops:[],docs:[],page:1,doc:null},archive,at];
+    const nextPrefs = {...prefs,camera:{identity:'student-1',sid:'PA_next',track:'TR_next'}};
+    const cases = [first, [['mute',2,60,true]], [['end',2,140], ...source(4,140,'camera','student-1','PA_next','TR_next',cam)],
+        [change(230,{...prefs,camera:{...prefs.camera,track:'TR_next'}})], [change(315,nextPrefs)],
+        [change(395,{...nextPrefs,screen:null})]];
+    const ctx = document.getElementById('film').getContext('2d');
+    const sample = x => [...ctx.getImageData(x,285,1,1).data].slice(0,3);
+    const pixels = [];
+    for (const [i, updates] of cases.entries()) {
+        await replay.frame(i, updates); pixels.push([sample(300),sample(940)]);
+    }
+    return pixels;
+}'''
+
+
 def seal_fixture(spool, packets):
     path = spool / JOB
     path.mkdir(mode=0o700)
@@ -201,7 +239,6 @@ class BrowserReplayTest(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp, ZipFile(PUBLISHED) as archive:
             assets = Path(tmp)
             archive.extractall(assets)
-            (assets / 'replay.js').write_bytes((ROOT / 'server/recorder/replay.js').read_bytes())
             async with async_playwright() as playwright:
                 browser = await playwright.chromium.launch(executable_path=CHROMIUM, chromium_sandbox=True)
                 try:
@@ -239,7 +276,29 @@ class BrowserReplayTest(unittest.IsolatedAsyncioTestCase):
                 finally:
                     await browser.close()
 
-    async def test_archived_board_and_opus_replay_export_through_lease(self):
+    async def test_large_camera_obeys_the_recorded_publication_and_yields_on_mute(self):
+        from playwright.async_api import async_playwright
+        with tempfile.TemporaryDirectory() as tmp, ZipFile(PUBLISHED) as archive:
+            archive.extractall(tmp)
+            async with async_playwright() as playwright:
+                browser = await playwright.chromium.launch(executable_path=CHROMIUM, chromium_sandbox=True)
+                try:
+                    async with ArchiveRenderer(Path(tmp)).open(browser) as page:
+                        samples = await page.evaluate(CAMERA_REPLAY)
+                finally:
+                    await browser.close()
+        # A pink camera replaces the right board, while green screen remains at left.
+        first, muted, new_track, wrong_sid, restored, no_screen = samples
+        pink = lambda rgb: rgb[0] > 170 and rgb[1] < 65 and rgb[2] > 130
+        green = lambda rgb: rgb[1] > 170 and rgb[0] < 75 and rgb[2] < 75
+        self.assertTrue(green(first[0]) and pink(first[1]), first)
+        for pair in (muted, new_track, wrong_sid):
+            self.assertTrue(green(pair[0]) and not pink(pair[1]), pair)
+        self.assertEqual(muted[1], new_track[1], 'the same board returns without a focused camera')
+        self.assertTrue(green(restored[0]) and pink(restored[1]), restored)
+        self.assertTrue(no_screen[0][2] > 160 and pink(no_screen[1]), no_screen)
+
+    async def test_archived_board_audio_and_full_persian_credit_in_mp4(self):
         from playwright.async_api import async_playwright
 
         launch = {'executable_path': CHROMIUM, 'chromium_sandbox': True, 'args': ['--autoplay-policy=no-user-gesture-required']}
@@ -249,12 +308,28 @@ class BrowserReplayTest(unittest.IsolatedAsyncioTestCase):
             spool.mkdir(mode=0o700)
             with ZipFile(PUBLISHED) as archive:
                 archive.extractall(assets)
-            (assets / 'replay.js').write_bytes((ROOT / 'server/recorder/replay.js').read_bytes())
             async with async_playwright() as playwright:
                 browser = await playwright.chromium.launch(**launch)
                 try:
                     async with ArchiveRenderer(assets).open(browser) as page:
                         packets = await page.evaluate(OPUS_FIXTURE)
+                        credit = await page.evaluate('''async () => {
+                            const ctx = document.getElementById('film').getContext('2d');
+                            let credit;
+                            const fill = ctx.fillText.bind(ctx);
+                            ctx.fillText = (text,x,y) => {
+                                fill(text,x,y);
+                                if (y !== 29 || !text.startsWith('طراحی و توسعه')) return;
+                                const m = ctx.measureText(text);
+                                const left = Math.floor(x-m.actualBoundingBoxLeft), width = Math.ceil(x+m.actualBoundingBoxRight)-left+1;
+                                const box = [left,15,width,29];
+                                credit = {text,rtl:ctx.direction === 'rtl',box,mask:[...ctx.getImageData(...box).data]
+                                    .filter((v,i) => i%4 === 0).map(v => v > 140)};
+                            };
+                            await replay.start({lesson:'a'.repeat(32),epoch:'c'.repeat(24)});
+                            await replay.frame(0,[]);
+                            return credit;
+                        }''')
                     results = []
                     for paced in (False, True):
                         async with ArchiveRenderer(assets).open(browser) as page:
@@ -291,6 +366,15 @@ class BrowserReplayTest(unittest.IsolatedAsyncioTestCase):
             start = (320 * WIDTH + 500) * 3
             board = pixels[start:start + 280 * 3:3]
             self.assertGreater(len(set(board)), 20)  # The noisy archived document reached the film.
+            self.assertEqual(credit['text'], 'طراحی و توسعه : سید مهدی بیات')
+            self.assertTrue(credit['rtl'])
+            x, y, w, h = credit['box']
+            self.assertGreaterEqual(x, 24)
+            expected = {i for i, ink in enumerate(credit['mask']) if ink}
+            decoded = {row * w + col for row in range(h) for col in range(w)
+                       if pixels[((y + row) * WIDTH + x + col) * 3] > 140}
+            self.assertGreater(len(expected), 120)
+            self.assertGreater(len(expected & decoded) / len(expected | decoded), .83, 'credit glyphs in the MP4')
 
 
 if __name__ == '__main__':

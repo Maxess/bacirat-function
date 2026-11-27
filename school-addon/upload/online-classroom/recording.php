@@ -244,17 +244,42 @@ function cl_rec_source_prefs(array $job, array $lesson): array
         ? $job['source_prefs'] : ['epoch'=>$epoch];
 }
 
+function cl_rec_camera_eligible(array $cfg, array $lesson, array $choice): bool
+{
+    $id = $choice['identity'];
+    return cl_media_identity($id) && cl_sid($choice['sid']) && cl_sid($choice['track']) && str_starts_with($choice['track'], 'TR_')
+        && ($lesson['seen'][$id] ?? null) === $choice['sid'] && cl_webcam_codec($cfg, $lesson, $id) !== null
+        && cl_access_enabled($lesson, 'camera', $id);
+}
+
+function cl_rec_camera_published(array $lesson, array $choice, callable $rpc): bool
+{
+    // Only an explicit selection queries the SFU. Board/worker polling stays unchanged.
+    $room = $lesson['room'];
+    $peers = cl_live_media_peers($rpc('ListParticipants', $room, ['room'=>$room]), $lesson['recorder']);
+    $peer = $peers[$choice['identity']] ?? [];
+    if (($peer['sid'] ?? null) !== $choice['sid'] || !is_array($peer['tracks'] ?? null)) return false;
+    foreach ($peer['tracks'] as $track) {
+        if (is_array($track) && ($track['sid'] ?? null) === $choice['track']
+            && cl_track_source($track['source'] ?? null) === 'CAMERA' && ($track['muted'] ?? false) === false) return true;
+    }
+    return false;
+}
+
 function cl_rec_layout(array $cfg, array $job, array $lesson, bool $worker = false): array
 {
     $prefs = cl_rec_source_prefs($job, $lesson);
     $owner = cl_screen_state($cfg, $lesson);
     $screen = $prefs['screen'] ?? null;
+    $camera = $prefs['camera'] ?? null;
     return ['board'=>($prefs['board'] ?? false) === true, 'screen'=>$screen && $screen['owner'] === $owner ? $screen['track'] : null]
+        + (($job['camera_layout'] ?? false) === true
+            ? ['camera'=>$camera && cl_rec_camera_eligible($cfg, $lesson, $camera) ? $camera : null] : [])
         + ($worker ? ['screenOwner'=>$owner] : []);
 }
 
 // Called only with a confirmed participant, a checked transport and the class lock held.
-function cl_rec_set_source(ClassroomStore $s, array $cfg, array $lesson, array $actor, array $body, int $now): array
+function cl_rec_set_source(ClassroomStore $s, array $cfg, array $lesson, array $actor, array $body, int $now, ?callable $rpc = null): array
 {
     cl_require_board_control($lesson, $actor, $body, $now);
     $job = isset($lesson['recorder']) ? $s->get('recording', $lesson['id']) : null;
@@ -264,12 +289,12 @@ function cl_rec_set_source(ClassroomStore $s, array $cfg, array $lesson, array $
     }
     $source = $body['source'] ?? null;
     $enabled = $body['enabled'] ?? null;
-    if (!in_array($source, ['board','screen'], true) || !is_bool($enabled)) {
+    if (!in_array($source, ['board','screen','camera'], true) || !is_bool($enabled)) {
         throw new ClassroomError(400, 'منبع یا وضعیت نمایش در ضبط معتبر نیست.');
     }
     $prefs = cl_rec_source_prefs($job, $lesson);
     if ($source === 'board') $prefs['board'] = $enabled;
-    else {
+    elseif ($source === 'screen') {
         $owner = cl_screen_state($cfg, $lesson);
         $track = $body['track'] ?? null;
         if (!$owner || $owner['sid'] !== ($body['publisherSid'] ?? null) || !cl_sid($track) || !str_starts_with($track, 'TR_')) {
@@ -280,6 +305,17 @@ function cl_rec_set_source(ClassroomStore $s, array $cfg, array $lesson, array $
         $choice = ['owner'=>$owner,'track'=>$track];
         if ($enabled) $prefs['screen'] = $choice;
         elseif (($prefs['screen'] ?? null) === $choice) unset($prefs['screen']);
+    } else {
+        if (($job['camera_layout'] ?? false) !== true) {
+            throw new ClassroomError(409, 'نسخهٔ سازندهٔ فیلم از نمایش بزرگ وب‌کم پشتیبانی نمی‌کند.');
+        }
+        $choice = ['identity'=>$body['identity'] ?? null,'sid'=>$body['publisherSid'] ?? null,'track'=>$body['track'] ?? null];
+        if ($enabled) {
+            if (!$rpc || !cl_rec_camera_eligible($cfg, $lesson, $choice) || !cl_rec_camera_published($lesson, $choice, $rpc)) {
+                throw new ClassroomError(409, 'وب‌کم خاموش شده، عوض شده یا مجاز نیست؛ دوباره بررسی کن.');
+            }
+            $prefs['camera'] = $choice;
+        } elseif (($prefs['camera'] ?? null) === $choice) unset($prefs['camera']);
     }
     $job['source_prefs'] = $prefs;
     $s->put('recording', $job['id'], $job);
@@ -530,8 +566,9 @@ function cl_rec_worker(ClassroomStore $s, array $cfg, array $input, int $now, ca
             } elseif (cl_rec_capture_room($cfg, $job, $lesson, $now)) {
                 $running = ($input['running'] ?? null) === $lesson['room'];
                 $layout = true; // Protocol 2 always captures the layout and laser timeline.
-                if ($running !== $job['live'] || $layout !== ($job['layout_capable'] ?? false)) {
-                    $job = array_replace($job, ['live'=>$running, 'layout_capable'=>$layout]);
+                $camera = ($input['archiveCamera'] ?? false) === true;
+                if ($running !== $job['live'] || $layout !== ($job['layout_capable'] ?? false) || $camera !== ($job['camera_layout'] ?? false)) {
+                    $job = array_replace($job, ['live'=>$running, 'layout_capable'=>$layout, 'camera_layout'=>$camera]);
                     $s->put('recording', $id, $job);
                 }
                 $cmd = ['command'=>'record','id'=>$id,'room'=>$lesson['room'],'expires'=>$job['expires'],

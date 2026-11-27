@@ -127,6 +127,11 @@ PY_HTTP
             fi
             school layout "$bell"
             vm "for n in \$(seq 1 8); do if sudo test -s '$spool/$id/doc-cccccccccccccccccccccccccccccccc.pdf'; then exit; fi; sleep 1; done; exit 1"
+            if [[ ${BACI_QA_CAMERA:-0} == 1 ]]; then
+                school focus-camera "$bell"
+                sleep 10 # Long enough for several layout samples, leaving time for the fallback.
+                school clear-camera "$bell"
+            fi
         fi
         # No MP4 or compositor while pupils are still receiving A/V.
         expect_no_browser
@@ -176,7 +181,7 @@ assert job['not_before'] <= job['rendered_at'] <= receipt
 print(f"QA_RECORD approved MP4 after the one-minute delay: render_after_eligible_s={job['rendered_at'] - job['not_before']} receipt_after_eligible_s={receipt - job['not_before']}")
 PY_RECEIPT
     # Decode received bytes, not the check_encoder MP4 or a filesystem-only export.
-    python3 "$root/tests/fixtures/vps-record-verify.py" "$q/received.mp4"
+    python3 "$root/tests/fixtures/vps-record-verify.py" "$q/received.mp4" "${BACI_QA_CAMERA:-0}"
     if [[ ${BACI_QA_AUDIO_REPAIR:-0} == 1 ]]; then
         vm 'sudo sha256sum -c --quiet audio-r2.sha audio-config.before && systemctl show -p InvocationID school-classroom-{sfu,admission,https,recorder,postprocess}.service | cmp audio-invocations.before -'
         echo 'QA_AUDIO approved film with r2 passed the existing AAC/video decode and delivery checks.'

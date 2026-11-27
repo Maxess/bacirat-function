@@ -38,15 +38,20 @@ class PackageTest(unittest.TestCase):
             self.assertEqual((Path(temp) / REPAIR.name).read_bytes(), REPAIR.read_bytes())
             before, after = installer.reviewed_payloads()
             self.assertEqual(before, stock.read('replay.js'))
-            self.assertEqual(after, (ROOT / 'server/recorder/replay.js').read_bytes())
+            self.assertEqual(installer.digest(after), '54cb9ab61118e60412357b0555d72325fb0cd1b7c8a2136c70f17ba16de11a1c')
             self.assertNotEqual(before, after)
+            with ZipFile(ARTIFACTS / 'baci-classroom-recorder-v0.4.23-r3.zip') as fresh:
+                # The new renderer only changes composition; retain the reviewed audio implementation.
+                def pcm(data):
+                    return data.split(b'    function placeSound(', 1)[1].split(b'    function composite(', 1)[0]
+                self.assertEqual(pcm(fresh.read('replay.js')), pcm(after))
             self.assertEqual(installer.RENDERER_ASSETS, {name: installer.digest(raw) for name, raw in (
                 ('archive.py', stock.read('archive.py')), ('movie.py', repair.read('movie.py')),
                 ('postprocess.py', repair.read('postprocess.py')))})
             self.assertEqual(installer.UNIT_SHA, installer.digest(stock.read('school-classroom-postprocess.service')))
             self.assertEqual(installer.COMPACT_SHA, sha(ROOT / 'server/offline/compact-renderer.py'))
             self.assertEqual(installer.HELPERS, {'vps_media.py': sha(ROOT / 'server/install.py'),
-                                                'baci-vps.py': sha(ROOT / 'server/offline/setup.py')})
+                                                'baci-vps.py': '6455e2f0187f014d9dd5456a3165e8f05f632ef3dceae23283a7a776b7824f1a'})
             self.assertIn(sha(REPAIR), (ROOT / 'docs/repair-recorder-audio.fa.md').read_text())
 
     def test_payload_is_refused_if_modified(self):

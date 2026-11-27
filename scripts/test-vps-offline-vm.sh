@@ -552,7 +552,31 @@ if [[ "$SCENARIO" == upgrade ]]; then
     units+=(school-classroom-recorder.service)
     PROFILE=compact
 fi
-if [[ "$PROFILE" != live ]]; then units+=(school-classroom-postprocess.service); fi
+if [[ "$PROFILE" != live ]]; then
+    units+=(school-classroom-postprocess.service)
+    payload=baci-classroom-vps-offline/payload
+    if [[ "$SCENARIO" == upgrade ]]; then payload=candidate/$payload; fi
+    if [[ -f "$payload/baci-classroom-recorder-v0.4.23-r3.zip" ]]; then
+        sudo /usr/bin/python3 -IB - "$payload/baci-classroom-recorder-v0.4.23-r3.zip" "$PROFILE" <<'PY_PROGRAM'
+from pathlib import Path
+import subprocess
+import sys
+from zipfile import ZipFile
+
+program = Path('opt/school-classroom-recorder/releases/0.4.23')
+with ZipFile(sys.argv[1]) as pack:
+    for service, names in {
+        'recorder': ('recording.py', 'transport.py'),
+        'postprocess': ('movie.py', 'postprocess.py', 'frame.js', 'replay.js'),
+    }.items():
+        pid = int(subprocess.check_output(['systemctl', 'show', '-p', 'MainPID', '--value', f'school-classroom-{service}.service']))
+        assert pid > 1
+        for name in names:
+            assert (Path(f'/proc/{pid}/root') / program / name).read_bytes() == pack.read(name), name
+print(f'QA_R3 profile={sys.argv[2]} running services see the pinned camera and audio renderer without a repair step.')
+PY_PROGRAM
+    fi
+fi
 for unit in "${units[@]}"; do
     test "$(systemctl show -p NRestarts --value "$unit")" -eq 0
     printf 'VM service %s %s\n' "$unit" "$(systemctl show -p MemoryCurrent -p MemoryPeak "$unit" | paste -sd ' ')"

@@ -24,7 +24,7 @@ spec.loader.exec_module(setup)
 
 BUNDLE = 'baci-classroom-vps-offline'
 NAME = f'{BUNDLE}-v{setup.VERSION}-ubuntu24.04-amd64'
-SITE = 'baci-classroom-site-pairing-v0.1.31.zip'
+SITE = 'baci-classroom-site-upgrade-v0.4.26.zip'
 ARCHIVE = 'https://archive.ubuntu.com/ubuntu/'
 
 

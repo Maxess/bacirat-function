@@ -56,28 +56,28 @@ class OfflineSetupTest(unittest.TestCase):
         with self.assertRaisesRegex(setup.Refused, 'use --profile live'):
             setup.install_profile('full', 469200)
 
-    def test_installer_stages_the_verified_school_client_without_changing_the_frozen_zip(self):
+    def test_fresh_installer_stages_the_repaired_program_without_overlay_or_updater(self):
         with tempfile.TemporaryDirectory() as folder, ExitStack() as stack:
             root = Path(folder)
             rec = root / 'installed-recorder'
             rec.mkdir()
             program = rec / 'releases/0.4.23'
-            fix = program.with_name('0.4.23-renderer-r1')
             payload = root / 'payload'
             payload.mkdir()
-            for name in (setup.REC_ASSET, setup.PATCH_ASSET):
-                (payload / name).symlink_to(ARTIFACTS / name)
-                self.assertEqual(sha256((payload / name).read_bytes()).hexdigest(), setup.PAYLOAD[name])
+            (payload / setup.REC_ASSET).symlink_to(ARTIFACTS / setup.REC_ASSET)
             school_client = payload / setup.SCHOOL_HTTP_ASSET
             school_client.write_bytes((ROOT / 'server/recorder/transport.py').read_bytes())
-            for field, path in [('HERE', root), ('REC', rec), ('REC_PROGRAM', program), ('PATCH', fix)]:
+            for field, path in [('HERE', root), ('REC', rec), ('REC_PROGRAM', program)]:
                 stack.enter_context(patch.object(setup, field, path))
             stack.enter_context(patch.object(setup.os, 'chown'))
             stack.enter_context(patch.object(setup.os, 'fchown'))
-            setup.renderer_program()
-            with ZipFile(ARTIFACTS / setup.REC_ASSET) as stock:
-                self.assertNotEqual(stock.read('transport.py'), school_client.read_bytes())
-                self.assertEqual(stock.read('recording.py'), (program / 'recording.py').read_bytes())
+            units = setup.renderer_program()
+            with ZipFile(ARTIFACTS / setup.REC_ASSET) as pack:
+                for name in pack.namelist():
+                    self.assertEqual(units[name] if name in units else (program / name).read_bytes(), pack.read(name), name)
+            self.assertEqual(list(program.parent.iterdir()), [program])
+            self.assertFalse(any('70-renderer' in name or 'repair' in name for name in units))
+            self.assertIn(b'archiveCamera', (program / 'recording.py').read_bytes())
             self.assertEqual((program / 'transport.py').read_bytes(), school_client.read_bytes())
             school_client.write_bytes(school_client.read_bytes() + b'\n')
             with self.assertRaisesRegex(setup.Refused, 'did not match its SHA-256'):
@@ -487,13 +487,22 @@ class OfflineSetupTest(unittest.TestCase):
                 setup.write(p.with_name('fresh'), 'interrupted')
             self.assertFalse(p.with_name('fresh').exists())
 
-    def test_frozen_vps_payload_and_pairing_companion(self):
-        for name in (setup.REC_ASSET, setup.PATCH_ASSET):
-            self.assertEqual(sha256((ARTIFACTS / name).read_bytes()).hexdigest(), setup.PAYLOAD[name])
-        # The installer keeps the original 1.3.2 pairing bytes, independent of future site-only updates.
-        self.assertEqual(sha256((ARTIFACTS / build.SITE).read_bytes()).hexdigest(),
-                         '9d2c3545558a0bec1e698b6bb54cf03a40b7c26db207eeb5442c6f3b525d8237')
+    def test_fresh_pack_is_reproducible_and_matches_the_installer_and_site(self):
+        self.assertEqual(setup.VERSION, '1.3.3')
+        self.assertEqual(sha256((ARTIFACTS / setup.REC_ASSET).read_bytes()).hexdigest(), setup.PAYLOAD[setup.REC_ASSET])
+        with tempfile.TemporaryDirectory() as folder:
+            subprocess.run(['python3', str(ROOT / 'scripts/build-managed-school.py'), '--recorder-fresh',
+                            '--output-dir', folder], check=True, capture_output=True, timeout=20)
+            self.assertEqual((Path(folder) / setup.REC_ASSET).read_bytes(), (ARTIFACTS / setup.REC_ASSET).read_bytes())
         with ZipFile(ARTIFACTS / build.SITE) as site:
+            self.assertCountEqual(site.namelist(), ['baci-plugin-manager-update-v0.1.33.zip',
+                'school-classroom-plugin-v0.4.26.zip', 'START-HERE-fa.txt', 'SHA256SUMS.txt'])
+
+    def test_historical_pairing_is_frozen(self):
+        pairing = ARTIFACTS / 'baci-classroom-site-pairing-v0.1.31.zip'
+        self.assertEqual(sha256(pairing.read_bytes()).hexdigest(),
+                         '9d2c3545558a0bec1e698b6bb54cf03a40b7c26db207eeb5442c6f3b525d8237')
+        with ZipFile(pairing) as site:
             self.assertCountEqual(site.namelist(), [SITE_UPDATER, CLASSROOM, 'START-HERE-fa.txt', 'SHA256SUMS.txt'])
             self.assertEqual(site.read(CLASSROOM), (ARTIFACTS / CLASSROOM).read_bytes())
             self.assertEqual(site.read(SITE_UPDATER), (ARTIFACTS / SITE_UPDATER).read_bytes())

@@ -175,12 +175,15 @@
     }
     function composite(at) {
         const cameras = [], owner = archive?.screenOwner;
-        let screen, preferred = false, main;
+        const choice = archive?.camera;
+        let screen, preferred = false, main, featuredCamera;
         for (const item of tracks.values()) {
             if (!item.video || item.muted) continue;
             if (item.source === 'camera') {
                 if (item.identity === teacher) main = item.video;
-                cameras.push({role:item.identity.split('-',1)[0],video:item.video});
+                const entry = {role:item.identity.split('-',1)[0],video:item.video};
+                cameras.push(entry);
+                if (choice?.identity === item.identity && choice.sid === item.sid && choice.track === item.pub) featuredCamera = entry;
             } else if (item.source === 'screen_share' && owner?.identity === item.identity && owner?.sid === item.sid && !preferred) {
                 screen = item.video;
                 preferred = archive?.screen === item.pub;
@@ -188,7 +191,7 @@
         }
         const rank = {teacher:0,admin:1,student:2};
         cameras.sort((a,b) => rank[a.role] - rank[b.role]);
-        paint({paper,ink,doc,view:board.framing(),hasInk:board.position().ink>0,laser,cameras,screen,teacher:main,
+        paint({paper,ink,doc,view:board.framing(),hasInk:board.position().ink>0,laser,cameras,screen,teacher:main,featuredCamera,
             archiveBoard:archive?.board === true,preferScreen:preferred,heading,at});
     }
     async function ready() {

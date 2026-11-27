@@ -24,6 +24,11 @@ on:
       - tests/test_recorder_school_http.py
       - tests/plugin-manager.php
       - artifacts/*pairing*.zip
+      - artifacts/baci-classroom-site-upgrade-*.zip
+      - artifacts/baci-classroom-recorder-*-r3.zip
+      - server/recorder/frame.js
+      - server/recorder/replay.js
+      - server/recorder/recording.py
 permissions:
   contents: read
 jobs:
@@ -110,14 +115,16 @@ jobs:
           set -euo pipefail
           log="$RUNNER_TEMP/vps-ga-recording.log"
           trap 'proof=$(grep -E "^QA_|^VM |^Baci VPS:|^gpgv:|^E:|^curl:|[Ee]rror:|^oom_kill" "$log" | tail -24 | paste -sd "|"); echo "::error title=GA Server recording::${proof:0:3900}"' ERR
-          BACI_QA_BASELINE=noble-ga-server BACI_QA_PROVIDER=bale bash scripts/test-vps-offline-vm.sh "$RUNNER_TEMP"/vps-release/*amd64.tar.gz \
+          BACI_QA_BASELINE=noble-ga-server BACI_QA_PROVIDER=bale BACI_QA_CAMERA=1 bash scripts/test-vps-offline-vm.sh "$RUNNER_TEMP"/vps-release/*amd64.tar.gz \
             files 1024 '' compact "$RUNNER_TEMP/class-load" '' 0 2>&1 | tee "$log"
           grep -Fq 'QA_APT Real GA preflight passed without modifying dpkg state.' "$log"
           grep -Fq 'QA_APT GA install preserved all ' "$log"
           grep -Fq 'QA_RECORD received and decoded an approved MP4;' "$log"
           grep -Fq 'QA_RECORD approved MP4 after the one-minute delay:' "$log"
           grep -Fq 'VM passed: 1024 MiB profile=compact tls=files' "$log"
-          proof=$(grep -E '^QA_APT |^QA_RECORD |^VM baseline|^VM memory|^VM passed|^No VM Internet' "$log" | paste -sd '|')
+          grep -Fq 'QA_R3 profile=compact running services' "$log"
+          grep -Fq 'QA_CAMERA uploaded MP4:' "$log"
+          proof=$(grep -E '^QA_APT |^QA_RECORD |^QA_R3 |^QA_CAMERA |^VM baseline|^VM memory|^VM passed|^No VM Internet' "$log" | paste -sd '|')
           echo "::notice title=Packaged GA Server recording::${proof:0:4100}"
       - name: Verify 512 MiB live and full installs, both TLS modes and WebRTC
         run: |
@@ -128,7 +135,8 @@ jobs:
               trap 'while IFS= read -r line; do echo "::error title=VPS $ram $mode rehearsal::$line"; done < <(grep -E "^VM guest failure|^VM memory|^MemAvailable|^oom_kill|Out of memory|^Test CA|^Baci VPS:|^Traceback|^.*Error:|start request repeated|Failed to |\"error\":|^VM rehearsal|^VM WebRTC" "$log" | tail -14)' ERR
               bash scripts/test-vps-offline-vm.sh "$RUNNER_TEMP"/vps-release/*amd64.tar.gz "$mode" "$ram" "$RUNNER_TEMP/vps-live-media" 2>&1 | tee "$log"
               grep -Fq 'Two live WebRTC peers exchanged bidirectional Opus and teacher VP8' "$log"
-              proof=$(grep -E '^VM passed:|^VM full test:|^VM memory|^VM before reboot|^No VM Internet|^Real ACME|^Two live WebRTC' "$log" | paste -sd ' ')
+              if [[ "$ram" == 4096 ]]; then grep -Fq 'QA_R3 profile=full running services' "$log"; fi
+              proof=$(grep -E '^QA_R3 |^VM passed:|^VM full test:|^VM memory|^VM before reboot|^No VM Internet|^Real ACME|^Two live WebRTC' "$log" | paste -sd ' ')
               echo "::notice title=Isolated VPS $ram $mode test::$proof"
             done
           done
@@ -148,7 +156,7 @@ jobs:
             local label=$1 tls=$2 ram=$3 scenario=$4 client=$5 swap=$6 provider=${7:-telegram} log
             log="$RUNNER_TEMP/verified-$label.log"
             local rc=0
-            BACI_QA_PROVIDER=$provider bash scripts/test-vps-offline-vm.sh "$candidate" "$tls" "$ram" '' "$scenario" "$client" "$baseline" "$swap" 2>&1 | tee "$log" || rc=$?
+            BACI_QA_PROVIDER=$provider BACI_QA_CAMERA=1 bash scripts/test-vps-offline-vm.sh "$candidate" "$tls" "$ram" '' "$scenario" "$client" "$baseline" "$swap" 2>&1 | tee "$log" || rc=$?
             if (( rc != 0 )); then
               proof=$(grep -E '^QA_|^VM guest failure|^VM rehearsal|^Baci VPS:|^oom_kill|^recorder:|^postprocess:|[Ee]rror:' "$log" | tail -25 | paste -sd '|')
               echo "::error title=Packaged $label::${proof:0:4000}"
@@ -158,6 +166,7 @@ jobs:
             if [[ -n "$client" ]]; then
               grep -Fq 'QA_RECORD received and decoded an approved MP4;' "$log"
               grep -Fq 'QA_RECORD approved MP4 after the one-minute delay:' "$log"
+              grep -Fq 'QA_CAMERA uploaded MP4:' "$log"
               if [[ "$scenario" == compact ]]; then
                 grep -Fq 'QA_RECORD refuse: no film/upload;' "$log"
                 grep -Fq 'QA_RECORD revoke: no film/upload;' "$log"
@@ -172,7 +181,7 @@ jobs:
           rehearsal single-vps files 512 compact "$RUNNER_TEMP/class-load" 512 rubika
           rehearsal compact-auto auto 512 compact '' 512
           rehearsal live-add-on files 1024 upgrade "$RUNNER_TEMP/class-load" 0
-      - name: Require named Recorder and both simulated group receipts from the packaged installs
+      - name: Require webcam layout and both simulated group receipts from the packaged installs
         run: |
           set -euo pipefail
           for platform in bale rubika; do
@@ -180,6 +189,7 @@ jobs:
               bale) log="$RUNNER_TEMP/vps-ga-recording.log" ;;
               rubika) log="$RUNNER_TEMP/verified-single-vps.log" ;;
             esac
+            grep -F 'QA_CAMERA uploaded MP4:' "$log"
             grep -Fx 'QA_RECORDER_HTTP no identity: HTTP 403; named with bad bearer: HTTP 403; installed Recorder: fresh authenticated heartbeat.' "$log"
             grep -Fx "QA_PROVIDER $platform: simulated group accepted the approved video; received MP4 decoded." "$log"
             grep -F 'QA_RECORD refuse: no film/upload;' "$log"

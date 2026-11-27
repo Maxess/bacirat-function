@@ -30,7 +30,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))  # python -I: only the verified staging or root-owned install directory.
 import vps_media as media
 
-VERSION = '1.3.2'
+VERSION = '1.3.3'
 APP, CFG, SYSTEMD = media.APP, media.CFG, media.SYSTEMD
 REC = Path('/opt/school-classroom-recorder')
 RECORDER_RELEASE = '0.4.23'
@@ -57,7 +57,6 @@ UNITS = (*LIVE_UNITS, RECORDER, RENDERER)
 ENABLED = UNITS[:-1]  # Renderer only starts as a dependency of Recorder.
 PROGRAM_UNITS = (SFU, GATE, RECORDER, RENDERER)
 REC_PROGRAM = REC / 'releases/0.4.23'
-PATCH = REC_PROGRAM.with_name('0.4.23-renderer-r1')
 RENDER_SOCKET = Path('/run/school-classroom-postprocess/render.sock')
 ACCOUNTS = (media.NAME, 'school-classroom-tls', 'school-recorder')
 BROWSER_VERSION = '148.0.7778.96'
@@ -67,15 +66,13 @@ CHROME = BROWSER / BROWSER_TOP / 'chrome-headless-shell'
 CADDY_VERSION = '2.11.9'
 CADDY_ASSET = f'caddy_{CADDY_VERSION}_linux_amd64.tar.gz'
 CHROME_ASSET = BROWSER_TOP + '.zip'
-REC_ASSET = 'baci-classroom-recorder-v0.4.23.zip'
-PATCH_ASSET = 'baci-classroom-renderer-v0.4.23-r1.zip'
+REC_ASSET = 'baci-classroom-recorder-v0.4.23-r3.zip'
 SCHOOL_HTTP_ASSET = 'baci-classroom-recorder-school-http-v0.4.23.py'
 PAYLOAD = {
     media.ASSET: media.SHA256,
     CADDY_ASSET: '5b8cb7faf8726a2028ad96a66e54e6e81e8f361bc6175e5d22bbd997cc5177fb',
     CHROME_ASSET: '88817c574c1838a39f88fda0bbd043b4481fd385fb10e92c323e230844d636ce',
-    REC_ASSET: '663da68a85bdfac47ae2a0fbb48628d856f567e116bf367bdbd28ff935b490d1',
-    PATCH_ASSET: '07d51104f5fa7bbfd90d6329931fa0e9d03967b9c8fc617c8fe08f10b4d38cfd',
+    REC_ASSET: '7f5863dd842fbcc3298d0605aa745b517a7e0298baae0c471215ab4df407cd26',
     SCHOOL_HTTP_ASSET: '72550ec6cb374a0e86e618e65b84a455fbeb506a7b8cafdf4c5c8e6736c953c4',
 }
 ENV = {'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LC_ALL': 'C', 'HOME': '/root'}
@@ -471,15 +468,9 @@ def renderer_program():
                 units[name] = archive.read(name)
             elif name != 'transport.py':
                 write(REC_PROGRAM / name, archive.read(name), 0o755 if name == 'baci-native-receiver' else 0o644)
-    # Install the named school HTTP client from the start, without repacking
-    # the frozen Recorder ZIP or touching the renderer/worker protocol.
+    # r3 installs the already repaired renderer and replay in both profiles.
+    # Keep the same pinned HTTP transport here and in read-only add-on preflight.
     write(REC_PROGRAM / 'transport.py', school_http_bytes(HERE / 'payload' / SCHOOL_HTTP_ASSET))
-    mkdir(PATCH)
-    with ZipFile(HERE / 'payload' / PATCH_ASSET) as archive:
-        for name in ('movie.py', 'postprocess.py'):
-            write(PATCH / name, archive.read(name))
-    units[RENDERER + '.d/70-renderer-r1.conf'] = '[Service]\n' + ''.join(
-        f'BindReadOnlyPaths={PATCH / name}:{REC_PROGRAM / name}\n' for name in ('movie.py', 'postprocess.py'))
     return units
 
 
@@ -808,8 +799,8 @@ def replacement(path, data, mode):
 
 
 def addition_preflight(config, requested, worker):
-    need(config.get('version') in ('1.2.0', '1.3.0', '1.3.1', VERSION) and config.get('profile') == 'live' and config.get('tls_mode') in ('files','auto'),
-         'This add-on is only for a completed Baci offline live install (v1.2.0, v1.3.0, v1.3.1 or this release).')
+    need(config.get('version') in ('1.2.0', '1.3.0', '1.3.1', '1.3.2', VERSION) and config.get('profile') == 'live' and config.get('tls_mode') in ('files','auto'),
+         'This add-on is only for a completed Baci offline live install (v1.2.0, v1.3.0–v1.3.2 or this release).')
     meminfo = Path('/proc/meminfo').read_text()
     total_kib = check_memory(meminfo)
     profile = install_profile(requested, total_kib, swap_size(meminfo))

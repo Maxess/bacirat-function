@@ -440,7 +440,9 @@ class DeferredRunner:
                     closing, cap = cap, None
                     await closing.stop(True)
                 try:
-                    reply = await site.rpc('poll', running=cap.room if cap else None)
+                    # The optional flag belongs to the matched native capture/renderer pack.
+                    reply = await site.rpc('poll', running=cap.room if cap else None,
+                                           **({'archiveCamera': True} if self.native else {}))
                 except ProtocolError:
                     await asyncio.sleep(2)  # The receiver's lease is independent of TLS.
                     continue

@@ -430,7 +430,8 @@
                 const pub = person.getTrackPublication(cameraSource);
                 if (!mayCamera(person) || !pub?.track || pub.isMuted || pub.track.kind !== lk.Track.Kind.Video
                     || (person === room.localParticipant ? pub.track !== active.cameraTrack : !pub.isDesired || !canReceiveVideo(person, pub))) continue;
-                cameraPeople.set(person.identity, {track:pub.track, name:personName(person)});
+                cameraPeople.set(person.identity, {track:pub.track, name:personName(person),
+                    publication:{identity:person.identity,publisherSid:person.sid,track:pub.trackSid}});
             }
         }
         for (const [id, tile] of cameraTiles) {
@@ -441,7 +442,7 @@
             }
             tile.track.detach(tile.video); tile.figure.remove(); cameraTiles.delete(id);
         }
-        for (const [id,{track,name}] of cameraPeople) {
+        for (const [id,{track,name,publication}] of cameraPeople) {
             let tile = cameraTiles.get(id);
             if (!tile) {
                 const figure = document.createElement('figure'), caption = document.createElement('figcaption');
@@ -455,7 +456,18 @@
                 button.append(video); figure.append(button, caption); strip.append(figure);
                 tile = {track,video,caption,figure,button}; cameraTiles.set(id,tile);
                 button.addEventListener('click', () => showCameraPreview(tile));
+                if (staff) {
+                    const control = document.createElement('button');
+                    control.type = 'button'; control.className = 'subtle-button archive-source camera-archive-source';
+                    control.textContent = 'نمایش در ضبط'; control.hidden = true;
+                    control.addEventListener('click', () => setArchiveSource('camera', tile));
+                    video.addEventListener('loadeddata', renderArchiveControls);
+                    video.addEventListener('emptied', renderArchiveControls);
+                    figure.prepend(control);
+                    tile.archiveButton = control;
+                }
             }
+            tile.publication = publication;
             put(tile.caption, name);
             const label = `بزرگ‌نمایی دوربین ${name}`;
             if (tile.button.title !== label) {
@@ -465,6 +477,7 @@
             if (previewTile === tile) put(el('camera-preview-name'), name);
         }
         strip.hidden = !cameraTiles.size;
+        renderArchiveControls();
     }
 
     function itsScreen(link) {
@@ -493,6 +506,17 @@
     function playableScreen() {
         return shownPublication && screenVideo.readyState >= 2 && screenVideo.videoWidth > 0 ? shownPublication : null;
     }
+    function playableCamera(tile) {
+        const publication = tile?.publication;
+        return publication && cameraTiles.get(publication.identity) === tile && !document.hidden
+            && /^PA_[A-Za-z0-9_-]{1,69}$/.test(publication.publisherSid ?? '')
+            && /^TR_[A-Za-z0-9_-]{1,69}$/.test(publication.track ?? '')
+            && tile.video.readyState >= 2 && tile.video.videoWidth > 0 ? publication : null;
+    }
+    function sameCamera(choice, publication) {
+        return !!choice && !!publication && choice.identity === publication.identity
+            && choice.sid === publication.publisherSid && choice.track === publication.track;
+    }
     function renderArchiveControls() {
         const publication = playableScreen();
         const prefs = state.recording?.archive;
@@ -504,14 +528,30 @@
             button.disabled = !visible || busy;
             button.setAttribute('aria-pressed',String(selected && visible));
         }
+        for (const tile of cameraTiles.values()) {
+            const button = tile.archiveButton;
+            if (!button) continue;
+            const camera = playableCamera(tile);
+            const visible = allowed && Object.hasOwn(prefs, 'camera') && !!camera;
+            button.hidden = !visible;
+            button.disabled = !visible || busy;
+            button.setAttribute('aria-pressed',String(visible && sameCamera(prefs.camera, camera)));
+            const label = `نمایش در ضبط · وب‌کم ${tile.caption.textContent}`;
+            if (button.title !== label) {
+                button.title = label;
+                button.setAttribute('aria-label', label);
+            }
+        }
     }
-    function setArchiveSource(source) {
+    function setArchiveSource(source, tile = null) {
         return run(async () => {
             const prefs = state.recording?.archive;
-            const publication = source === 'screen' ? playableScreen() : null;
-            if (!hasAccess() || !prefs || state.board?.navigate !== true || (source === 'screen' && !publication)) return;
+            const publication = source === 'screen' ? playableScreen() : source === 'camera' ? playableCamera(tile) : null;
+            if (!hasAccess() || !prefs || state.board?.navigate !== true || (source !== 'board' && !publication)
+                || (source === 'camera' && !Object.hasOwn(prefs, 'camera'))) return;
             const link = active, local = scope(link), recording = state.recording.id;
-            const enabled = source === 'board' ? !prefs.board : prefs.screen !== publication.track;
+            const enabled = source === 'board' ? !prefs.board
+                : source === 'screen' ? prefs.screen !== publication.track : !sameCamera(prefs.camera, publication);
             try {
                 const reply = await api('record-source',{...local,source,enabled,...publication});
                 if (link !== active || !hasAccess() || scope().sid !== local.sid || state.recording?.id !== recording) return;

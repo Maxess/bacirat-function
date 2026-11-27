@@ -69,7 +69,7 @@ class ReleaseTest(unittest.TestCase):
             for name in ('board.js','pdf-resources.zip','livekit-client.umd.js'):
                 self.assertEqual(rec.read(name), site.read('assets/' + name))
             # Frozen renderer modules are compared via the ZIP digest above.
-            for name in {'native_capture.py','disk_writer.py','recording.py','README-fa.md'} | up.UNITS:
+            for name in {'native_capture.py','disk_writer.py'} | up.UNITS:
                 self.assertEqual(rec.read(name), (SOURCE / name).read_bytes())
             manifest = json.loads(site.read('plugin.json'))
             self.assertEqual(manifest['version'], '0.4.23')
@@ -91,7 +91,7 @@ class ReleaseTest(unittest.TestCase):
             with ZipFile(path) as candidate:
                 self.assertEqual(candidate.namelist(), published.namelist())
                 changed = {name for name in candidate.namelist() if candidate.read(name) != published.read(name)}
-                self.assertEqual(changed, {'movie.py', 'postprocess.py', 'replay.js'})
+                self.assertEqual(changed, {'movie.py', 'postprocess.py', 'frame.js', 'replay.js'})
                 for name in changed:
                     self.assertEqual(candidate.read(name), (SOURCE / name).read_bytes())
                 # Preserve executable permissions on the unchanged native receiver.

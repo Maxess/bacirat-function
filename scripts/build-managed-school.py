@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Build the managed classroom site release or reproduce the separate VPS archives."""
 import argparse
+import ast
 import base64
 from io import BytesIO
 import hashlib
@@ -17,9 +18,9 @@ HOST = ROOT / 'plugin-manager'
 SRC = ROOT / 'school-addon/upload/online-classroom'
 LEGACY = ARTIFACTS / 'school-classroom-pilot-v0.1.0.zip'
 LEGACY_SHA = 'bebc35a02f57346880373a034ee493b757a8017a12812a133ab957358d9de161'
-VERSION = '0.4.25'
-MANAGER_VERSION = '0.1.32'
-# The pairing companion in the published VPS archives stays at 0.1.31 / 0.4.24.
+VERSION = '0.4.26'
+MANAGER_VERSION = '0.1.33'
+# The historical pairing companion through VPS 1.3.2 stays byte-for-byte frozen.
 PAIRING_CLASSROOM_VERSION = '0.4.24'
 PAIRING_MANAGER_VERSION = '0.1.31'
 PAIRING_MANAGER_SHA = 'bc7f98340b56b23cdf540a9175b63a5d8ab070ed551cff680b2f6439842a84b0'
@@ -36,6 +37,9 @@ RENDERER_FIX = ('movie.py', 'postprocess.py')
 RENDERER_REPAIR = f'baci-classroom-renderer-v{RECORDER_VERSION}-r1.zip'
 RENDERER_INSTALLER = f'repair-renderer-v{RECORDER_VERSION}-r1.py'
 AUDIO_REPAIR = f'baci-recorder-audio-repair-v{RECORDER_VERSION}-r2.py'
+AUDIO_REPAIR_SHA = '88776bf3a247f7bab482b33931c281d1bb3638e1b2981bc8738c6c5a8cb5df73'
+R1_SHA = '07d51104f5fa7bbfd90d6329931fa0e9d03967b9c8fc617c8fe08f10b4d38cfd'
+FRESH_RECORDER = f'baci-classroom-recorder-v{RECORDER_VERSION}-r3.zip'
 MAINTENANCE_SHA = '2782b003fb54886777e2ea3e06b76d9587d1b3ef89bcc0e736e15283ca5782f6'
 # Go 1.26.2, linux/amd64, same bytes as the verified GitHub Actions build.
 NATIVE = {
@@ -138,7 +142,7 @@ def plugin_entries(pdf_archive):
         'report_menus': {role: 'حضور و غیاب کلاس مجازی' for role in ('teacher', 'admin', 'deputy')},
         'routes': {'page': 'index.php', 'api': 'api.php', 'content': 'content.php', 'events': 'events.php', 'job': 'job.php', 'recording': 'recording-api.php'},
         'store': True, 'pdf_resources': 'assets/pdf-resources.zip',
-        'preserve_settings_from': ['0.2.0', '0.2.1', '0.2.2', '0.2.3', '0.3.0', '0.4.0', '0.4.1', '0.4.2', '0.4.3', '0.4.4', '0.4.5', '0.4.6', '0.4.7', '0.4.8', '0.4.9', '0.4.10', '0.4.11', '0.4.12', '0.4.13', '0.4.14', '0.4.15', '0.4.16', '0.4.17', '0.4.18', '0.4.19', '0.4.20', '0.4.21', '0.4.22', '0.4.23', '0.4.24'],
+        'preserve_settings_from': ['0.2.0', '0.2.1', '0.2.2', '0.2.3', '0.3.0', '0.4.0', '0.4.1', '0.4.2', '0.4.3', '0.4.4', '0.4.5', '0.4.6', '0.4.7', '0.4.8', '0.4.9', '0.4.10', '0.4.11', '0.4.12', '0.4.13', '0.4.14', '0.4.15', '0.4.16', '0.4.17', '0.4.18', '0.4.19', '0.4.20', '0.4.21', '0.4.22', '0.4.23', '0.4.24', '0.4.25'],
         'hooks': {'deactivate': 'deactivate.php'},
         'settings': [
             {'key': 'signal_url', 'type': 'wss', 'label': 'آدرس رسانه (wss://)'},
@@ -182,7 +186,7 @@ def renderer_candidate(output_dir):
     # Test bundle, deliberately not named/pinned as the production 0.4.23 payload.
     with frozen_recorder() as base:
         entries = {name: base.read(name) for name in base.namelist()}
-    entries.update({name: (RECORDER_SRC / name).read_bytes() for name in (*RENDERER_FIX, 'replay.js')})
+    entries.update({name: (RECORDER_SRC / name).read_bytes() for name in (*RENDERER_FIX, 'frame.js', 'replay.js')})
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / f'baci-classroom-recorder-v{RECORDER_VERSION}-renderer-candidate.zip'
     write_zip(path, entries)
@@ -218,7 +222,11 @@ def audio_repair(output_dir):
     template = (RECORDER_SRC / f'repair-audio-v{RECORDER_VERSION}-r2.py').read_bytes()
     with frozen_recorder() as base:
         stock = base.read('replay.js')
-    reviewed = (RECORDER_SRC / 'replay.js').read_bytes()
+    # The independent 1.3.2 repair stays pinned after the fresh renderer evolves.
+    tree = ast.parse(verified_release(AUDIO_REPAIR, AUDIO_REPAIR_SHA))
+    [fixed] = [item.value for item in tree.body if isinstance(item, ast.Assign)
+               and any(isinstance(target, ast.Name) and target.id == 'FIXED' for target in item.targets)]
+    reviewed = base64.b64decode(ast.literal_eval(fixed), validate=True)
     for label, data in (('STOCK', stock), ('AFTER', reviewed)):
         pin = hashlib.sha256(data).hexdigest()
         if f"{label}_SHA = '{pin}'".encode('ascii') not in template:
@@ -246,15 +254,15 @@ def recorder_release(output_dir, native_build):
         assets = {name: archive.read(name) for name in ('livekit-client.umd.js', 'livekit-client.LICENSE.txt',
                 'pdf-resources.zip', 'pdf.LICENSE.txt')}
     assets['board.js'] = (SRC / 'assets/board.js').read_bytes()
-    files = {name: (RECORDER_SRC / name).read_bytes() for name in ('README-fa.md', 'requirements.txt',
-             'capture.py', 'recording.py', 'transport.py', 'view.html', 'view.css', 'view.js', 'frame.js',
+    files = {name: (RECORDER_SRC / name).read_bytes() for name in ('requirements.txt',
+             'capture.py', 'view.html', 'view.css', 'view.js',
              'archive.py', 'clock.py', 'disk_writer.py', 'native_capture.py', 'ingest.html', 'ingest.js', 'encoded.js',
              'school-classroom-recorder.service', 'school-classroom-postprocess.service',
              'school-classroom-recorder.service.d/10-recorder-credential.conf',
              'school-classroom-recorder.service.d/60-native-recorder.conf', 'fonts/README.md')}
     # Renderer candidates and HTTP repairs never change the published 0.4.23 ZIP.
     with frozen_recorder() as published:
-        files.update({name: published.read(name) for name in (*RENDERER_FIX, 'replay.js', 'transport.py')})
+        files.update({name: published.read(name) for name in (*RENDERER_FIX, 'README-fa.md', 'replay.js', 'frame.js', 'recording.py', 'transport.py')})
     for name, digest in NATIVE.items():
         data = (native_build / name).read_bytes()
         if hashlib.sha256(data).hexdigest() != digest:
@@ -274,6 +282,20 @@ def recorder_release(output_dir, native_build):
         raise ValueError('Rebuilt Recorder is not byte-identical to the published 0.4.23 ZIP')
     path.write_bytes(data.getbuffer())
     print(f'{path}: {digest}')
+    return path
+
+
+def recorder_fresh(output_dir):
+    """Assemble the fresh VPS pack without changing the Recorder/LiveKit wire protocol."""
+    with frozen_recorder() as base, ZipFile(BytesIO(verified_release(RENDERER_REPAIR, R1_SHA))) as r1:
+        files = {name: base.read(name) for name in base.namelist()}
+        files.update({name: r1.read(name) for name in RENDERER_FIX})
+    files.update({name: (RECORDER_SRC / name).read_bytes()
+                  for name in ('README-fa.md', 'recording.py', 'frame.js', 'replay.js', 'transport.py')})
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / FRESH_RECORDER
+    write_zip(path, files)
+    print(f'{path}: {hashlib.sha256(path.read_bytes()).hexdigest()}')
     return path
 
 
@@ -326,6 +348,7 @@ def main():
     parser.add_argument('--output-dir', type=Path)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--recorder-only', action='store_true', help='rebuild the unchanged standalone VPS release')
+    mode.add_argument('--recorder-fresh', action='store_true', help='build the r3 Recorder pack for the fresh VPS installer')
     mode.add_argument('--renderer-candidate', action='store_true', help='build an offline test ZIP, not a production upgrade')
     mode.add_argument('--renderer-repair', action='store_true', help='rebuild the pinned renderer-only r1 repair ZIP')
     mode.add_argument('--audio-repair', action='store_true', help='build the standalone renderer-only r2 audio repair for VPS 1.3.2')
@@ -334,10 +357,11 @@ def main():
     parser.add_argument('--pdf-archive', type=Path, help='use a local copy of the same pinned PDF.js npm archive')
     parser.add_argument('--native-build', type=Path, help='output of scripts/build-recorder-native.py (Linux x86-64)')
     opts = parser.parse_args()
-    if opts.renderer_candidate or opts.renderer_repair or opts.audio_repair:
+    if opts.renderer_candidate or opts.renderer_repair or opts.audio_repair or opts.recorder_fresh:
         if not opts.output_dir or opts.approve_reviewed_manifest or opts.pdf_archive or opts.native_build:
             parser.error('renderer-only builds need an explicit --output-dir and no release build options')
-        build = audio_repair if opts.audio_repair else renderer_repair if opts.renderer_repair else renderer_candidate
+        build = (audio_repair if opts.audio_repair else recorder_fresh if opts.recorder_fresh
+                 else renderer_repair if opts.renderer_repair else renderer_candidate)
         build(opts.output_dir)
         return
     opts.output_dir = opts.output_dir or ARTIFACTS
@@ -373,8 +397,7 @@ def main():
     full_manager = f'baci-plugin-manager-v{MANAGER_VERSION}.zip'
     write_zip(opts.output_dir / classroom, entries)
     site_managers(opts.output_dir, code.encode('utf-8'))
-    # This site-only update must not carry a VPS installer or payload. Existing
-    # Recorder 0.4.23 / Renderer r1 services keep the same HTTP protocol and files.
+    # Site updates are independent of VPS binaries; new layout controls are negotiated per recording.
     outer = f'baci-classroom-site-upgrade-v{VERSION}.zip'
     site_names = (upgrade, classroom)
     bundle = {name: (opts.output_dir / name).read_bytes() for name in site_names}

@@ -4,7 +4,7 @@ declare(strict_types=1);
 use BaciClassroom\Calendar;
 
 // School plugin runtime and gateway. Settings are exposed by the reviewed host overlay.
-const MPM_VERSION = '0.1.32';
+const MPM_VERSION = '0.1.33';
 const MPM_VPS_PAIR_MIN = '0.4.24';
 const MPM_VPS_PAIR_LIMIT = 4096;
 const MPM_CLASSROOM_NATIVE = '0.4.0';
@@ -47,6 +47,7 @@ const MPM_CATALOG = [
         '0.4.23' => '179f220a4b81c4f3ef37e6c791b72b060e3af493f769c85646d3df63b05f505e',
         '0.4.24' => '0fc20fd10db7439d7856003264cf75ca17d8bd76b3f82b9571c3998b4dfb52b2',
         '0.4.25' => '5a8c52e7af5ab8de482e7004f23eba7b59ea3e57015c739eceddc84faf32d719',
+        '0.4.26' => '2dbfc3753bc4a9a79769be1e0fe5e2e17dacf13bcfe71400df03643550c08828',
     ],
 ];
 

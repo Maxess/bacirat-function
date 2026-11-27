@@ -2,7 +2,7 @@
     'use strict';
     const font = 'ArchiveVazir, sans-serif';
     const cut = new Intl.Segmenter('fa',{granularity:'grapheme'});
-    const brand = 'کلاس مجازی', credit = 'طراحی و توسعه : س. مهدی بیات';
+    const brand = 'کلاس مجازی', credit = 'طراحی و توسعه : سید مهدی بیات';
     const roles = {teacher:'دبیر', admin:'مدیر'};
     const percent = new Intl.NumberFormat('fa-IR',{style:'percent'});
     const margin = 24, gap = 12, top = 68, footer = 22, galleryHeight = 166;
@@ -186,21 +186,28 @@
                 ctx.restore();
             });
         }
-        return ({paper,ink,doc,hasInk,view,laser,cameras=[],screen,teacher,archiveBoard,preferScreen,heading,at=performance.now()}) => {
+        return ({paper,ink,doc,hasInk,view,laser,cameras=[],screen,teacher,featuredCamera,archiveBoard,preferScreen,heading,at=performance.now()}) => {
             const shared = screen && (preferScreen || !teacher);
-            const primary = shared ? screen : teacher;
-            const gallery = cameras.filter(({video}) => video && video !== primary);
+            const featured = featuredCamera?.video;
+            const primary = (shared ? screen : teacher) || featured;
+            // Preserve the primary screen/teacher, then give the selected webcam
+            // the large companion pane ahead of the board. Never draw it twice.
+            const companion = featured && featured !== primary ? featured : null;
+            const gallery = cameras.filter(({video}) => video && video !== primary && video !== companion);
             const bottom = gallery.length ? galleryY-gap : height-footer;
             const presentation = {x:margin,y:top,w:width-2*margin,h:bottom-top};
             const drawBoard = rect => boardPane(rect,paper,ink,doc,hasInk,view,laser,at);
-            const drawVideo = rect => videoPane(rect,primary,shared ? 'صفحهٔ مشترک' : 'دوربین دبیر');
+            const featuredLabel = featuredCamera?.role === 'teacher' ? 'وب‌کم دبیر' : 'وب‌کم انتخاب‌شده';
+            const drawVideo = rect => videoPane(rect,primary,shared ? 'صفحهٔ مشترک' : primary === featured ? featuredLabel : 'دوربین دبیر');
             ctx.fillStyle = background; ctx.fillRect(0,0,width,height);
             header(heading);
             if (!primary) drawBoard(presentation);
-            else if (archiveBoard) {
+            else if (companion || (archiveBoard && !featured)) {
                 const w = (presentation.w-gap)/2;
                 drawVideo({...presentation,w});
-                drawBoard({...presentation,x:presentation.x+w+gap,w});
+                const other = {...presentation,x:presentation.x+w+gap,w};
+                if (companion) videoPane(other,companion,featuredLabel);
+                else drawBoard(other);
             } else drawVideo(presentation);
             if (gallery.length) drawCameras(gallery);
         };

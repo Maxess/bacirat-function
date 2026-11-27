@@ -200,6 +200,44 @@ ok(cl_rec_layout($cfg,$s->get('recording',$id),array_replace($live,['room'=>subs
 unset($live['screen']);
 $s->put('lesson',$id,$live);
 ok($worker('board',$id,$t+6,$recordRead)['archive']['screen'] === null, 'a revoked screen lease cannot keep priority');
+// A newer native renderer negotiates the field without changing the old wire protocol.
+$cameraCfg = $cfg + ['camera_share'=>true];
+$live['access']['camera']['members']['student-12'] = true;
+$s->put('lesson',$id,$live);
+$pin = ['source'=>'camera','identity'=>'student-12','publisherSid'=>'PA_Pupil','track'=>'TR_Chosen','enabled'=>true] + $scope;
+$cameraPeer = ['identity'=>'student-12','sid'=>'PA_Pupil','state'=>'ACTIVE','tracks'=>[
+    ['sid'=>'TR_Chosen','source'=>'CAMERA'], ['sid'=>'TR_NotCam','source'=>3],
+    ['sid'=>'TR_Muted','source'=>1,'muted'=>true],
+]];
+$cameraRpc = static function (string $method, string $room, array $args) use (&$cameraPeer,$live): array {
+    ok($method === 'ListParticipants' && $room === $live['room'] && $args === ['room'=>$room], 'only read the active room');
+    return ['participants'=>[$cameraPeer]];
+};
+deny(409, fn()=>cl_rec_set_source($s,$cameraCfg,$live,$teacher,$pin,$t+6,$cameraRpc));
+$cameraWorker = $worker('poll',$id,$t+6,['archiveCamera'=>true]);
+ok(array_key_exists('camera',$cameraWorker['archive']) && $cameraWorker['archive']['camera'] === null, 'only a capable worker enables the toggle');
+deny(403, fn()=>cl_rec_set_source($s,$cameraCfg,$live,$student,$pin,$t+6,$cameraRpc));
+deny(403, fn()=>cl_rec_set_source($s,$cameraCfg,$live,$admin,$pin,$t+6,$cameraRpc));
+deny(409, fn()=>cl_rec_set_source($s,$cfg,$live,$teacher,$pin,$t+6,$cameraRpc));
+deny(409, fn()=>cl_rec_set_source($s,$cameraCfg,$live,$teacher,array_replace($pin,['publisherSid'=>'PA_Replaced']),$t+6,$cameraRpc));
+foreach (['TR_NotCam','TR_Muted','TR_Obsolete'] as $wrong) {
+    deny(409, fn()=>cl_rec_set_source($s,$cameraCfg,$live,$teacher,array_replace($pin,['track'=>$wrong]),$t+6,$cameraRpc));
+}
+$focus = ['identity'=>'student-12','sid'=>'PA_Pupil','track'=>'TR_Chosen'];
+ok(cl_rec_set_source($s,$cameraCfg,$live,$teacher,$pin,$t+6,$cameraRpc)['archive']['camera'] === $focus, 'pin the exact in-room camera publication');
+$cameraRead = cl_rec_worker($s,$cameraCfg,['action'=>'board','protocol'=>2,'worker'=>str_repeat('a',32),'id'=>$id]+$recordRead,$t+6,$rpc);
+ok($cameraRead['archive']['camera'] === $focus && $cameraRead['archive']['board'], 'worker reads the focus and pre-existing board choice');
+$jobWithCamera = $s->get('recording',$id);
+ok(cl_rec_layout($cameraCfg,$jobWithCamera,array_replace($live,['seen'=>['student-12'=>'PA_Replaced']]))['camera'] === null,
+    'a replacement publisher cannot inherit focus');
+ok(cl_rec_layout($cameraCfg,$jobWithCamera,array_replace($live,['media_mode'=>'audio']))['camera'] === null, 'audio-only mode prevents focus');
+$staleOff = array_replace($pin,['track'=>'TR_Obsolete','enabled'=>false]);
+ok(cl_rec_set_source($s,$cameraCfg,$live,$teacher,$staleOff,$t+6)['archive']['camera'] === $focus,
+    'late unpin cannot clear a different selection');
+ok(cl_rec_set_source($s,$cameraCfg,$live,$teacher,array_replace($pin,['enabled'=>false]),$t+6)['archive']['camera'] === null,
+    'click again restores the previous layout without a media RPC');
+$worker('poll',$id,$t+6); // Earlier 0.4.23 workers still see just the legacy layout fields.
+ok(!array_key_exists('camera',cl_rec_layout($cameraCfg,$s->get('recording',$id),$live)), 'downgrading does not leave a no-op camera control');
 cl_board_read($s,$live,$teacher,$scope+['board'=>1,'aim'=>$pointer],null,$t+6);
 $worker('poll',$id,$t+6,['running'=>$live['room']]);
 ok(isset($worker('board',$id,$t+6,$recordRead)['archive']), 'deferred worker always carries board and layout state');

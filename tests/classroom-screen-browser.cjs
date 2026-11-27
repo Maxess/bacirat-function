@@ -42,6 +42,27 @@ function fakeMedia(identity, remote, unsupported) {
                 this.emit('TrackSubscribed',track,pub,peer);
                 ctx.fillStyle='#164cfa'; ctx.fillRect(0,0,640,360);
             };
+            stats.remoteCamera = (trackSid, id=remote, sid=`PA_${id}`) => {
+                const peer = this.remoteParticipants.get(id) ?? person(id), {Camera} = source;
+                this.remoteParticipants.set(id, peer);
+                const previous = peer.getTrackPublication(Camera);
+                if (previous) {
+                    previous.track.stop();
+                    peer.trackPublications.delete(Camera);
+                    this.emit('TrackUnsubscribed',previous.track,previous,peer);
+                }
+                if (!trackSid) return;
+                peer.sid = sid;
+                const canvas = document.createElement('canvas'); canvas.width=160; canvas.height=90;
+                const pixels = canvas.getContext('2d');
+                const track = new LocalVideoTrack(canvas.captureStream(10).getVideoTracks()[0]);
+                track.source = Camera;
+                const pub = {trackSid,source:Camera,kind:'video',track,isMuted:false,isDesired:true,
+                    setSubscribed(wanted){this.isDesired=wanted;}};
+                peer.trackPublications.set(Camera,pub);
+                this.emit('TrackSubscribed',track,pub,peer);
+                pixels.fillStyle='#ac278e'; pixels.fillRect(0,0,160,90);
+            };
             stats.permission = allow => {
                 const previous = local.permissions;
                 local.permissions = {canPublish:true,canPublishSources:allow?[1,2,3]:[1,2]};
@@ -303,6 +324,89 @@ test('only a recording presenter can compose the archive, apart from live sharin
     session='off';
     await deputy.locator('#record-board-display').waitFor({state:'hidden'});
     assert.equal(layoutRequests().length,3);
+});
+
+test('packaged webcam tile has an independent recorder toggle only for the active presenter with r3 support', {skip,timeout:38000}, async t=>{
+    const fixture = packaged(t), lessons = {staff:fixture.render('teacher',true),pupil:fixture.render('student',true)};
+    const lesson = 'camera-lesson', epoch = 'camera-epoch', id = 'a'.repeat(32), clicked = [];
+    let supportsCamera = false, pinned = null, presenter = true;
+    const {browser,origin} = await serveBrowser(t, async (req,res,url)=>{
+        const who = new URL(req.headers.referer || '/',url).pathname === '/pupil' ? 'student-1' : 'teacher-1';
+        const remote = who === 'teacher-1' ? 'student-1' : 'teacher-1';
+        if (url.pathname.slice(1) in lessons) return send(res,'text/html; charset=UTF-8',lessons[url.pathname.slice(1)]);
+        if (url.pathname === '/fixture.js') return send(res,'text/javascript',`(${fakeMedia})('${who}','${remote}',false);`);
+        if (url.searchParams.get('route') === 'api') {
+            let raw=''; for await (const chunk of req) raw += chunk;
+            const body = JSON.parse(raw), admitted = body.lesson === lesson && body.epoch === epoch && body.sid === `PA_${who}`;
+            const navigate = presenter && who === 'teacher-1';
+            const board = {rev:1,cursor:0,navigate,write:navigate,owner:'a'.repeat(16),reset:true,doc:null,ops:[],docs:[],page:1};
+            const archive = () => ({board:true,screen:null,...(supportsCamera?{camera:pinned}:{})});
+            const out = {ok:true};
+            if (body.action === 'status') Object.assign(out,{phase:'live',lesson,epoch,ready:true,joinable:true,slot:11,admitted,
+                ...(admitted ? {board,cameraCodec:'vp8',mediaMode:'standard',recording:{id,notice:'live',...(navigate ? {archive:archive()} : {})}} : {})});
+            else if (body.action === 'board-sync') out.board = board;
+            else if (body.action === 'ticket') Object.assign(out,{lesson,epoch,url:'wss://fixture.invalid',token:'fixture'});
+            else if (body.action === 'record-source') {
+                assert.ok(admitted && navigate && supportsCamera && body.source === 'camera');
+                assert.equal(body.publisherSid, `PA_${body.identity}`);
+                clicked.push([body.identity,body.track,body.enabled]);
+                pinned = body.enabled ? {identity:body.identity,sid:body.publisherSid,track:body.track} : null;
+                out.archive = archive();
+            } else assert.fail(`unexpected fixture action ${body.action}`);
+            return send(res,'application/json',JSON.stringify(out));
+        }
+        if (!fixture.serve(url,res)) res.writeHead(404).end();
+    });
+    const open = async role => {
+        const page = await browser.newPage({viewport:{width:360,height:680}});
+        page.setDefaultTimeout(8000);
+        await page.goto(`${origin}/${role}`);
+        await page.locator('#classroom[data-live=yes]').waitFor();
+        return page;
+    };
+    const [teacher,pupil] = await Promise.all([open('staff'),open('pupil')]);
+    await teacher.evaluate(()=>{
+        window.screenFixture.remoteCamera('TR_pupil1');
+        window.screenFixture.remoteCamera('TR_pupil2','student-2');
+    });
+    await pupil.evaluate(()=>window.screenFixture.remoteCamera('TR_teacher1'));
+    const tile = id => teacher.locator(`#camera-strip figure[data-identity="${id}"]`);
+    const archive = id => tile(id).locator('.camera-archive-source');
+    const first = archive('student-1'), second = archive('student-2');
+    await tile('student-1').locator('video').waitFor();
+    await pupil.locator('#camera-strip video').waitFor();
+    assert.equal(await pupil.locator('.camera-archive-source').count(),0);
+    assert.equal(await first.isVisible(),false,'earlier workers can still control the board, not a webcam');
+    assert.ok(await teacher.locator('#record-board-display').isVisible());
+    supportsCamera=true;
+    await first.waitFor();
+    assert.equal((await first.textContent()).trim(),'نمایش در ضبط');
+    assert.equal(await first.evaluate(button=>button.nextElementSibling.className),'camera-tile-button');
+    const preview = teacher.locator('#camera-preview');
+    const thumb = tile('student-1').locator('.camera-tile-button');
+    const before = await thumb.boundingBox();
+    await first.click();
+    await tile('student-1').locator('[aria-pressed=true]').waitFor();
+    assert.equal(await preview.isVisible(),false);
+    assert.deepEqual(await thumb.boundingBox(),before,'pinning changes the recording only');
+    await second.click();
+    await tile('student-2').locator('[aria-pressed=true]').waitFor();
+    assert.equal(await first.getAttribute('aria-pressed'),'false','only one camera at a time');
+    await teacher.evaluate(()=>window.screenFixture.remoteCamera('TR_new','student-2'));
+    await second.waitFor();
+    assert.equal(await second.getAttribute('aria-pressed'),'false','a new track is never implicitly selected');
+    await second.click();
+    await tile('student-2').locator('[aria-pressed=true]').waitFor();
+    await second.click();
+    await tile('student-2').locator('.camera-archive-source[aria-pressed=false]').waitFor();
+    await thumb.click();
+    await preview.waitFor();
+    await teacher.keyboard.press('Escape');
+    presenter=false;
+    await first.waitFor({state:'hidden'});
+    await thumb.waitFor();
+    assert.deepEqual(clicked,[['student-1','TR_pupil1',true],['student-2','TR_pupil2',true],
+        ['student-2','TR_new',true],['student-2','TR_new',false]]);
 });
 
 test('packaged teacher and admin recording controls, Friday retry, pupil notice and explicit yes/no on close', {skip, timeout:38000}, async t => {

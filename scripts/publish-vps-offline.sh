@@ -18,6 +18,7 @@ tag="vps-offline-v$version"
 base="https://github.com/$repo/actions/runs/$run"
 setup_evidence="https://github.com/$repo/actions/runs/$setup_run"
 guide="baci-vps-install-v$version-fa.md"
+site=baci-classroom-site-upgrade-v0.4.26.zip
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 stage=validate-ci-run
@@ -46,7 +47,7 @@ gh api "repos/$repo/actions/runs/$run/jobs" | jq -e '
                 and .conclusion == "success")
         and any(.steps[]; .name == "Verify actual offline compact install and recording on Noble GA Server"
                 and .conclusion == "success")
-        and any(.steps[]; .name == "Require named Recorder and both simulated group receipts from the packaged installs"
+        and any(.steps[]; .name == "Require webcam layout and both simulated group receipts from the packaged installs"
                 and .conclusion == "success"))' >/dev/null
 stage=verify-distribution-helpers
 # These are separate assets, not a modification or rebuild of the tested archive.
@@ -79,15 +80,17 @@ printf '%s  %s\n' "$checksums" "$work/$sha_file" | sha256sum --check --strict
 stage=check-published-inventory
 (
     cd "$work"
-    cmp <(printf '%s\n' "$name.tar.gz" "$name-ubuntu-source.tar" 'baci-classroom-site-pairing-v0.1.31.zip' | sort) \
+    cmp <(printf '%s\n' "$name.tar.gz" "$name-ubuntu-source.tar" "$site" | sort) \
         <(cut -c67- "$sha_file" | sort)
     sha256sum --check --strict "$sha_file"
     grep -Fxq "$installer  $name.tar.gz" "$sha_file"
+    tar -xOf "$name.tar.gz" "baci-classroom-vps-offline/$site" | cmp - "$site"
     BUILD=$(tar -xOf "$name.tar.gz" baci-classroom-vps-offline/BUILD.json)
     jq -e --arg sha "$commit" --arg ver "$version" '.git == $sha and .version == $ver and .arch == "amd64" and .ubuntu == "24.04"
         and .tls_modes == ["auto", "files"] and .minimum_visible_ram_kib == 393216
         and .install_profiles == ["live", "compact", "full"] and .full_visible_ram_kib == 1835008
         and .recording_by_default == true and .school_recorder_user_agent == "Baci-Classroom-Recorder/0.4.23"
+        and (.pinned_payload_sha256["baci-classroom-recorder-v0.4.23-r3.zip"] | test("^[a-f0-9]{64}$"))
         and .compact_visible_ram_kib == 458752 and .compact_swap_kib == 512000
         and .compact_no_swap_visible_ram_kib == 917504' <<< "$BUILD" >/dev/null
 )
@@ -112,7 +115,7 @@ stage=prepare-distribution-assets
 install -m 0644 install-vps.sh "$work/install-vps.sh"
 install -m 0644 scripts/prepare-vps-swap.sh "$work/baci-prepare-swap.sh"
 install -m 0644 docs/install-vps-from-github.fa.md "$work/$guide"
-assets=("$name.tar.gz" install-vps.sh baci-prepare-swap.sh "$guide" 'baci-classroom-site-pairing-v0.1.31.zip' "${source_assets[@]}")
+assets=("$name.tar.gz" install-vps.sh baci-prepare-swap.sh "$guide" "$site" "${source_assets[@]}")
 (
     cd "$work"
     sha256sum "${assets[@]}" > "$sha_file"
@@ -126,15 +129,17 @@ cat > "$work/notes.md" <<EOF_NOTES
 
 روی VPS تازهٔ سازگار، پس از بررسی هش، اسکریپت و آرشیو را کنار هم با SFTP بفرست و \`bash ./install-vps.sh\` بزن. \`--check\` اختیاری و بدون نصب است. می‌شود همین آرشیو را مستقیم از انتشار یا آینهٔ HTTPS گرفت؛ برای نصب وابستگی‌ها به مخزن آنلاین Ubuntu یا CDN نیازی نیست. این آرشیو همان فایل آزموده‌شده در ماشین‌های ایزوله است. روی VPS ضبطِ فعلی، این مسیر را برای ارتقای درجا اجرا نکن.
 
+- **صدای فیلم:** اصلاح تیک‌تیک وسط صحبت در بستهٔ نصب تازه است. وصلهٔ r2 جداگانه لازم نیست.
+- **نمای فیلم:** ارائه‌دهنده روی «نمایش در ضبط» بالای یک وب‌کم روشن می‌زند تا آن وب‌کم در قاب بزرگ بر تخته اولویت بگیرد. نمای زنده و اولویت صفحهٔ مشترک تغییر نمی‌کند. سربرگ فیلم‌های تازه: **طراحی و توسعه : سید مهدی بیات**.
 - **رفع ۴۰۳ Recorder داخل نصب:** درخواست‌های ضبطِ احرازشده با شناسهٔ واقعی Recorder به سایت می‌رسند؛ هیچ فایل اصلاحی جدا، غیرفعال‌کردن TLS یا تغییر مجوزهای سایت لازم نیست. بعد از جفت‌سازی و فعال‌کردن ضبط، \`sudo baci-vps doctor --online --wait\` heartbeat همان Recorder را بررسی می‌کند.
 - **پیش‌فرض ضبط را حفظ می‌کند:** \`compact\` از ۴۴۸ MiB RAM قابل‌مشاهده؛ زیر ۸۹۶ MiB، swap فعال در حد ۵۱۲ MiB لازم است. \`full\` از ۱۷۹۲ MiB قابل‌مشاهده. \`live\` فقط با انتخاب صریح، بدون ضبط. فایل \`baci-prepare-swap.sh\` اختیاری است و فقط با تأیید \`--apply\` روی VPS سازگار swap اختصاصی می‌سازد.
 - **HTTPS خودکار:** Caddy برای نام رسانه با رکورد A مستقیم و TCP 443 باز از Let’s Encrypt گواهی می‌گیرد. اگر VPS به مرجع صدور نمی‌رسد، نصب و HTTPS با گواهی عمومی آماده و \`--tls files\` بدون دسترسی به آن مرجع ممکن است. پورت ۸۰ لازم نیست. برای رسانه UDP 7882 مسیر ترجیحی است و TCP 7881 جایگزین در شبکهٔ سازگار؛ HTTPS به‌تنهایی رسانه را عبور نمی‌دهد.
-- **سایت مدرسه:** ZIP کوچک \`baci-classroom-site-pairing-v0.1.31.zip\` شامل مدیر ۰٫۱٫۳۱ و کلاس ۰٫۴٫۲۴ است. VPS تازه فایل جفت‌سازی خصوصی تازه می‌سازد که تنها در پنل HTTPS مدیر کل وارد می‌شود. روی نصب مدیریت‌شدهٔ سازگار در حالت \`live\` می‌توان با \`--add-recorder\` در زمان بیکاری و بدون تغییر اتصال قبلی ضبط را اضافه کرد؛ [شرایط آن در راهنما](https://github.com/$repo/releases/download/$tag/$guide) آمده است.
+- **سایت مدرسه:** ZIP کوچک \`$site\` شامل مدیر ۰٫۱٫۳۳ و کلاس ۰٫۴٫۲۶ است. VPS تازه فایل جفت‌سازی خصوصی تازه می‌سازد که تنها در پنل HTTPS مدیر کل وارد می‌شود. روی نصب مدیریت‌شدهٔ سازگار در حالت \`live\` می‌توان با \`--add-recorder\` در زمان بیکاری و بدون تغییر اتصال قبلی ضبط را اضافه کرد؛ [شرایط آن در راهنما](https://github.com/$repo/releases/download/$tag/$guide) آمده است.
 - فایل‌های \`*-ubuntu-source.tar\` و \`*.tar.part-*\` صرفاً کد منبع متناظر Ubuntu هستند؛ برای نصب دانلودشان نکن. برای استفاده از منبع، پس از تأیید هش همهٔ بخش‌ها، روی رایانه با \`cat $source_tar.part-* > $source_tar\` یکپارچه و هش بازسازی‌شده را مقایسه کن.
 
 **رفع ناسازگاری ۱٫۳٫۰ با Ubuntu اولیه:** نسخه‌های هم‌خوان D-Bus، GLib و Python از مخزن امضاشده همراه بسته‌اند. پیش‌بررسی طرح واقعی APT را بدون تغییر بسته‌ها اجرا می‌کند. حذف یا پایین‌آوردن نسخه‌ها مجاز نیست و به بازنشانی VPS یا به‌روزرسانی کلی Ubuntu نیازی نیست.
 
-[آزمون همین آرشیو]($base): نصب و ساخت MP4 روی تصویر رسمی Ubuntu Server 24.04 اولیه با ۱ GiB بدون swap و روی تصویر به‌روز با ۵۱۲ MiB و swap؛ یک دبیر و ۱۰ شاگرد مصنوعی روی UDP، ضبط با heartbeat تازه پس از ۴۰۳ کنترل‌شده، دریافت و رمزگشایی MP4 در مقصدهای شبیه‌سازی‌شدهٔ بله و روبیکا، و پاک‌سازی بدون ساخت و ارسال بعد از «نفرست» یا لغو مقصد. [آزمون جداگانهٔ نصب‌یار، swap و دو مرورگر روی TCP]($setup_evidence). آزمون ACME با CA آزمایشی بوده؛ پیش از کلاس اصلی، مسیر رسانه از دو شبکه و دریافت و پخش فیلم در گروه واقعی مدرسه را جدا بررسی کن.
+[آزمون همین آرشیو]($base): نصب و ساخت MP4 روی تصویر رسمی Ubuntu Server 24.04 اولیه با ۱ GiB بدون swap و روی تصویر به‌روز با ۵۱۲ MiB و swap؛ یک دبیر و ۱۰ شاگرد مصنوعی روی UDP، ضبط با heartbeat تازه پس از ۴۰۳ کنترل‌شده، دریافت و رمزگشایی MP4 و آزمون نمای وب‌کم/بازگشت تخته در مقصدهای شبیه‌سازی‌شدهٔ بله و روبیکا، و پاک‌سازی بدون ساخت و ارسال بعد از «نفرست» یا لغو مقصد. [آزمون جداگانهٔ نصب‌یار، swap و دو مرورگر روی TCP]($setup_evidence). آزمون ACME با CA آزمایشی بوده؛ پیش از کلاس اصلی، مسیر رسانه از دو شبکه و دریافت و پخش فیلم در گروه واقعی مدرسه را جدا بررسی کن.
 EOF_NOTES
 stage=find-or-create-draft
 find_release() {

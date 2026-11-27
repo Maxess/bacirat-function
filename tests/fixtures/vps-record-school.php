@@ -21,7 +21,7 @@ $pair = json_decode(file_get_contents($dir . '/pair.json'), true, 8, JSON_THROW_
 qa_need(in_array($pair['signal_url'], ['wss://media.example.test', 'wss://classroom-new.example.com'], true)
     && $pair['site'] === 'https://school.example.test/campus', 'isolated pair required');
 $cfg = $pair + ['api_url'=>'https://' . parse_url($pair['signal_url'], PHP_URL_HOST), 'record_lessons'=>true,
-    'recording_delay_minutes'=>1, 'screen_share'=>true, 'room_prefix'=>'test-' . str_repeat('a',20)];
+    'recording_delay_minutes'=>1, 'screen_share'=>true, 'camera_share'=>true, 'room_prefix'=>'test-' . str_repeat('a',20)];
 $teacher = ['role'=>'teacher', 'id'=>7, 'identity'=>'teacher-7', 'office'=>null];
 $db = new PDO('sqlite:' . $dir . '/school.db', null, null, [PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION]);
 $db->exec('PRAGMA busy_timeout=2000');
@@ -55,7 +55,7 @@ $provider = static function (string $url, array $data) use ($platform, $prefix, 
 };
 $rooms = array_map(static fn(string $id): string => QA_ROOM_PREFIX . substr($id, -24), QA_BELLS);
 $rpc = static function (string $method, string $room, array $data) use ($cfg, $rooms): array {
-    qa_need($method === 'DeleteRoom' && in_array($room, $rooms, true), 'only fixture rooms may be closed');
+    qa_need(in_array($method, ['DeleteRoom','ListParticipants'], true) && in_array($room, $rooms, true), 'fixture rooms only');
     return cl_rpc($cfg, $room, $method, $data);
 };
 $now = time();
@@ -95,6 +95,7 @@ try {
                 'slot'=>1,'subject'=>'ریاضی','period'=>'زنگ ۱','date'=>cl_day($now)->format('Y-m-d'), 'phase'=>'live',
                 'sample'=>$now,'room'=>$room,'started'=>$now-10,'created'=>$now-11,'deadline'=>$now+120,
                 'staff'=>['teacher-7'=>$sid],'active_seconds'=>10,'pulses'=>['teacher-7'=>['sid'=>$sid,'at'=>$now]],
+                'camera_codec'=>'vp8', 'access'=>['camera'=>['members'=>['teacher-7'=>true]]],
                 'seen'=>['teacher-7'=>$sid], 'screen'=>['identity'=>'teacher-7','sid'=>$sid,'until'=>$now+120]];
             $s->put('lesson', $id, $live);
             $s->put('active', '15', ['id'=>$id]);
@@ -111,6 +112,18 @@ try {
             $state = json_decode(file_get_contents($dir . '/live.json'), true, 4, JSON_THROW_ON_ERROR);
             $scoped = ['lesson'=>$id,'epoch'=>cl_epoch($live),'sid'=>$state['teacherSID'],'enabled'=>true];
             cl_rec_set_source($s, $cfg, $live, $teacher, $scoped + ['source'=>'board'], $now);
+        } elseif (in_array($cmd, ['focus-camera','clear-camera'], true)) {
+            cl_class_lock($s, $cfg, 15, static function () use ($s,$cfg,$teacher,$id,$now,$dir,$rpc,$cmd): void {
+                $live = cl_active($s, 15);
+                $state = json_decode(file_get_contents($dir . '/live.json'), true, 4, JSON_THROW_ON_ERROR);
+                $scoped = ['lesson'=>$id,'epoch'=>cl_epoch($live),'sid'=>$state['teacherSID'],'publisherSid'=>$state['teacherSID']];
+                $on = $cmd === 'focus-camera';
+                if ($on) cl_rec_set_source($s, $cfg, $live, $teacher, $scoped + ['source'=>'screen','enabled'=>true,'track'=>$state['screenSID']], $now);
+                $result = cl_rec_set_source($s, $cfg, $live, $teacher, $scoped + ['source'=>'camera','enabled'=>$on,
+                    'identity'=>'teacher-7','track'=>$state['cameraSID']], $now, $rpc)['archive'];
+                qa_need(($result['camera']['track'] ?? null) === ($on ? $state['cameraSID'] : null)
+                    && $result['screen'] === $state['screenSID'] && $result['board'], 'certified camera/board/screen layout required');
+            });
         } elseif ($cmd === 'close') {
             $live = cl_active($s, 15);
             qa_need($live && $live['id'] === $id, 'unexpected active bell');

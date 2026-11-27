@@ -130,7 +130,7 @@ cl_json_reply(static function (): array {
         if ($action === 'screen-access') return cl_set_screen($s, $cfg, $lesson, $actor, $body, $now, $rpc);
         if (!cl_is_staff($actor)) throw new ClassroomError(403, 'این عملیات فقط برای دبیر یا مسئول مجاز است.');
         if ($action === 'start-recording') return cl_rec_start($s, $cfg, $class, $lesson, $actor, $now);
-        if ($action === 'record-source') return cl_rec_set_source($s, $cfg, $lesson, $actor, $body, $now);
+        if ($action === 'record-source') return cl_rec_set_source($s, $cfg, $lesson, $actor, $body, $now, $rpc);
         if ($action === 'set-wake') return cl_set_wake($s, $lesson, $actor, $body);
         if ($action === 'set-quality') return cl_set_quality($s, $cfg, $class, $lesson, $actor, $body, $now);
         if ($action === 'set-access') return cl_set_access($s, $cfg, $lesson, $actor, $body, $now, $rpc);

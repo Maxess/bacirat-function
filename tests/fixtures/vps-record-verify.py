@@ -42,9 +42,27 @@ def pdf_visible(frame):
 
 visible = [index for index in frames[5:] if pdf_visible(index)]
 assert len(visible) >= 8, 'two-color PDF missing from the right panel'
-# Detect actual content changes rather than timestamps, labels, or H.264 noise.
-left = [pane(i, 5, 24, 72, 35) for i in visible]
-assert sum(sum(abs(a-b) for a,b in zip(x,y)) > 2.0*len(x) for x,y in zip(left,left[1:])) >= 5, 'left video pane is static'
+def moving(samples, x):
+    # Detect changes in picture content, not timestamps, labels or H.264 noise.
+    pixels = [pane(i, x, 27, 70, 43) for i in samples]
+    return sum(sum(abs(a-b) for a,b in zip(u,v)) > 2.0*len(u) for u,v in zip(pixels,pixels[1:]))
+
+
+if sys.argv[2:] == ['1']:
+    def marked(frame, x, test):
+        rgb = pane(frame, x - 4, 47, 9, 7)
+        return sum(test(r,g,b) for r,g,b in zip(rgb[0::3],rgb[1::3],rgb[2::3])) >= 45
+
+    focused = [index for index in frames if marked(index,41,lambda r,g,b: r<80 and g>158 and b<80)
+               and marked(index,119,lambda r,g,b: r>165 and g<72 and b>125)]
+    assert len(focused) >= 5, 'no sustained large selected camera beside the preferred screen'
+    assert sum(frame > focused[-1] and marked(frame,41,lambda r,g,b: r<80 and g>158 and b<80)
+               for frame in visible) >= 5, 'board did not return beside the preferred screen'
+    assert moving(focused,83) >= 3, 'selected webcam is static'
+    print('QA_CAMERA uploaded MP4: preferred screen retained, selected webcam replaced the board, board restored after unpin.')
+else:
+    assert moving(visible,5) >= 5, 'left video pane is static'
+
 sound = array('h', decode('-vn', '-ac', '1', '-ar', '8000', '-f', 's16le'))
 if sys.byteorder != 'little':
     sound.byteswap()
