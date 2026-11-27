@@ -59,8 +59,13 @@ jobs:
           /usr/bin/python3 -m venv "$RUNNER_TEMP/audio-python"
           "$RUNNER_TEMP/audio-python/bin/pip" install --require-hashes -r server/offline/requirements.lock
           export MPM_TEST_CHROMIUM=$(command -v google-chrome) PYTHONPATH=tests
-          "$RUNNER_TEMP/audio-python/bin/python" -m unittest -v test_renderer_encoder
-          (cd server/recorder/native; go build -mod=readonly -trimpath -o "$RUNNER_TEMP/class-load" "$GITHUB_WORKSPACE/tests/fixtures/vps-class-load.go")
+          log="$RUNNER_TEMP/renderer-browser.log"
+          trap 'while IFS= read -r line; do echo "::error title=Renderer regression::$line"; done < <(tail -28 "$log")' ERR
+          (
+            "$RUNNER_TEMP/audio-python/bin/python" -m unittest -v test_renderer_encoder
+            cd server/recorder/native
+            go build -mod=readonly -trimpath -o "$RUNNER_TEMP/class-load" "$GITHUB_WORKSPACE/tests/fixtures/vps-class-load.go"
+          ) 2>&1 | tee "$log"
       - name: Apply and roll back on the exact published 1.3.2 install
         env:
           GH_TOKEN: ${{ github.token }}
