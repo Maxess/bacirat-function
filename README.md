@@ -4,11 +4,11 @@
 
 ## نصب VPS کلاس و ضبط با SSL خودکار
 
-**[راهنمای فارسی ۱٫۳٫۱](docs/install-vps-from-github.fa.md)** · [انتشار VPS با آرشیو و هش‌ها](https://github.com/Maxess/bacirat-function/releases/tag/vps-offline-v1.3.1) · [ZIP اتصال سایت (مدیر ۰٫۱٫۳۱ و کلاس ۰٫۴٫۲۴)](artifacts/baci-classroom-site-pairing-v0.1.31.zip).
+**[راهنمای فارسی ۱٫۳٫۲](docs/install-vps-from-github.fa.md)** · [انتشار VPS با آرشیو و هش‌ها](https://github.com/Maxess/bacirat-function/releases/tag/vps-offline-v1.3.2) · [ZIP اتصال سایت (مدیر ۰٫۱٫۳۱ و کلاس ۰٫۴٫۲۴)](artifacts/baci-classroom-site-pairing-v0.1.31.zip).
 
-اگر ۱٫۳٫۰ روی Ubuntu 24.04 اولیه با تعارض APT متوقف شد، این انتشار آن ناسازگاری را رفع کرده است؛ بستهٔ قبلی را دوباره اجرا نکن و برای این خطا VPS را ریست نکن. [گزارش بازتولید و آزمون‌ها](docs/vps-noble-dependencies.fa.md).
+روی **Ubuntu 24.04 LTS amd64 تازه**، آرشیو و `install-vps.sh` تأییدشده را کنار هم بگذار و `bash ./install-vps.sh` را اجرا کن (`--check` اختیاری است). ضبط به‌طور پیش‌فرض نصب می‌شود؛ اصلاح ۴۰۳ ناشی از نداشتن شناسهٔ HTTP در خود Recorder گنجانده شده و وصلهٔ جدا لازم نیست. ۱ GiB RAM یا بیشتر مسیر ساده‌تر است؛ روی ۵۱۲ MiB حداقل RAM قابل‌مشاهده و swap فعال لازم‌اند. `--tls auto` نیاز به دسترسی مرجع صدور و TCP 443 دارد؛ `--tls files` گواهی عمومی آماده را بدون تماس با آن مرجع نصب می‌کند.
 
-در **Ubuntu 24.04 LTS amd64**، اسکریپت انتشار به‌طور پیش‌فرض ضبط را نصب می‌کند: `compact` روی VPS کم‌حافظه و `full` با RAM کافی. مسیر کلاس، ضبط، رندر و تحویل آزمایشی روی ۵۱۲ MiB و swap فعال و همچنین افزودن ضبط روی نصب مدیریت‌شدهٔ ۱٫۲٫۰ آزموده شده‌اند. `--profile live` فقط برای کلاس بدون ضبط است. برای نصب بدون GitHub/CDN، آرشیو و `install-vps.sh` را کنار هم با SFTP منتقل کن، سپس `bash ./install-vps.sh --check` و پس از موفقیت `bash ./install-vps.sh` بزن. `--tls auto` نیاز به دسترسی مرجع صدور و TCP 443 دارد؛ `--tls files` گواهی عمومی آماده را بدون تماس با آن مرجع نصب می‌کند.
+پس از جفت‌سازی و فعال‌کردن ضبط در مدرسه، `sudo baci-vps doctor --online --wait` را بزن. نتیجهٔ گروه واقعی را با یک زنگ عادی آزمایشی بررسی کن. این نصب تازه روی VPS دارای ضبط ارتقای درجا نیست. [گزارش آزمون‌ها](docs/vps-compact-rehearsal.fa.md) · [سازگاری APT با Ubuntu اولیه](docs/vps-noble-dependencies.fa.md).
 
 ## کلاس مجازی برای سایت آزمایشی Baci
 
