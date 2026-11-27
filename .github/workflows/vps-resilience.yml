@@ -23,8 +23,11 @@ jobs:
       - name: Test launcher transport and prepare off-guest browser peers
         run: |
           set -euo pipefail
-          sudo apt-get -q update
-          sudo apt-get -qy install --no-install-recommends qemu-system-x86 qemu-utils cloud-image-utils libnss3-tools
+          log="$RUNNER_TEMP/resilience-apt.log"
+          trap 'detail=$(tail -18 "$log" | paste -sd "|"); echo "::error title=CI VM dependencies::${detail:0:3000}"' ERR
+          sudo apt-get -q -o Acquire::Retries=3 -o APT::Update::Error-Mode=any update 2>&1 | tee "$log"
+          sudo apt-get -qy -o Acquire::Retries=3 install --no-install-recommends qemu-system-x86 qemu-utils cloud-image-utils libnss3-tools 2>&1 | tee -a "$log"
+          trap - ERR
           sudo chmod a+rw /dev/kvm
           bash -n scripts/prepare-vps-swap.sh
           bash -n install-vps.sh
