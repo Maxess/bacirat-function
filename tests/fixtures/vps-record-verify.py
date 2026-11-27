@@ -49,15 +49,21 @@ def moving(samples, x):
 
 
 if sys.argv[2:] == ['1']:
-    def marked(frame, x, test):
-        rgb = pane(frame, x - 4, 47, 9, 7)
+    def marked(frame, x, y, test):
+        rgb = pane(frame, x - 4, y - 3, 9, 7)
         return sum(test(r,g,b) for r,g,b in zip(rgb[0::3],rgb[1::3],rgb[2::3])) >= 45
 
-    focused = [index for index in frames if marked(index,41,lambda r,g,b: r<80 and g>158 and b<80)
-               and marked(index,119,lambda r,g,b: r>165 and g<72 and b>125)]
+    def green(r,g,b):
+        return r < 80 and g > 158 and b < 80
+
+    def pink(r,g,b):
+        return r > 165 and g < 72 and b > 125
+
+    focused = [index for index in frames if marked(index,41,50,green) and marked(index,119,50,pink)]
     assert len(focused) >= 5, 'no sustained large selected camera beside the preferred screen'
-    assert sum(frame > focused[-1] and marked(frame,41,lambda r,g,b: r<80 and g>158 and b<80)
-               for frame in visible) >= 5, 'board did not return beside the preferred screen'
+    # With the camera back in the gallery, the center of the two main panes moves up.
+    restored = sum(frame > focused[-1] and marked(frame,41,39,green) for frame in visible)
+    assert restored >= 5, f'board did not return beside the preferred screen ({restored} samples)'
     assert moving(focused,83) >= 3, 'selected webcam is static'
     print('QA_CAMERA uploaded MP4: preferred screen retained, selected webcam replaced the board, board restored after unpin.')
 else:

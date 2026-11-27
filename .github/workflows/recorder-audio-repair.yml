@@ -60,7 +60,7 @@ jobs:
           "$RUNNER_TEMP/audio-python/bin/pip" install --require-hashes -r server/offline/requirements.lock
           export MPM_TEST_CHROMIUM=$(command -v google-chrome) PYTHONPATH=tests
           log="$RUNNER_TEMP/renderer-browser.log"
-          trap 'while IFS= read -r line; do echo "::error title=Renderer regression::$line"; done < <(tail -28 "$log")' ERR
+          trap 'proof=$(tail -32 "$log" | paste -sd "|"); echo "::error title=Renderer regression::${proof:0:3900}"' ERR
           (
             "$RUNNER_TEMP/audio-python/bin/python" -m unittest -v test_renderer_encoder
             cd server/recorder/native
