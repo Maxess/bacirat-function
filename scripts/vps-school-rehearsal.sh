@@ -30,7 +30,12 @@ run_school_rehearsal() (
             taskset -c "$VM_BENCH_CLIENT_CPUS" "$@"
     }
     school() { as_runner php -d "curl.cainfo=$q/qa.crt" "$php" "$@"; }
-    phase() { vm "printf '%s\\n' '$1' > qa-phase.tmp; mv qa-phase.tmp qa-phase" >/dev/null; }
+    local stage=prepare
+    phase() {
+        stage=$1
+        printf 'QA_SCHOOL_PHASE %s\n' "$stage"
+        vm "printf '%s\\n' '$stage' > qa-phase.tmp; mv qa-phase.tmp qa-phase" >/dev/null
+    }
     stop_fixture() {
         local rc=$?
         trap - EXIT
@@ -41,7 +46,10 @@ run_school_rehearsal() (
             if [[ -f "$q/$f" ]]; then cp "$q/$f" "$results/$f"; fi
         done
         if (( rc != 0 )); then
-            echo 'QA_SCHOOL_FAILURE test fixture only; no production VPS was contacted' >&2
+            echo "QA_SCHOOL_FAILURE stage=$stage bell=${bell_no:-0}; no production VPS was contacted" >&2
+            if [[ -s "$q/udp-probe.json" ]]; then
+                jq -c 'del(.stable.bins,.stable.bounds_us,.burst.bins,.burst.bounds_us)' "$q/udp-probe.json" | sed 's/^/QA_SCHOOL_AUDIO_PARTIAL /'
+            fi
             for f in "$q/load.log" "$q/php.log" "$q/tls.log"; do
                 if [[ -f "$f" ]]; then tail -12 "$f" | sed "s#^#QA_SCHOOL $(basename "$f"): #"; fi
             done
@@ -54,7 +62,7 @@ run_school_rehearsal() (
         if [[ -n "$pids" ]]; then sudo kill $pids 2>/dev/null || true; fi
         exit "$rc"
     }
-    trap 'echo "QA_SCHOOL_STAGE failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+    trap 'echo "QA_SCHOOL_STAGE $stage failed at line $LINENO: $BASH_COMMAND" >&2' ERR
     trap stop_fixture EXIT
     # No egress from the synthetic clients, no ICE-over-TCP fallback in this test.
     in_net ip route add 192.0.0.9/32 via 172.30.124.1
@@ -151,9 +159,23 @@ subprocess.run(['systemctl', 'restart', 'school-classroom-sfu.service'],check=Tr
 print(f'QA_SCHOOL_TRIAL {variant}: UDP 7882, loopback-only profiling in disposable VM')
 PY_SFU
     fi
+    python3 "$root/tests/fixtures/vps-record-inputs.py" "$q" "$quality"
+    school init
+    as_runner php -d "curl.cainfo=$q/qa.crt" -S 127.0.0.1:18391 "$php" > "$q/php.log" 2>&1 &
+    in_net taskset -c "$VM_BENCH_CLIENT_CPUS" python3 "$root/tests/fixtures/vps-record-tls.py" "$q" telegram --multi > "$q/tls.log" 2>&1 &
+    local n
+    ready() {
+        in_net curl --disable --noproxy '*' -fsS --max-time 2 --cacert "$q/qa.crt" \
+            --resolve school.example.test:443:172.30.124.2 https://school.example.test/readyz >/dev/null 2>&1
+    }
+    for n in $(seq 1 12); do if ready; then break; fi; sleep 1; done
+    ready
+    stage=doctor
+    vm 'set -o pipefail; sudo baci-vps doctor --online --wait | tee school-online.log; grep -Fxq school_recorder=ready school-online.log'
     if [[ -n "$udp_ab" ]]; then
         # Both trials use the packaged .27/r4/LiveKit baseline. Only the
         # interval changes, on a disposable synthetic installation.
+        stage=udp_config
         vm "sudo /usr/bin/python3 -IB - '$udp_ab'" <<'PY_BATCH'
 import json
 from pathlib import Path
@@ -173,19 +195,8 @@ subprocess.run(['systemctl', 'restart', 'school-classroom-sfu.service'],check=Tr
 print(f'QA_SCHOOL_UDP interval={interval} batch_size=64 profile=loopback')
 PY_BATCH
         touch "$q/udp-probe"
+        vm 'sudo mount -t tracefs tracefs /sys/kernel/tracing' || true
     fi
-    python3 "$root/tests/fixtures/vps-record-inputs.py" "$q" "$quality"
-    school init
-    as_runner php -d "curl.cainfo=$q/qa.crt" -S 127.0.0.1:18391 "$php" > "$q/php.log" 2>&1 &
-    in_net taskset -c "$VM_BENCH_CLIENT_CPUS" python3 "$root/tests/fixtures/vps-record-tls.py" "$q" telegram --multi > "$q/tls.log" 2>&1 &
-    local n
-    ready() {
-        in_net curl --disable --noproxy '*' -fsS --max-time 2 --cacert "$q/qa.crt" \
-            --resolve school.example.test:443:172.30.124.2 https://school.example.test/readyz >/dev/null 2>&1
-    }
-    for n in $(seq 1 12); do if ready; then break; fi; sleep 1; done
-    ready
-    vm 'set -o pipefail; sudo baci-vps doctor --online --wait | tee school-online.log; grep -Fxq school_recorder=ready school-online.log'
     vm "awk -F': ' '/^model name/{print \$2; exit}' /proc/cpuinfo" > "$q/cpu-model.txt"
     send "$root/tests/fixtures/vps-school-sample.py"
     local bell_no live_start tick eligible_first=''
@@ -193,7 +204,7 @@ PY_BATCH
         printf '%s\n' "$bell_no" > "$q/bell-number.tmp"
         mv "$q/bell-number.tmp" "$q/bell-number"
         phase idle
-        vm 'sudo /usr/bin/python3 -IB ./vps-school-sample.py qa-phase' > "$q/counters.jsonl" &
+        vm "sudo /usr/bin/python3 -IB ./vps-school-sample.py qa-phase ${udp_ab:+--sfu-syscalls}" > "$q/counters.jsonl" &
         local sampler_pid=$!
         sleep 5
         kill -0 "$sampler_pid"
@@ -260,10 +271,15 @@ PY_BATCH
         fi
         if [[ -n "$trial$udp_ab" ]]; then
             phase profile
-            vm 'curl --disable --noproxy "*" --fail --silent --show-error --max-time 18 "http://127.0.0.1:7070/debug/pprof/profile?seconds=12"' > "$q/sfu.pprof"
-            test -s "$q/sfu.pprof"
+            if vm 'curl --disable --noproxy "*" --fail --silent --show-error --max-time 18 "http://127.0.0.1:7070/debug/pprof/profile?seconds=12"' > "$q/sfu.pprof" && [[ -s "$q/sfu.pprof" ]]; then
+                cp "$q/sfu.pprof" "$results/sfu.pprof"
+            elif [[ -n "$trial" ]]; then
+                echo 'QA_SCHOOL_PROFILE legacy profile requested but failed' >&2
+                exit 1
+            else
+                echo 'QA_SCHOOL_PROFILE experimental pprof unavailable; live metrics are independent'
+            fi
             live_jobs >/dev/null
-            cp "$q/sfu.pprof" "$results/sfu.pprof"
         fi
         phase closing
         touch "$q/media-stop"

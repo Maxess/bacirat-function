@@ -1,7 +1,9 @@
 """QA guest sampler. No service calls, CPU stress, or private payloads."""
+import ctypes
 import json
 import os
 from pathlib import Path
+import struct
 import sys
 import time
 
@@ -24,6 +26,42 @@ def read_pairs(path):
 def udp():
     keys, data = (line.split()[1:] for line in Path('/proc/net/snmp').read_text().splitlines() if line.startswith('Udp:'))
     return {k: int(v) for k, v in zip(keys, data, strict=True)}
+
+
+def open_syscall_counters():
+    # perf_event_open with PID_CGROUP counts every thread, including threads
+    # born after sampling. It does not log packets, addresses or credentials.
+    if '--sfu-syscalls' not in sys.argv[2:] or os.uname().machine != 'x86_64':
+        return {}
+    open_events = {}
+    sfu = os.open(CGROUP/'school-classroom-sfu.service', os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        perf = ctypes.CDLL(None, use_errno=True).syscall
+        for name in ('sendmmsg','recvmmsg','sendmsg','recvmsg','sendto','recvfrom'):
+            event = int(Path(f'/sys/kernel/tracing/events/syscalls/sys_enter_{name}/id').read_text())
+            attr = ctypes.create_string_buffer(struct.pack('=IIQ', 2, 64, event), 64)  # TRACEPOINT, VER0
+            record = open_events[name] = []
+            for cpu in sorted(os.sched_getaffinity(0)):
+                fd = perf(298, ctypes.byref(attr), sfu, cpu, -1, (1 << 2) | (1 << 3))
+                if fd < 0:
+                    raise OSError(ctypes.get_errno(), 'SFU perf cgroup tracepoint unavailable')
+                record.append(fd)
+    except OSError as error:
+        for fds in open_events.values():
+            for fd in fds:
+                os.close(fd)
+        print(f'QA_SCHOOL perf tracepoints unavailable (errno {error.errno})', file=sys.stderr)
+        return {}
+    finally:
+        os.close(sfu)
+    return open_events
+
+
+COUNTERS = open_syscall_counters()
+
+
+def syscall_counts():
+    return {name:sum(struct.unpack('=Q', os.read(fd,8))[0] for fd in fds) for name,fds in COUNTERS.items()}
 
 
 def link(path):
@@ -63,7 +101,7 @@ def sample(phase):
             if path.name == '.capturing':
                 open_sources[str(int(job.name, 16))] = size
     return dict(t=time.monotonic(), phase=phase, hz=os.sysconf('SC_CLK_TCK'), cpu=raw, units=units, network=link(NICS[0]),
-                loopback=link(NET/'lo'), udp=udp(), mem_available=mem['MemAvailable'], mem_total=mem['MemTotal'],
+                loopback=link(NET/'lo'), udp=udp(), sfu_syscalls=syscall_counts(), mem_available=mem['MemAvailable'], mem_total=mem['MemTotal'],
                 swap_kib=mem['SwapTotal']-mem['SwapFree'], source_bytes=source_bytes, spool_bytes=spool_bytes,
                 open_sources=open_sources, oom=read_pairs(Path('/proc/vmstat'))['oom_kill'])
 

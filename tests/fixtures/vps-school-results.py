@@ -52,6 +52,7 @@ def metric(rows):
         swap_mib_peak=max(r['swap_kib'] for r in rows)/1024, tx_mbps=network('tx_bytes')*.000008, rx_mbps=network('rx_bytes')*.000008,
         tx_p95_mbps=percentile([(y['network']['tx_bytes']-x['network']['tx_bytes'])*.000008/dt for x,y,dt in windows]),
         tx_pps=network('tx_packets'), rx_pps=network('rx_packets'), nic_drops=delta(lambda r:r['network']['tx_dropped']+r['network']['rx_dropped']),
+        sfu_udp_syscalls_per_s={k:delta(lambda r:r['sfu_syscalls'][k])/elapsed for k in a.get('sfu_syscalls',{})},
         udp_receive_buffer_errors=delta(lambda r:r['udp'].get('RcvbufErrors',0)),
         udp_send_buffer_errors=delta(lambda r:r['udp'].get('SndbufErrors',0)),
         udp_buffer_errors=delta(lambda r:r['udp'].get('RcvbufErrors',0)+r['udp'].get('SndbufErrors',0)),

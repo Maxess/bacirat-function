@@ -25,7 +25,7 @@ class Element {
     async click() { if (!this.disabled && !this.hidden) await this.handlers.click({}); }
 }
 function fixture(staff, autoSlot = 0, options = {}) {
-    const {realTime, http, onPublish, onBoard, classroomScript=script, classId=22} = options;
+    const {realTime, http, onPublish, onBoard, peers, classroomScript=script, classId=22} = options;
     const clock = () => realTime ? performance.now() : now;
     const elements = Object.fromEntries(['classroom','status','status-dot','notice','people','live-panel','waiting','wait-title','wait-message',
         'camera','screen-toggle','camera-strip','camera-preview','camera-preview-video','camera-preview-name','screen-panel','screen-video','screen-label','audio-tracks','chat-log','chat-form','chat-text','leave','microphone','enable-audio','people-count',
@@ -88,7 +88,7 @@ function fixture(staff, autoSlot = 0, options = {}) {
         constructor(options) {
             super(); this.options=options; lastRoom=this;
             this.localParticipant=person(id);
-            this.remoteParticipants=new Map((options.peers ?? (staff?['student-1','student-2','admin-1']:['teacher-1','student-2'])).map(n=>[n,person(n)]));
+            this.remoteParticipants=new Map((peers ?? (staff?['student-1','student-2','admin-1']:['teacher-1','student-2'])).map(n=>[n,person(n)]));
             this.canPlaybackAudio=true;
         }
         async connect(url,token,opts) {

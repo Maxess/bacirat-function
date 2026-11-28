@@ -58,7 +58,7 @@ async function until(predicate,time,reason) {
     }
 }
 function room(c) {
-    const r = {seq:0, peers:[], events:[]};
+    const r = {seq:0, peers:[], events:[], receivers:new Set()};
     const owner = `teacher-${c}`;
     for (let i=0;i<=20;i++) {
         const f = fixture(!i,0,{realTime:true, classroomScript, classId:c, identity:i ? `student-${(c-1)*20+i}` : owner,
@@ -74,7 +74,10 @@ function room(c) {
                 const deliver = () => {
                     for (const tab of r.peers.slice(1)) {
                         const peer=tab.room?.remoteParticipants.get(owner);
-                        if (peer) tab.room.emit('DataReceived',packet,peer,1,opts.topic);
+                        if (peer?.identity === owner && peer.permissions?.canPublishData === true) {
+                            tab.room.emit('DataReceived',packet,peer,1,opts.topic);
+                            r.receivers.add(peer.identity + ':' + tab.room.localParticipant.identity);
+                        }
                     }
                 };
                 setTimeout(deliver,15);
@@ -114,6 +117,9 @@ async function run() {
     for (let c=1;c<=7;c++) { rooms.push(room(c)); await delay(125); }
     await until(()=>rooms.every(r=>r.peers.every(p=>p.position?.rev===1)),9000,'not all tabs admitted');
     await delay(5500);
+    const notices = rooms.map(r=>r.peers[0].position?.notice === true);
+    assert.ok(notices.every(n=>n) || notices.every(n=>!n),'head capability must be negotiated for all seven test rooms or none');
+    if (notices[0]) assert.ok(rooms.every(r=>r.receivers.size===20),'all seven fanout groups must actually receive the supported notices');
     const idle=await measure('idle',18_000);
     const writing=await measure('writing',28_000,async start=>{
         const events=[];

@@ -74,7 +74,7 @@ type room struct {
 // These timings are measured on the external driver, using its one monotonic
 // clock and unchanged, unique synthetic Opus payloads. They include publisher,
 // network, SFU and receiver overhead, not just an SFU flush or playout latency.
-var flightBounds = [...]int64{1, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20, 30, 40, 60, 100, 150, 250, 500}
+var flightBounds = [...]int64{125, 250, 500, 750, 1000, 1250, 1500, 1750, 2000, 3000, 4000, 6000, 8000, 10000, 15000, 20000, 30000, 40000, 60000, 100000, 150000, 250000, 500000}
 
 type flight struct {
 	bins [len(flightBounds) + 1]atomic.Uint64
@@ -100,12 +100,12 @@ func (f *flight) summary() map[string]any {
 			seen += n
 			if seen * 100 >= total * pct {
 				if i < len(flightBounds) { return flightBounds[i] }
-				return 501 // Explicit overflow marker.
+				return 500001 // Explicit overflow marker.
 			}
 		}
-		return 501
+		return 500001
 	}
-	return map[string]any{"matched":total,"unmatched":f.unmatched.Load(),"p50_ms_le":bound(50),"p95_ms_le":bound(95),"p99_ms_le":bound(99),"bins":bins,"bounds_ms":flightBounds}
+	return map[string]any{"matched":total,"unmatched":f.unmatched.Load(),"p50_us_le":bound(50),"p95_us_le":bound(95),"p99_us_le":bound(99),"bins":bins,"bounds_us":flightBounds}
 }
 
 func (s *stream) observe(payload []byte, now time.Time) {
@@ -120,7 +120,7 @@ func (s *stream) observe(payload []byte, now time.Time) {
 	// A cycle lasts two seconds. Never use an unmatched or stale record
 	// as a low-latency observation; report the matching coverage separately.
 	if t <= 0 || dt < 0 || dt > 1_000_000 { f.unmatched.Add(1); return }
-	bucket := sort.Search(len(flightBounds),func(j int) bool { return dt <= flightBounds[j]*1000 })
+	bucket := sort.Search(len(flightBounds),func(j int) bool { return dt <= flightBounds[j] })
 	f.bins[bucket].Add(1)
 }
 
