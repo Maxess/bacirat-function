@@ -5,5 +5,6 @@
   "checksums_sha256": "cce675dab232fa7b5b859757eb0144ed655116b2049580f35bb43ec80581da79",
   "installer_sha256": "c29e5cfbc2e03021cbe4c19e5b57971e1a3eb12eb07ce43a45077325e3d68625",
   "artifact_sha256": "d5b835413c9507959aa27208f11e39a4562443ed5f0cae45573dda4f54fa68c6",
-  "entry_run_id": 46155508406
+  "entry_run_id": 46155508406,
+  "setup_run_id": 46157762864
 }
