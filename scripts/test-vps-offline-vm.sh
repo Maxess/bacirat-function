@@ -539,9 +539,10 @@ if [[ "$SCENARIO" == capacity-update ]]; then
     tar -xzf recorder-candidate.tar.gz -C candidate
     update=(sudo bash candidate/baci-classroom-vps-offline/install.sh)
     sudo sha256sum /etc/school-classroom/{site-pairing.json,admission.json,Caddyfile,offline-vps.json,tls/privkey.pem} \
-        /etc/school-classroom-recorder.json /var/lib/school-classroom-recorder/worker.json > update.before
+        /etc/school-classroom-recorder.json /var/lib/school-classroom-recorder/worker.json \
+        /opt/school-classroom-recorder/releases/0.4.23/{postprocess.py,movie.py} > update.before
     sudo sha256sum /etc/school-classroom/livekit.yaml > sfu-yaml.before
-    stable=(school-classroom-{admission,https,postprocess}.service)
+    stable=(school-classroom-{admission,https}.service)
     sudo systemctl show -p InvocationID "${stable[@]}" > stable.before
     vm_spool=/var/lib/school-classroom-recorder/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     sudo mkdir "$vm_spool"
@@ -553,6 +554,10 @@ if [[ "$SCENARIO" == capacity-update ]]; then
     "${update[@]}" --update-recorder | grep -Fx 'recorder_update=ok changed=no restarted=no'
     sudo sha256sum --check sfu-yaml.before
     sudo systemctl show -p InvocationID --value school-classroom-sfu | cmp sfu.before -
+    # The existing unit declares PartOf=Recorder, so its normal dependency
+    # restarts once during the scheduler upgrade. No renderer file is changed.
+    recording_units=(school-classroom-{recorder,postprocess}.service)
+    sudo systemctl show -p InvocationID "${recording_units[@]}" > recording.after
     "${update[@]}" --update-udp --check | grep -Fx 'udp_batch=off change_needed=yes'
     "${update[@]}" --update-udp | grep -Fx 'udp_batch=on changed=yes restarted=yes'
     "${update[@]}" --restore-udp | grep -Fx 'udp_batch=off changed=yes restarted=yes'
@@ -560,8 +565,9 @@ if [[ "$SCENARIO" == capacity-update ]]; then
     "${update[@]}" --update-udp | grep -Fx 'udp_batch=on changed=yes restarted=yes'
     sudo sha256sum --check update.before
     sudo systemctl show -p InvocationID "${stable[@]}" | cmp stable.before -
+    sudo systemctl show -p InvocationID "${recording_units[@]}" | cmp recording.after -
     sudo baci-vps doctor --online --wait | grep -Fx 'school_recorder=ready'
-    echo 'QA_CAPACITY_UPDATE v1.3.3 r3→r4; busy spool refused; UDP applied and reverted byte-for-byte; pairing, HTTPS, renderer and worker unchanged.'
+    echo 'QA_CAPACITY_UPDATE v1.3.3 r3→r4; busy spool refused; UDP applied and reverted byte-for-byte; pairing, HTTPS, renderer files and worker unchanged.'
 fi
 if [[ "$SCENARIO" == upgrade ]]; then
     mkdir candidate

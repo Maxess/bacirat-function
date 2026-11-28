@@ -357,7 +357,7 @@ foreach (['no','expiry','changed','left','uncertain'] as $i=>$scenario) {
 }
 // Simultaneous rooms and a new period can record while older jobs await their delay.
 $now = $t + 900;
-$members = [15,16,18,19,20,21,22,23,24];
+$members = [15,16,18,19,20,21,22,23,24,25];
 foreach (array_slice($members,4) as $cid) $db->exec("INSERT INTO classes VALUES ($cid,'کلاس $cid','1405/1406')");
 $classes = cl_classes($db, '1405/1406');
 foreach (array_slice($members,2) as $cid) cl_rec_set_link($s,$cfg,$classes[$cid],'bale:-201',$request);
@@ -368,23 +368,23 @@ foreach ($members as $i=>$cid) {
     cl_rec_start($s,$cfg,$classes[$cid],$rooms[$cid],$teacher,$now);
 }
 $ids = array_values(array_map(static fn($cid) => $rooms[$cid]['id'], $members));
-ok($worker('plan',null,$now+5)['capture'] === $ids, 'nine independent capture leases');
+ok($worker('plan',null,$now+5)['capture'] === $ids, 'ten independent capture leases: nine is not an admission limit');
 deny(409, fn()=> $worker('plan',null,$now+5,['plan_format'=>2]));
 foreach ($ids as $index=>$item) ok($worker('poll',$item,$now+5)['room'] === $rooms[$members[$index]]['room'], 'room-scoped capture');
-$worker('fault',$rooms[24]['id'],$now+6,['reason'=>'space']);
-ok($s->get('recording',$rooms[24]['id'])['reason'] === 'space' && count($worker('plan',null,$now+6)['capture']) === 8,
+$worker('fault',$rooms[25]['id'],$now+6,['reason'=>'space']);
+ok($s->get('recording',$rooms[25]['id'])['reason'] === 'space' && count($worker('plan',null,$now+6)['capture']) === 9,
     'capacity failure removes only the affected capture');
 ok($worker('poll',$rooms[19]['id'],$now+6)['command'] === 'record', 'other class renews as usual');
 $custom = array_replace($cfg,['recording_delay_minutes'=>90]);
 $first = cl_active($s,15);
 $first['recording_consent'] = cl_rec_close_choice($s,$custom,$first,$teacher,['recording'=>$first['id'],'sendRecording'=>true],$now+9) === 'queued';
 cl_close_lesson($s,$custom,$first,$now+9,$rpc);
-ok(count($worker('plan',null,$now+10)['capture']) === 7 && $s->get('recording',$first['id'])['not_before'] === $now+9+5400,
+ok(count($worker('plan',null,$now+10)['capture']) === 8 && $s->get('recording',$first['id'])['not_before'] === $now+9+5400,
     'approved bell leaves live capture immediately, custom delay is pinned at close');
 $second = cl_active($s,19);
 $second['recording_consent'] = true;
 cl_close_lesson($s,$custom,$second,$now+15,$rpc);
-foreach ([16,18,20,21,22,23,24] as $cid) $close(cl_active($s,$cid),$teacher,false,$now+17);
+foreach ([16,18,20,21,22,23,24,25] as $cid) $close(cl_active($s,$cid),$teacher,false,$now+17);
 $queue = $worker('plan',null,$now+5500);
 ok($queue['work'] === $first['id'] && $queue['capture'] === [], 'oldest eligible closure renders first');
 ok($worker('poll',$second['id'],$now+5414)['command'] === 'hold', 'delay is evaluated per individual end time');
