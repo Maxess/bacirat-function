@@ -56,6 +56,21 @@ gh api "repos/$repo/actions/runs/$run/jobs" | jq -e '
                 and .conclusion == "success")
         and any(.steps[]; .name == "Require webcam layout and both simulated group receipts from the packaged installs"
                 and .conclusion == "success"))' >/dev/null
+if [[ "$version" == 1.3.5 ]]; then
+    stage=verify-packaged-classroom-browser
+    entry_run=$(jq -er '.entry_run_id' "$manifest")
+    [[ "$entry_run" =~ ^[0-9]+$ ]]
+    entry_commit=$(gh api "repos/$repo/actions/runs/$entry_run" | jq -er --arg branch "$branch" '
+        select(.status == "completed" and .conclusion == "success" and .head_branch == $branch
+               and (.path | split("@")[0]) == ".github/workflows/classroom-board-browser.yml") | .head_sha')
+    [[ "$entry_commit" =~ ^[a-f0-9]{40}$ ]]
+    gh api "repos/$repo/actions/runs/$entry_run/jobs" | jq -e '
+        any(.jobs[]; .name == "real-peers" and .conclusion == "success"
+            and any(.steps[]; .name == "Verify the packaged classroom with a real teacher and pupil" and .conclusion == "success"))' >/dev/null
+    entry_site_sha=$(gh api "repos/$repo/contents/artifacts/SHA256SUMS-v$site_version.txt?ref=$entry_commit" --jq .content | base64 -d \
+        | awk -v site="$site" '$2 == site {print $1}')
+    [[ "$entry_site_sha" =~ ^[a-f0-9]{64}$ ]]
+fi
 stage=verify-distribution-helpers
 # These are separate assets, not a modification or rebuild of the tested archive.
 setup_commit=$(gh api "repos/$repo/actions/runs/$setup_run" | jq -er --arg branch "$branch" '
@@ -90,6 +105,7 @@ stage=check-published-inventory
     cmp <(printf '%s\n' "$name.tar.gz" "$name-ubuntu-source.tar" "$site" | sort) \
         <(cut -c67- "$sha_file" | sort)
     sha256sum --check --strict "$sha_file"
+    if [[ "$version" == 1.3.5 ]]; then printf '%s  %s\n' "$entry_site_sha" "$site" | sha256sum --check --strict; fi
     grep -Fxq "$installer  $name.tar.gz" "$sha_file"
     tar -xOf "$name.tar.gz" "baci-classroom-vps-offline/$site" | cmp - "$site"
     BUILD=$(tar -xOf "$name.tar.gz" baci-classroom-vps-offline/BUILD.json)
@@ -131,7 +147,7 @@ assets+=("$sha_file")
 stage=prepare-release-notes
 entry_note=''
 if [[ "$version" == 1.3.5 ]]; then
-    entry_note='- **اتصال ضعیف و مرورگر قدیمی:** نمای خواندنی بدون صدا و ویدیو با تازه‌کردن دستی، دریافت فقط صدا در مرورگر سازگار، نمایش مرحلهٔ اتصال، و تلاش کنترل‌شده پس از قطعی. برای این بخش، ZIP تازه را روی سایت مدرسه هم نصب کن. اگر فقط TCP 443 باز باشد، ممکن است فقط نمای سبک کار کند؛ جایگزین رسانه TCP 7881 است، نه HTTPS روی 443.'
+    entry_note="- **اتصال ضعیف و مرورگر قدیمی:** نمای خواندنی بدون صدا و ویدیو با تازه‌کردن دستی، دریافت فقط صدا در مرورگر سازگار، نمایش مرحلهٔ اتصال، و تلاش کنترل‌شده پس از قطعی. برای این بخش، ZIP تازه را روی سایت مدرسه هم نصب کن. اگر فقط TCP 443 باز باشد، ممکن است فقط نمای سبک کار کند؛ جایگزین رسانه TCP 7881 است، نه HTTPS روی 443. [آزمون مرورگر همین ZIP](https://github.com/$repo/actions/runs/$entry_run)."
 fi
 cat > "$work/notes.md" <<EOF_NOTES
 ## کلاس زنده، ضبط و تحویل فیلم روی یک VPS — Ubuntu 24.04 LTS amd64

@@ -114,7 +114,7 @@ test('real lossy board notices are commit-only, recover from loss and respect SI
     const staffHTML=fixture.render('teacher',true), pupilHTML=fixture.render('student',true);
     const members = {}, ops = [], log = [];
     const lesson='qa-lesson', epoch='qa-epoch', owner='teacher-1', pupil='student-1';
-    let head=0, seq=0, unlock, replay=false, loseStatus=false, lostStatusAt=0;
+    let head=0, seq=0, unlock, replay=false;
     let lastStage='first admission';
     const {browser,origin}=await serveBrowser(t,async (req,res,pageUrl)=>{
         if (pageUrl.pathname==='/teacher') return send(res,'text/html; charset=UTF-8',staffHTML);
@@ -130,11 +130,6 @@ test('real lossy board notices are commit-only, recover from loss and respect SI
             assert.equal(input.class,22);
             assert.equal(req.headers['x-classroom-csrf'],'fixture');
             log.push({action:input.action,staff,sid:input.sid,ink:input.ink,at:performance.now()});
-            if (!staff && input.action==='status' && input.sid && loseStatus) {
-                loseStatus=false; lostStatusAt=performance.now();
-                res.destroy(); // No valid PHP response to this heartbeat; leave the SFU untouched.
-                return;
-            }
             const result={ok:true,phase:'live',lesson,epoch,ready:true,joinable:true,slot:11,mediaMode:'audio'};
             if (input.action==='ticket') Object.assign(result,{url:url.replace('http','ws'),token:ticket(identity)});
             else if (input.action==='leave') {
@@ -193,11 +188,27 @@ test('real lossy board notices are commit-only, recover from loss and respect SI
     assert.equal(await teacher.evaluate(()=>window.boardQA.room.localParticipant.permissions.canPublishData),true);
     const sidBeforeLoss=await student.evaluate(()=>window.boardQA.room.localParticipant.sid);
     const callsBeforeLoss=log.length;
-    loseStatus=true;
+    let lostStatusAt=0, releaseStatus;
+    const heldStatus=new Promise(resolve=>{releaseStatus=resolve;});
+    t.after(releaseStatus);
+    const isSchoolApi=url=>url.searchParams.get('route')==='api';
+    await student.route(isSchoolApi,async route=>{
+        const input=route.request().postDataJSON();
+        if (input.action==='status' && input.sid) {
+            if (!lostStatusAt) { lostStatusAt=performance.now(); return route.abort('connectionreset'); }
+            await heldStatus; // A slow next response isn't allowed to hide the recovery UI before the assertion.
+        }
+        return route.continue();
+    });
     await student.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));
-    await student.getByText(/SITE-STATUS/).waitFor({timeout:5500});
+    try { await student.getByText(/SITE-STATUS/).waitFor({timeout:8000}); }
+    catch (error) {
+        throw new Error(`school-response fault=${!!lostStatusAt} wait=${await student.locator('#wait-message').textContent()}`,{cause:error});
+    }
     assert.equal(await student.locator('#live-panel').isVisible(),false);
+    releaseStatus();
     await student.locator('#live-panel').waitFor({state:'visible',timeout:6500});
+    await student.unroute(isSchoolApi);
     const schoolRecovery=performance.now()-lostStatusAt;
     assert.equal(await student.evaluate(()=>window.boardQA.room.localParticipant.sid),sidBeforeLoss);
     assert.ok(!log.slice(callsBeforeLoss).some(r=>!r.staff && ['ticket','leave'].includes(r.action)), 'one dropped HTTP response does not churn a real media SID');
