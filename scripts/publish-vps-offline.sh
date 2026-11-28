@@ -21,6 +21,7 @@ guide="baci-vps-install-v$version-fa.md"
 case "$version" in
     1.3.3) site_version=0.4.26; manager_version=0.1.33; revision=r3 ;;
     1.3.4) site_version=0.4.27; manager_version=0.1.34; revision=r4 ;;
+    1.3.5) site_version=0.4.29; manager_version=0.1.36; revision=r4 ;;
     *) echo "No reviewed school/Recorder companion for $version" >&2; exit 1 ;;
 esac
 site=baci-classroom-site-upgrade-v$site_version.zip
@@ -128,6 +129,10 @@ assets=("$name.tar.gz" install-vps.sh baci-prepare-swap.sh "$guide" "$site" "${s
 )
 assets+=("$sha_file")
 stage=prepare-release-notes
+entry_note=''
+if [[ "$version" == 1.3.5 ]]; then
+    entry_note='- **اتصال ضعیف و مرورگر قدیمی:** نمای خواندنی بدون صدا و ویدیو با تازه‌کردن دستی، دریافت فقط صدا در مرورگر سازگار، نمایش مرحلهٔ اتصال، و تلاش کنترل‌شده پس از قطعی. برای این بخش، ZIP تازه را روی سایت مدرسه هم نصب کن. اگر فقط TCP 443 باز باشد، ممکن است فقط نمای سبک کار کند؛ جایگزین رسانه TCP 7881 است، نه HTTPS روی 443.'
+fi
 cat > "$work/notes.md" <<EOF_NOTES
 ## کلاس زنده، ضبط و تحویل فیلم روی یک VPS — Ubuntu 24.04 LTS amd64
 
@@ -135,6 +140,7 @@ cat > "$work/notes.md" <<EOF_NOTES
 
 روی VPS تازهٔ سازگار، پس از بررسی هش، اسکریپت و آرشیو را کنار هم با SFTP بفرست و \`bash ./install-vps.sh\` بزن. \`--check\` اختیاری و بدون نصب است. می‌شود همین آرشیو را مستقیم از انتشار یا آینهٔ HTTPS گرفت؛ برای نصب وابستگی‌ها به مخزن آنلاین Ubuntu یا CDN نیازی نیست. این آرشیو همان فایل آزموده‌شده در ماشین‌های ایزوله است. روی VPS ضبطِ فعلی، این مسیر را برای ارتقای درجا اجرا نکن.
 
+$entry_note
 - **صدای فیلم:** اصلاح تیک‌تیک وسط صحبت در بستهٔ نصب تازه است. وصلهٔ r2 جداگانه لازم نیست.
 - **نمای فیلم:** ارائه‌دهنده روی «نمایش در ضبط» بالای یک وب‌کم روشن می‌زند تا آن وب‌کم در قاب بزرگ بر تخته اولویت بگیرد. نمای زنده و اولویت صفحهٔ مشترک تغییر نمی‌کند. سربرگ فیلم‌های تازه: **طراحی و توسعه : سید مهدی بیات**.
 - **رفع ۴۰۳ Recorder داخل نصب:** درخواست‌های ضبطِ احرازشده با شناسهٔ واقعی Recorder به سایت می‌رسند؛ هیچ فایل اصلاحی جدا، غیرفعال‌کردن TLS یا تغییر مجوزهای سایت لازم نیست. بعد از جفت‌سازی و فعال‌کردن ضبط، \`sudo baci-vps doctor --online --wait\` heartbeat همان Recorder را بررسی می‌کند.

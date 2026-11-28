@@ -55,7 +55,11 @@ jobs:
             mkdir "$w"
             tar -xzf "$RUNNER_TEMP/$name" -C "$w"
             bundle="$w/baci-classroom-vps-offline"
-            cp server/offline/{install.sh,setup.py,START-HERE-fa.md} "$bundle/"
+            # Keep the historical 1.3.4 capacity package; the current installer has its own gates.
+            git fetch --no-tags --depth=1 origin 5052a2c72f6183bb4f2c0e798cfa629eefb4945d
+            for file in install.sh setup.py START-HERE-fa.md; do
+              git show 5052a2c72f6183bb4f2c0e798cfa629eefb4945d:server/offline/"$file" > "$bundle/$file"
+            done
             cp server/install.py "$bundle/vps_media.py"
             rm "$bundle"/payload/baci-classroom-recorder-v0.4.23-r3.zip "$bundle"/baci-classroom-site-upgrade-v0.4.26.zip
             cp artifacts/baci-classroom-site-upgrade-v0.4.27.zip "$bundle/"

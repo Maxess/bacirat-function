@@ -15,7 +15,17 @@ try {
     $class = cl_class_for($s->db, cl_classes($s->db, $year), cl_id($_GET['class'] ?? null), $actor, cl_friday_window($cfg, time()) !== null);
     $content = cl_class_lock($s, $cfg, $class['id'], static function () use ($s, $cfg, $class, $actor) {
         $now = time();
-        $live = cl_check_live($cfg, cl_active($s, $class['id']), $actor, $_GET, $now);
+        $live = cl_active($s, $class['id']);
+        if (($_GET['light'] ?? null) === '1') {
+            // A snapshot link is valid only for the current live epoch and displayed file.
+            // This read path intentionally cannot serve photos or old/other board files.
+            if (!cl_readable_lesson($cfg, $live, $class, $actor, $now) || !cl_match_transport($live, $_GET)
+                || array_key_exists('photo', $_GET)) throw new ClassroomError(404, '');
+            $state = cl_activity($s, $live['id']);
+            if ($state['doc'] === null || ($_GET['doc'] ?? null) !== $state['doc']) throw new ClassroomError(404, '');
+            return cl_board_file($live, $state, $state['doc']);
+        }
+        $live = cl_check_live($cfg, $live, $actor, $_GET, $now);
         if (array_key_exists('photo', $_GET)) {
             $identity = $_GET['photo'];
             if (!cl_media_identity($identity, true) || !cl_entered($live, ['identity'=>$identity], $live['seen'][$identity] ?? null, $now)) {

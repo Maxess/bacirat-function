@@ -9,11 +9,13 @@ $actor = $errorMessage = $class = $reports = $friday = null;
 $classes = $choices = [];
 $connect = $year = $schoolName = $classLabel = '';
 $now = time();
+$view = $_GET['view'] ?? 'classes';
+$lite = $view === 'lite';
+$snapshot = null;
 $bellDate = cl_day($now)->format('Y-m-d');
 try {
     $cfg = cl_config();
     $s = cl_store();
-    $view = $_GET['view'] ?? 'classes';
     if ($view === 'recordings') {
         require __DIR__ . '/recordings-view.php';
         return;
@@ -33,14 +35,18 @@ try {
             header('Location: ' . cl_href(['class'=>array_key_first($classes)]), true, 303);
             return;
         }
-        if ($class !== null && cl_is_staff($actor)) {
+        if ($class !== null && !$lite && cl_is_staff($actor)) {
             $choices = cl_staff_schedule($s, $cfg, $class, $actor, $now)['choices'];
         }
     }
     if ($class !== null) {
         $schoolName = cl_school_name($s->db);
         $classLabel = cl_class_label($class['name']);
-        $connect = $cfg['api_url'] . ' ' . $cfg['signal_url'];
+        if ($lite) {
+            require_once __DIR__ . '/lite.php';
+            if (session_status() === PHP_SESSION_ACTIVE) session_write_close();
+            $snapshot = cl_lite_snapshot($s, $cfg, $class, $actor);
+        } else $connect = $cfg['api_url'] . ' ' . $cfg['signal_url'];
     }
 } catch (ClassroomError $error) {
     http_response_code($error->status);
@@ -52,7 +58,8 @@ try {
 } finally {
     if (session_status() === PHP_SESSION_ACTIVE) session_write_close();
 }
-header("Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' blob: data:; font-src 'self' blob: data:; worker-src 'self'; media-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; connect-src 'self' " . $connect);
+if ($lite) header("Content-Security-Policy: default-src 'none'; style-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'");
+else header("Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' blob: data:; font-src 'self' blob: data:; worker-src 'self'; media-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; connect-src 'self' " . $connect);
 $staff = $actor !== null && cl_is_staff($actor);
 $actorLabel = match ($actor['office'] ?? $actor['role'] ?? '') {
     'student'=>'دانش‌آموز', 'teacher'=>'دبیر', 'deputy'=>'معاون / ناظم', 'admin'=>'مدیر', default=>'',
@@ -61,7 +68,7 @@ $panel = match ($actor['office'] ?? $actor['role'] ?? '') {
     'student'=>'student-panel.php', 'teacher'=>'teacher-panel.php', 'deputy'=>'deputy-panel.php', 'admin'=>'index.php?view=dashboard', default=>'index.php?view=login',
 };
 $roomPage = $class !== null && $errorMessage === null;
-if ($roomPage) cl_headers(true, ($staff && ($cfg['screen_share'] ?? false) === true) || cl_pupil_screen_enabled($cfg), ($cfg['camera_share'] ?? false) === true);
+if ($roomPage && !$lite) cl_headers(true, ($staff && ($cfg['screen_share'] ?? false) === true) || cl_pupil_screen_enabled($cfg), ($cfg['camera_share'] ?? false) === true);
 $pageTitle = $roomPage ? trim($schoolName . ' ' . $classLabel)
     : ($reports !== null ? 'حضور و غیاب کلاس مجازی' : 'کلاس مجازی');
 ?>
@@ -71,13 +78,13 @@ $pageTitle = $roomPage ? trim($schoolName . ' ' . $classLabel)
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title><?= cl_html($pageTitle) ?><?= $roomPage ? '' : ' | مدرسه' ?></title>
-    <link rel="stylesheet" href="<?= cl_html(cl_asset('classroom.css')) ?>">
-    <?php if ($class !== null && $errorMessage === null): ?>
-    <script defer src="<?= cl_html(cl_asset('livekit-client.umd.js')) ?>"></script>
+    <link rel="stylesheet" href="<?= cl_html(cl_asset($lite ? 'classroom-lite.css' : 'classroom.css')) ?>">
+    <?php if ($roomPage && !$lite): ?>
+    <script defer src="<?= cl_html(cl_asset('classroom-entry.js')) ?>"></script>
     <script defer src="<?= cl_html(cl_asset('board.js')) ?>"></script>
     <script defer src="<?= cl_html(cl_asset('room-attention.js')) ?>"></script>
+    <script defer src="<?= cl_html(cl_asset('classroom.js')) ?>"></script>
     <?php endif; ?>
-    <?php if ($class !== null && $errorMessage === null): ?><script defer src="<?= cl_html(cl_asset('classroom.js')) ?>"></script><?php endif; ?>
 </head>
 <body>
 <main class="school-main<?= $roomPage ? ' room-main' : '' ?>">
@@ -107,6 +114,8 @@ $pageTitle = $roomPage ? trim($schoolName . ' ' . $classLabel)
             <?php foreach ($classes as $c): ?><a class="class-link" href="<?= cl_html(cl_href(['class'=>$c['id']])) ?>"><strong><?= cl_html($c['name']) ?></strong><small><?= $staff ? 'برنامه و اتاق کلاس' : 'ورود به اتاق انتظار' ?></small></a><?php endforeach; ?>
             </div>
         </section>
+    <?php elseif ($lite): ?>
+        <?php require __DIR__ . '/lite-view.php'; ?>
     <?php else: ?>
         <?php require __DIR__ . '/room-view.php'; ?>
     <?php endif; ?>

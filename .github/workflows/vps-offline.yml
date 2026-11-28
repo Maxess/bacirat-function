@@ -71,6 +71,7 @@ jobs:
             php8.3 tests/plugin-manager.php
             php8.3 tests/classroom-lessons.php
             php8.3 tests/classroom-recording.php
+            node --test tests/classroom-ui.cjs
             python3 -m unittest discover -s tests -p 'test*.py'
             python3 scripts/build-managed-school.py --pairing-manager --output-dir "$RUNNER_TEMP/site"
             cmp "$RUNNER_TEMP/site/baci-classroom-site-pairing-v0.1.31.zip" artifacts/baci-classroom-site-pairing-v0.1.31.zip

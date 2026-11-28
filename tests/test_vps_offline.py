@@ -488,7 +488,7 @@ class OfflineSetupTest(unittest.TestCase):
             self.assertFalse(p.with_name('fresh').exists())
 
     def test_fresh_pack_is_reproducible_and_matches_the_installer_and_site(self):
-        self.assertEqual(setup.VERSION, '1.3.4')
+        self.assertEqual(setup.VERSION, '1.3.5')
         self.assertEqual(sha256((ARTIFACTS / setup.REC_ASSET).read_bytes()).hexdigest(), setup.PAYLOAD[setup.REC_ASSET])
         with tempfile.TemporaryDirectory() as folder:
             subprocess.run(['python3', str(ROOT / 'scripts/build-managed-school.py'), '--recorder-fresh',
@@ -501,8 +501,8 @@ class OfflineSetupTest(unittest.TestCase):
             self.assertEqual(sha256(published.read('recording.py')).hexdigest(), setup.R3_RECORDING_SHA)
             self.assertEqual(candidate.read('recording.py'), (ROOT / 'server/recorder/recording.py').read_bytes())
         with ZipFile(ARTIFACTS / build.SITE) as site:
-            self.assertCountEqual(site.namelist(), ['baci-plugin-manager-update-v0.1.34.zip',
-                'school-classroom-plugin-v0.4.27.zip', 'START-HERE-fa.txt', 'SHA256SUMS.txt'])
+            self.assertCountEqual(site.namelist(), ['baci-plugin-manager-update-v0.1.36.zip',
+                'school-classroom-plugin-v0.4.29.zip', 'START-HERE-fa.txt', 'SHA256SUMS.txt'])
 
     def test_new_managed_yaml_keeps_bound_udp_ports_and_webhook(self):
         config = dict(ipv4='203.0.113.50', origin='https://school.fixture.test', site_path='/campus')

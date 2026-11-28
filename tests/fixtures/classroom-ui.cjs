@@ -28,7 +28,7 @@ function fixture(staff, autoSlot = 0, options = {}) {
     const {realTime, http, onPublish, onBoard, peers, classroomScript=script, classId=22} = options;
     const clock = () => realTime ? performance.now() : now;
     const elements = Object.fromEntries(['classroom','status','status-dot','notice','people','live-panel','waiting','wait-title','wait-message',
-        'camera','screen-toggle','camera-strip','camera-preview','camera-preview-video','camera-preview-name','screen-panel','screen-video','screen-label','audio-tracks','chat-log','chat-form','chat-text','leave','microphone','enable-audio','people-count',
+        'audio-only','audio-only-label','request-progress','camera','screen-toggle','camera-strip','camera-preview','camera-preview-video','camera-preview-name','screen-panel','screen-video','screen-label','audio-tracks','chat-log','chat-form','chat-text','leave','microphone','enable-audio','people-count',
         'toggle-people','toggle-chat','people-panel','chat-panel','chat-empty','lesson-start','lesson-start-time','speaker-strip','speakers','recording-status',
         ...(staff ? ['slot','open','close','close-label','staff-start','toggle-access','room-permissions','access-menu','access-features','access-camera','camera-unavailable','pupil-screen-hint','permission-icons',
             'quality-open','quality-dialog','quality-form','quality-message','quality-save','quality-cancel',
@@ -93,7 +93,7 @@ function fixture(staff, autoSlot = 0, options = {}) {
         }
         async connect(url,token,opts) {
             this.connectOptions=opts; this.state='connecting';
-            await srv.onConnect?.();
+            await srv.onConnect?.(this);
             this.state='connected'; this.emit('ConnectionStateChanged');
         }
         async disconnect() { this.state='disconnected'; this.emit('Disconnected',1); }
@@ -139,7 +139,7 @@ function fixture(staff, autoSlot = 0, options = {}) {
     }
     vm.runInNewContext(classroomScript, {
         window:{isSecureContext:true,LivekitClient:lk,MediaStream,addEventListener(){},confirm:()=>true,
-            navigator:{mediaDevices:{async getUserMedia(opts) {
+            navigator:{connection:options.network,mediaDevices:{async getUserMedia(opts) {
                 cameraAttempts++; cameraCaptures.push(opts); return srv.capture ? await srv.capture : stream(rawVideo());
             },async getDisplayMedia(opts) {
                 captures.push(opts); if (srv.screenPrompt) return srv.screenPrompt;

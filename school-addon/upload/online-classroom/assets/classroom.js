@@ -6,7 +6,8 @@
     }
     async function request(root, action, data = {}, {multipart = false, keepalive = false} = {}) {
         const ctl = new AbortController();
-        const timeout = multipart ? 90000 : action === 'board-sync' ? 2300 : action === 'board-ink' && Number.isSafeInteger(data.seq) ? 3000 : 7000;
+        const timeout = multipart ? 90000 : action === 'board-sync' ? 2300 : action === 'board-ink' && Number.isSafeInteger(data.seq) ? 3000
+            : action === 'open' || action === 'ticket' || (action === 'status' && !data.sid) ? 14000 : 7000;
         const timer = setTimeout(() => ctl.abort(), timeout);
         try {
             const headers = {'X-Classroom-CSRF': root.dataset.csrf};
@@ -17,7 +18,7 @@
             const res = await fetch(root.dataset.api, {method:'POST', credentials:'same-origin', cache:'no-store',
                 headers, body, signal:ctl.signal, keepalive, priority});
             const reply = await res.json().catch(() => ({}));
-            if (!res.ok || reply.ok !== true) throw new PublicError(reply.message || 'درخواست کلاس کامل نشد.', res.status);
+            if (!res.ok || reply.ok !== true) throw new PublicError(reply.message || 'پاسخ معتبر از سایت مدرسه نرسید.', res.ok ? 502 : res.status);
             return reply;
         } finally {
             clearTimeout(timer);
@@ -26,7 +27,12 @@
 
     const root = el('classroom');
     if (!root) return;
-    const lk = window.LivekitClient;
+    let lk = window.LivekitClient, sdkLoad;
+    let cameraSource = lk?.Track.Source.Camera, micSource = lk?.Track.Source.Microphone, screenSource = lk?.Track.Source.ScreenShare;
+    const network = window.navigator?.connection;
+    const audioOnlyControl = el('audio-only');
+    let audioOnly = root.dataset.audio === 'yes' || network?.saveData === true
+        || ['slow-2g','2g','3g'].includes(network?.effectiveType);
     const fridaySlot = 'friday-test';
     const boardWire = 1, boardCueTopic = 'baci.board.cue.v1', boardCueLimit = 512;
     const headTopic = 'baci.board.head.v1', headPace = 220, headTTL = 5000, headRecovery = 2200;
@@ -46,7 +52,6 @@
     const features = {mic:{label:'میکروفون',icons:['mic','mic-off'],source:2},
         camera:{label:'دوربین',icons:['camera','camera-off'],source:1}, board:{label:'نوشتن روی تخته',icons:['pen']}};
     const permissionIcons = el('permission-icons')?.content;
-    const cameraSource = lk?.Track.Source.Camera, micSource = lk?.Track.Source.Microphone, screenSource = lk?.Track.Source.ScreenShare;
     const profileKey = p => p && `${p.width}×${p.height}/${p.frameRate}/${p.bitrate}`;
     const screenToggle = el('screen-toggle'), screenAction = el('screen-action'), screenVideo = el('screen-video');
     const screenHint = el('screen-hint'), boardScreenHint = el('board-screen-hint'), screenWarning = el('screen-warning');
@@ -67,6 +72,7 @@
     let wanted = true, autoStart = staff, optedIntoTest = false, opening = null;
     let state = {phase:'idle', ready:null}, chatCursor = 0, seconds = {}, admitted = false;
     let pollTimer, flow = 0, retryAt = 0, attempts = 0;
+    let statusFailures = 0, statusRetryAt = 0, siteIssue = '', entryStage = '', entryIssue = '';
     let statusAt = 0, inkAt = Infinity, inkWakeAt = Infinity, aimAt = Infinity, inkRead = 0, inkRetryAt = 0, checkpointAt = Infinity;
     let peopleKey = '', peopleRows = new Map(), speakersKey = '', slotKey = null;
     const cameraTiles = new Map();
@@ -86,7 +92,7 @@
         lastNoticeAt = now;
         if (text) toastTimer = setTimeout(() => { notice.hidden = true; put(notice, ''); }, 4000);
     }
-    function connected() { return active?.room.state === lk?.ConnectionState.Connected; }
+    function connected() { return !!active && !active.reconnecting && active.room.state === lk?.ConnectionState.Connected; }
     function hasAccess() { return !!active && connected() && admitted; }
     function scope(link = active) {
         return link ? {lesson:link.lesson, epoch:link.epoch, sid:link.room.localParticipant.sid || ''} : {};
@@ -484,7 +490,7 @@
         return link.room.localParticipant.unpublishTrack(track, true).catch(() => {});
     }
     function canReceiveVideo(person, pub) {
-        if (!hasAccess() || state.mediaMode === 'audio' || document.hidden || pub.kind !== lk.Track.Kind.Video || pub.isMuted) return false;
+        if (!hasAccess() || audioOnly || state.mediaMode === 'audio' || document.hidden || pub.kind !== lk.Track.Kind.Video || pub.isMuted) return false;
         if (pub.source === cameraSource) return !!state.cameraCodec && mayCamera(person) && pub === person.getTrackPublication(cameraSource);
         return pub.source === screenSource && mayScreen(person) && person.identity === state.screen?.identity && person.sid === state.screen.sid
             && pub === person.getTrackPublication(screenSource);
@@ -804,7 +810,10 @@
     function render() {
         const live = hasAccess();
         const phase = state.phase;
-        const connectingNow = connecting || (!!active && !live) || (wanted && (!!opening || retryAt > performance.now()));
+        const recovering = !!active && !live;
+        const connectingNow = connecting || recovering || (wanted && (!!opening || retryAt > performance.now()));
+        const checking = !!siteIssue || state.ready === null;
+        const waiting = el('waiting');
         const recording = state.recording;
         const capture = recording?.notice;
         root.dataset.recording = capture === 'live' ? 'yes' : 'no';
@@ -816,10 +825,18 @@
         }
         if (recordClose?.open && closeIntent?.lesson !== state.lesson) recordClose.close();
         el('live-panel').hidden = !live;
-        el('waiting').hidden = live;
+        waiting.hidden = live;
+        waiting.dataset.wait = !live && !permanent && (checking || busy || connectingNow || phase === 'closing'
+            || (wanted && !staff && phase !== 'reserved') || phase === 'starting') ? 'yes' : 'no';
+        const progress = el('request-progress');
+        if (progress) progress.hidden = !live || !busy;
+        if (audioOnlyControl) {
+            audioOnlyControl.checked = audioOnly;
+            el('audio-only-label').hidden = state.mediaMode === 'audio';
+        }
         root.dataset.live = live ? 'yes' : 'no';
         attention.setLive(live, state.wakeMode, state.wakeControl === true, busy);
-        const status = live ? 'در جریان' : connectingNow ? 'در حال اتصال' : 'اتاق انتظار';
+        const status = live ? 'در جریان' : siteIssue ? 'ارتباط با سایت ناپایدار است' : (checking || connectingNow) ? 'در حال اتصال' : 'اتاق انتظار';
         put(el('status'), status);
         el('status-dot').title = status;
         const start = state.startTime || '';
@@ -843,19 +860,26 @@
             el('close').disabled = busy || phase === 'closing';
             renderAccessMenu(live);
         } else el('join').hidden = wanted || permanent;
-        put(el('wait-title'), phase === 'closing' ? 'کلاس در حال پایان است' : connectingNow ? 'در حال تأیید ورود…'
+        put(el('wait-title'), permanent ? 'ورود به نمای کامل ممکن نشد' : phase === 'closing' ? 'کلاس در حال پایان است'
+            : siteIssue ? 'در حال بازیابی ارتباط با سایت…' : checking ? 'در حال بررسی وضعیت کلاس…'
+            : connectingNow ? (active?.confirmed ? 'در حال بازیابی ورود…' : 'در حال ورود…')
             : phase === 'paused' ? 'کلاس موقتاً متوقف است' : staff ? 'در انتظار شروع زنگ' : 'در انتظار ورود دبیر یا مسئول مدرسه');
-        put(el('wait-message'), permanent ? 'برای دسترسی دوباره صفحه را از پنل مدرسه باز کن.'
+        put(el('wait-message'), permanent ? siteIssue || entryIssue || 'برای دسترسی دوباره صفحه را از پنل مدرسه باز کن.'
+            : siteIssue || (state.ready === null ? 'در حال خواندن وضعیت از سایت مدرسه…'
             : phase === 'reserved' ? (staff ? 'اتاق این کلاس در اختیار جلسهٔ دیگری است.' : 'اتاق این کلاس هنوز برای ورود دانش‌آموز باز نیست.')
-            : connectingNow ? 'برای تأیید اتصال صبر کن؛ نیازی به زدن دوبارهٔ دکمهٔ ورود نیست.'
-            : state.ready === false || state.startFailure === 'media' ? 'ارتباط هاست مدرسه با سرور رسانه تأیید نشد.'
+            : connectingNow ? (entryStage === 'sdk' ? 'در حال بارگیری بخش صدا و ویدیو…'
+                : entryStage === 'site' ? 'در حال دریافت مجوز ورود از سایت مدرسه…'
+                : entryStage === 'signal' ? 'در حال اتصال به سرور صدا و تصویر…'
+                : entryStage === 'media' ? 'سرور رسانه پاسخ داد؛ در حال برقراری مسیر صدا و تصویر…'
+                : entryIssue || 'برای تأیید اتصال صبر کن؛ نیازی به زدن دوبارهٔ دکمهٔ ورود نیست.')
+            : entryIssue || (state.ready === false || state.startFailure === 'media' ? 'ارتباط هاست مدرسه با سرور رسانه تأیید نشد. (SCHOOL-MEDIA)'
             : state.callbackMissing ? 'اتصال دبیر به رسانه دیده شد، اما رویداد امضاشدهٔ LiveKit نرسید. مدیر مدرسه دریافت وب‌هوک را بررسی کند.'
             : state.startFailure === 'presence' ? 'ورود اولیه در مهلت تعیین‌شده تأیید نشد. اتصال دستگاه را بررسی کن.'
             : phase === 'paused' ? 'با خروج آخرین مسئول، تایمر حضور متوقف می‌شود. بعد از بازگشت مسئول و تأیید اتصال، کلاس ادامه پیدا می‌کند.'
             : staff ? bellMessage()
             : !wanted ? 'برای ورود دوباره، «بازگشت به اتاق انتظار» را بزن.'
             : state.practiceAvailable ? 'آزمایش جمعه برای کلاس تو مجاز است. پس از تأیید اتصال دبیر، خودکار وارد می‌شوی.'
-            : 'وقتی اتصال دبیر یا مسئول مدرسه تأیید شود، خودکار وارد کلاس می‌شوی.');
+            : 'وقتی اتصال دبیر یا مسئول مدرسه تأیید شود، خودکار وارد کلاس می‌شوی.')));
         const local = active?.room.localParticipant;
         el('microphone').disabled = !live || busy || !maySpeak(local);
         const micOn = live && !!local?.isMicrophoneEnabled;
@@ -909,6 +933,11 @@
         delete state.profiles; delete state.profilesRev;
         delete state.quality; delete state.qualityRev;
     }
+    function suspendActivity() {
+        const person = active?.room.localParticipant;
+        if (person?.isMicrophoneEnabled) person.setMicrophoneEnabled(false).catch(() => {});
+        clearActivity();
+    }
     function release(link = active, warn = false) {
         if (!link || active !== link) return;
         const current = scope(link);
@@ -957,6 +986,30 @@
         return messages;
     }
 
+    function loadSdk() {
+        if (lk?.Room) return Promise.resolve();
+        if (sdkLoad) return sdkLoad;
+        sdkLoad = new Promise((resolve, reject) => {
+            const tag = document.createElement('script');
+            const finish = () => {
+                clearTimeout(timer);
+                tag.onload = tag.onerror = null;
+                tag.remove();
+                lk = window.LivekitClient;
+                if (!lk?.Room) { reject(new PublicError('بخش صدا و تصویر بارگیری نشد. از نمای سبک استفاده کن یا دوباره تلاش کن. (MEDIA-ASSETS)', 503)); return; }
+                cameraSource = lk.Track.Source.Camera;
+                micSource = lk.Track.Source.Microphone;
+                screenSource = lk.Track.Source.ScreenShare;
+                resolve();
+            };
+            const timer = setTimeout(finish, 25000);
+            tag.onload = tag.onerror = finish;
+            tag.src = root.dataset.sdk;
+            document.head.append(tag);
+        }).finally(() => { sdkLoad = null; });
+        return sdkLoad;
+    }
+
     function makeRoom() {
         return new lk.Room({
             adaptiveStream:false, // Enlarging a tile must not request another receiver or quality layer.
@@ -974,11 +1027,17 @@
     }
     function retryEntry(error) {
         if (!wanted || stopped || permanent) return;
+        const message = error instanceof PublicError ? error.message : entryStage === 'site'
+            ? 'دریافت مجوز از سایت مدرسه کامل نشد. (SITE-TICKET)' : entryStage === 'media'
+                ? 'اتصال به سرور برقرار شد، اما مسیر صدا و تصویر برقرار نشد. (RTC-MEDIA)' : entryStage === 'signal'
+                    ? 'ارتباط اولیه با سرور صدا و تصویر برقرار نشد. (RTC-SIGNAL)' : 'ورود دستگاه هنوز تأیید نشده است. (ENTRY-CONFIRM)';
         if (!temporaryEntryError(error) || ++attempts >= 3) {
-            stopEntry(error instanceof PublicError ? error.message : 'ورود به کلاس پس از چند تلاش تأیید نشد. اتصال را بررسی کن و دوباره وارد شو.');
+            entryIssue = `${message} برای دریافت درس روی «نمای سبک» بزن یا ورود را دوباره امتحان کن.`;
+            stopEntry();
             return;
         }
-        retryAt = performance.now() + 450 * (2 ** (attempts - 1)) + Math.random()*180;
+        entryIssue = `${message} کمی صبر کن؛ دوباره تلاش می‌کنیم.`;
+        retryAt = performance.now() + 650 * (2 ** (attempts - 1)) + Math.random()*300;
     }
     function openSlot(slot, gesture = false) {
         // The click authorizes this slot only, even if the reply is lost before it identifies a lesson.
@@ -986,22 +1045,34 @@
         return enter(() => api('open',{slot}), gesture);
     }
     async function enter(getTicket, gesture = false) {
-        if (active || connecting || !wanted || stopped || permanent || !lk || !window.isSecureContext) return;
+        if (active || connecting || !wanted || stopped || permanent || performance.now() < statusRetryAt) return;
         const pending = ++flow;
         connecting = true;
+        entryIssue = '';
+        entryStage = lk?.Room ? 'site' : 'sdk';
         render();
-        const room = makeRoom();
-        if (gesture) room.startAudio().catch(() => {});
-        let link = null;
+        let link = null, room, deadline;
         try {
+            // Download before opening a room or issuing a short-lived ticket.
+            if (!lk?.Room) await loadSdk();
+            if (pending !== flow || !wanted || stopped || permanent) return;
+            entryStage = 'site';
+            render();
+            room = makeRoom();
+            if (gesture) room.startAudio().catch(() => {});
             const ticket = await getTicket();
             if (pending !== flow || !wanted || stopped || permanent) { await room.disconnect(); return; }
+            entryStage = 'signal';
             if (opening) opening.lesson ??= ticket.lesson;
             link = {room, lesson:ticket.lesson, epoch:ticket.epoch, confirmed:false, confirmBy:performance.now()+confirmationTimeout,
                 speakers:[], cameraAttempt:0, cameraTrack:null, cameraCapture:null, cameraBusy:false,
                 screenAttempt:0, screenTrack:null, screenBusy:false, cueSeen:new Map()};
             active = link;
             flow++; // Ignore status requests made before this transport was installed.
+            render();
+            if (lk.RoomEvent.SignalConnected) room.on(lk.RoomEvent.SignalConnected, () => {
+                if (active === link && connecting) { entryStage = 'media'; render(); }
+            });
             for (const event of [lk.RoomEvent.ParticipantConnected,lk.RoomEvent.ParticipantDisconnected,lk.RoomEvent.LocalTrackPublished,
                 lk.RoomEvent.LocalTrackUnpublished,lk.RoomEvent.TrackPublished,lk.RoomEvent.TrackUnpublished,lk.RoomEvent.TrackMuted,lk.RoomEvent.TrackUnmuted,
                 lk.RoomEvent.AudioPlaybackStatusChanged,lk.RoomEvent.ConnectionStateChanged]) {
@@ -1041,13 +1112,15 @@
                 render();
             });
             const retrying = () => {
-                if (active !== link) return;
+                if (active !== link || link.reconnecting) return;
+                link.reconnecting = true;
+                flow++; // A status begun before signal loss cannot readmit this SID.
                 if (staff) {
                     if (!link.confirmed && !connecting) retryEntry();
                     release(link, true); // Stop the staff lease at the first signal-loss event, not just after ICE timeout.
                 } else {
                     const last = scope(link);
-                    clearActivity();
+                    suspendActivity();
                     if (last.sid) api('leave', last, {keepalive:true}).catch(() => {});
                     render();
                 }
@@ -1055,7 +1128,7 @@
             };
             room.on(lk.RoomEvent.SignalReconnecting, retrying);
             room.on(lk.RoomEvent.Reconnecting, retrying);
-            room.on(lk.RoomEvent.Reconnected, () => { if (active === link) { render(); refresh(); } });
+            room.on(lk.RoomEvent.Reconnected, () => { if (active === link) { link.reconnecting = false; render(); refresh(); } });
             room.on(lk.RoomEvent.Disconnected, (reason) => {
                 if (active !== link) return;
                 const code = Number.isInteger(reason) ? lk.DisconnectReason?.[reason] : '';
@@ -1066,15 +1139,24 @@
                         note(`ارتباط رسانه قطع شد. هر زمان کلاس آماده باشد، دوباره وصل می‌شویم. (${code || 'ROOM-DISCONNECTED'})`);
                     }
                     retryAt = performance.now() + 1700 + Math.random()*850;
-                } else if (!connecting && code !== 'ROOM_DELETED') retryEntry();
+                } else {
+                    if (connecting && code !== 'ROOM_DELETED') return; // The connect promise owns initial failure.
+                    if (code !== 'ROOM_DELETED') retryEntry();
+                }
                 release(link, true); refresh();
             });
-            await room.connect(ticket.url, ticket.token, {autoSubscribe:false});
+            await Promise.race([
+                room.connect(ticket.url, ticket.token, {autoSubscribe:false, maxRetries:1, websocketTimeout:12000, peerConnectionTimeout:15000}),
+                new Promise((_, reject) => { deadline = setTimeout(() => reject(new Error('RTC deadline')), 28000); }),
+            ]);
         } catch (error) {
+            const current = link ? active === link : pending === flow;
+            if (current) retryEntry(error);
             if (link && active === link) release(link, true);
-            else await room.disconnect().catch(() => {});
-            if (link || pending === flow) retryEntry(error);
+            else room?.disconnect().catch(() => {});
         } finally {
+            clearTimeout(deadline);
+            entryStage = '';
             connecting = false;
             render(); refresh();
         }
@@ -1135,6 +1217,8 @@
             const result = await api('status', {...local, ...position, chat:chatCursor, people,
                 profilesRev:hasAccess() ? state.profilesRev : undefined, qualityRev:hasAccess() ? state.qualityRev : undefined});
             if (captured !== flow || stopped) return;
+            statusFailures = statusRetryAt = 0;
+            siteIssue = '';
             const prior = state;
             if (result.admitted && result.epoch === prior.epoch && result.lesson === prior.lesson) {
                 if (result.profilesRev && result.profilesRev === prior.profilesRev) result.profiles ??= prior.profiles;
@@ -1157,7 +1241,7 @@
                 || (!state.schedule?.timed && regularChoices.length > 1)) autoStart = false;
             if (active && local.sid && scope().sid === local.sid && connected() && result.admitted === true) {
                 active.confirmed = true;
-                opening = null; attempts = retryAt = 0;
+                opening = null; attempts = retryAt = 0; entryIssue = '';
                 admitted = true; seconds = result.seconds || {};
                 render();
                 attention.snapshot(result.profiles, pushChat(result.chat), result.chatMore, active.room.localParticipant.identity);
@@ -1165,13 +1249,16 @@
                 if (state.board && state.board === result.board) advertiseHead(active,headOf(result.board));
                 needsRefresh ||= !!result.chatMore;
             } else {
-                clearActivity();
+                suspendActivity();
                 if (active && !active.confirmed && !awaitingConfirmation()) {
                     release(active, true);
                     retryEntry();
                 }
             }
-            if (opening && performance.now() >= opening.until) stopEntry('ورود در زمان مقرر تأیید نشد؛ وضعیت اتصال را بررسی کن.');
+            if (opening && performance.now() >= opening.until) {
+                entryIssue ||= 'ورود در زمان مقرر تأیید نشد. دوباره تلاش کن. (ENTRY-CONFIRM)';
+                stopEntry();
+            }
             if (!active && !connecting && wanted && state.ready && performance.now() >= retryAt
                 && (!staff || state.slot !== fridaySlot || optedIntoTest)) {
                 if (state.joinable) {
@@ -1199,16 +1286,20 @@
                 needsRefresh = true;
                 return;
             }
-            if (wanted && temporaryEntryError(error) && (!active || !active.confirmed)
-                && (awaitingConfirmation() || (!active && opening && performance.now() < opening.until))) return;
-            if (opening) stopEntry();
-            if (active && !active.confirmed && temporaryEntryError(error)) retryEntry(error);
-            release(active, true);
-            clearActivity();
-            state = {...state, ready:false, phase:state.lesson ? 'paused' : 'idle', resumable:false};
-            permanent = error instanceof PublicError && [401,403,404].includes(error.status);
-            if (permanent) stopEntry();
-            note(error instanceof PublicError ? error.message : 'ارتباط با سایت قطع است؛ تا بازگشت اتصال، کلاس در انتظار می‌ماند.');
+            if (!temporaryEntryError(error)) {
+                permanent = true;
+                siteIssue = error.message;
+                stopEntry(); release(active, true); clearActivity();
+                return;
+            }
+            // Fail closed on content and publishing, but don't send 'leave' or churn the
+            // media SID on a single lost school response. Only a fresh status can readmit.
+            statusFailures++;
+            statusRetryAt = performance.now() + Math.min(20000, 600 * 2 ** Math.min(6, statusFailures-1)) * (1+Math.random()*.45);
+            siteIssue = 'پاسخ سایت مدرسه نرسید. دوباره تلاش می‌کنیم؛ اگر سایت باز می‌شود، نمای سبک هم در دسترس است. (SITE-STATUS)';
+            suspendActivity();
+            if (active && !awaitingConfirmation() && statusFailures >= 3) release(active);
+            if (opening && performance.now() >= opening.until) stopEntry();
         } finally {
             polling = false;
             if (!boardOnly) {
@@ -1218,7 +1309,11 @@
                 const pending = awaitingConfirmation() || !!opening;
                 const quick = (active || connecting || (wanted && state.phase === 'starting')) && (staff || !hasAccess());
                 statusAt = wanted && !active && !connecting && retryAt > now ? Math.max(now+60,retryAt)
-                    : now + (pending ? 760 : quick ? 1900 : hasAccess() ? 3500 : 4200) + Math.random()*(pending ? 190 : quick ? 270 : 900);
+                    : now + (pending ? 760 : quick ? 1900 : hasAccess() ? 3500 : (document.hidden || (!staff && !wanted)) ? 12000 : 4200)
+                        + Math.random()*(pending ? 190 : quick ? 270 : 900);
+                // First recovery is intentionally quick; repeated failures back off even
+                // if UI events or another tab becoming visible request status again.
+                if (statusFailures) statusAt = statusRetryAt;
                 render();
             }
             schedulePoll();
@@ -1227,7 +1322,7 @@
     function schedulePoll() {
         if (stopped || permanent || polling || (connecting && !active)) return;
         const now = performance.now();
-        const heartbeat = needsRefresh ? 30 : Math.max(0,statusAt-now);
+        const heartbeat = Math.max(statusRetryAt-now, needsRefresh ? 30 : Math.max(0,statusAt-now));
         const requested = Math.min(boardRecoveryAt(), inkWakeAt, Math.max(aimAt,inkRead+260),
             Math.max(active?.headWakeAt ?? Infinity,inkRead+260));
         const read = !document.hidden && hasAccess() ? Math.max(0,requested-now,inkRetryAt-now) : Infinity;
@@ -1242,6 +1337,7 @@
         schedulePoll();
     }
 
+    audioOnlyControl?.addEventListener('change', () => { audioOnly = audioOnlyControl.checked; render(); });
     for (const id of panels) {
         const button = el(`toggle-${id}`);
         const panel = el(`${id}-panel`);
@@ -1551,7 +1647,7 @@
             optedIntoTest = slot === fridaySlot;
             wanted = true;
             autoStart = false;
-            attempts = retryAt = 0;
+            attempts = retryAt = 0; entryIssue = '';
             note();
             await openSlot(slot, true);
         }));
@@ -1633,15 +1729,22 @@
                 finishClass(lesson,test);
             }
         });
-    } else el('join').addEventListener('click', () => { wanted = true; attempts = retryAt = 0; note(); render(); refresh(); });
-    window.addEventListener('pagehide', () => { stopped = true; clearTimeout(pollTimer); release(active,true); });
+    } else el('join').addEventListener('click', () => { wanted = true; attempts = retryAt = 0; entryIssue = ''; note(); render(); refresh(); });
+    window.addEventListener('pagehide', () => { stopped = true; flow++; clearTimeout(pollTimer); release(active,true); });
     window.addEventListener('pageshow', event => { if (event.persisted) { stopped = false; refresh(); } });
     document.addEventListener('visibilitychange', () => { render(); if (!document.hidden) refresh(); });
-    if (!lk || !window.isSecureContext) {
+    window.addEventListener('online', () => {
+        if (!statusFailures) return;
+        statusRetryAt = performance.now() + 250 + Math.random()*800;
+        refresh();
+    });
+    if (!window.isSecureContext || (!lk && (typeof window.RTCPeerConnection !== 'function' || typeof window.WebSocket !== 'function'))
+        || typeof fetch !== 'function' || typeof AbortController !== 'function') {
         permanent = true;
-        note('برای ورود به رسانه به مرورگر سازگار، بستهٔ کامل کلاس و HTTPS معتبر نیاز است.');
+        entryIssue = 'ورود صوتی به HTTPS معتبر و مرورگر سازگار با WebRTC نیاز دارد. برای خواندن درس از نمای سبک استفاده کن. (BROWSER-RTC)';
     }
     render();
+    root.dataset.entryReady = 'yes';
     if (!staff) statusAt = performance.now() + Math.random()*700; // Flatten the first waiting-room burst.
     schedulePoll();
 })();

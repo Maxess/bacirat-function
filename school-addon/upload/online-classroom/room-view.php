@@ -44,6 +44,7 @@ function cl_room_icon(string $name): string
 }
 ?>
 <section id="classroom" class="room-shell" data-api="<?= cl_html(cl_href(['route'=>'api'])) ?>" data-csrf="<?= cl_html(cl_context()['csrf']) ?>"
+  data-sdk="<?= cl_html(cl_asset('livekit-client.umd.js')) ?>" data-audio="<?= ($_GET['audio'] ?? null) === '1' ? 'yes' : 'no' ?>"
   data-class="<?= $class['id'] ?>" data-bell-date="<?= cl_html($bellDate) ?>" data-moderator="<?= $staff ? 'yes' : 'no' ?>"
   data-content="<?= cl_html(cl_href(['route'=>'content','class'=>$class['id']])) ?>"
   data-pdf="<?= cl_html(cl_pdf_href('runtime/pdf.min.mjs')) ?>" data-pdf-worker="<?= cl_html(cl_pdf_href('runtime/pdf.worker.min.mjs')) ?>"
@@ -156,11 +157,13 @@ function cl_room_icon(string $name): string
     </div>
     <?php endif; ?>
     <p id="notice" role="status" class="room-toast" hidden></p>
-    <section class="waiting board-grid" id="waiting" aria-labelledby="wait-title">
+    <section class="waiting board-grid" id="waiting" data-wait="yes" aria-labelledby="wait-title">
         <div class="waiting-copy">
-            <span class="waiting-icon"><?= cl_room_icon('clock') ?></span>
+            <span class="waiting-icon" aria-hidden="true"><?= cl_room_icon('clock') ?></span>
             <h2 id="wait-title"><?= $staff ? 'در انتظار شروع زنگ' : 'در انتظار ورود دبیر یا مسئول مدرسه' ?></h2>
-            <p id="wait-message"><?= $staff ? 'در حال بررسی زنگ‌های امروز…' : 'وقتی اتصال دبیر تأیید شود، خودکار وارد کلاس می‌شوی.' ?></p>
+            <p id="wait-message" role="status">در حال آماده‌سازی صفحهٔ کلاس…</p>
+            <p><a class="lite-link" href="<?= cl_html(cl_href(['class'=>$class['id'],'view'=>'lite'])) ?>">نمای سبک درس (بدون صدا و ویدیو)</a></p>
+            <noscript><p>ورود صوتی به جاوااسکریپت و مرورگر سازگار نیاز دارد. برای خواندن درس از نمای سبک استفاده کن.</p></noscript>
             <p class="wait-hint"><?= cl_room_icon('clock') ?> زمان انتظار در تایمر حضور حساب نمی‌شود.</p>
             <?php if (!$staff): ?>
             <button type="button" id="join" hidden>بازگشت به اتاق انتظار</button>
@@ -168,6 +171,11 @@ function cl_room_icon(string $name): string
         </div>
     </section>
     <div id="live-panel" hidden>
+        <div class="connection-tools">
+            <label id="audio-only-label"><input type="checkbox" id="audio-only"> دریافت فقط صدا، بدون ویدیو</label>
+            <a href="<?= cl_html(cl_href(['class'=>$class['id'],'view'=>'lite'])) ?>">نمای سبک</a>
+            <span id="request-progress" role="status" hidden><span class="mini-spinner" aria-hidden="true"></span> در حال انجام درخواست…</span>
+        </div>
         <section class="camera-strip" id="camera-strip" aria-label="دوربین‌های روشن" hidden></section>
         <dialog class="camera-preview" id="camera-preview" aria-labelledby="camera-preview-name">
             <header>

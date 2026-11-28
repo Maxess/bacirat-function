@@ -134,6 +134,15 @@ function cl_board_data_owner(array $lesson, int $now): ?array
         ? ['identity'=>$identity, 'sid'=>$lesson['staff'][$identity]] : null;
 }
 
+/** Read-only HTTPS snapshots use current school membership and supervision, never a media SID. */
+function cl_readable_lesson(array $cfg, ?array $lesson, array $class, array $actor, int $now): bool
+{
+    return $lesson !== null && $lesson['room'] !== null && $lesson['class_id'] === $class['id']
+        && $lesson['year'] === $class['year'] && cl_can_lesson($lesson, $actor)
+        && (cl_is_staff($actor) || ($actor['class'] === $class['key'] && $actor['year'] === $class['year']))
+        && !cl_lesson_expired($cfg, $lesson, $now) && cl_lesson_live($lesson, $now);
+}
+
 function cl_check_live(array $cfg, ?array $lesson, array $actor, array $input, int $now): array
 {
     if (!$lesson || !cl_can_lesson($lesson, $actor) || cl_lesson_expired($cfg, $lesson, $now)

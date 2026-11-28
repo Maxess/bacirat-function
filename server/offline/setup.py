@@ -30,7 +30,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))  # python -I: only the verified staging or root-owned install directory.
 import vps_media as media
 
-VERSION = '1.3.4'
+VERSION = '1.3.5'
 APP, CFG, SYSTEMD = media.APP, media.CFG, media.SYSTEMD
 REC = Path('/opt/school-classroom-recorder')
 RECORDER_RELEASE = '0.4.23'
@@ -818,7 +818,7 @@ def recorder_update_unit(config, pack):
 
 def update_recorder(config, *, check):
     """Replace only the reviewed r3 scheduler, keeping program path and worker identity."""
-    need(config.get('recorder_bundle', config.get('version')) in ('1.3.3', VERSION)
+    need(config.get('recorder_bundle', config.get('version')) in ('1.3.3', '1.3.4', VERSION)
          and config.get('profile') in ('full', 'compact'), 'This update requires a managed VPS with the r3 or r4 Recorder installed.')
     verify_payloads()
     with media.locked_config(not check):
@@ -862,8 +862,8 @@ def update_recorder(config, *, check):
 
 
 def addition_preflight(config, requested, worker):
-    need(config.get('version') in ('1.2.0', '1.3.0', '1.3.1', '1.3.2', '1.3.3', VERSION) and config.get('profile') == 'live' and config.get('tls_mode') in ('files','auto'),
-         'This add-on is only for a completed Baci offline live install (v1.2.0, v1.3.0–v1.3.3 or this release).')
+    need(config.get('version') in ('1.2.0', '1.3.0', '1.3.1', '1.3.2', '1.3.3', '1.3.4', VERSION) and config.get('profile') == 'live' and config.get('tls_mode') in ('files','auto'),
+         'This add-on is only for a completed Baci offline live install (v1.2.0, v1.3.0–v1.3.4 or this release).')
     meminfo = Path('/proc/meminfo').read_text()
     total_kib = check_memory(meminfo)
     profile = install_profile(requested, total_kib, swap_size(meminfo))

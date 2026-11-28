@@ -240,10 +240,22 @@ test('one pupil entry survives transient ticket and first pulse errors but an ad
     assert.equal(f.requests.filter(r=>r.action==='ticket').length,2);
     assert.equal(f.requests.filter(r=>r.action==='leave').length,0);
     assert.equal(f.elements['live-panel'].hidden,false);
+    const room=f.room;
+    f.change('student-1',mic);
+    await f.elements.microphone.click();
     f.srv.fault=input=>input.action==='status' ? 503 : 0;
     await f.status();
     assert.equal(f.elements['live-panel'].hidden,true);
-    assert.equal(f.room.state,'disconnected');
+    assert.match(f.elements['wait-message'].textContent,/SITE-STATUS/);
+    assert.equal(f.elements.waiting.dataset.wait,'yes');
+    assert.equal(f.room.state,'connected');
+    assert.deepEqual(f.room.localParticipant.micCalls,[true,false]);
+    f.srv.fault=null;
+    await f.status();
+    assert.equal(f.room,room,'only the fresh school response readmits the existing SID');
+    assert.equal(f.elements['live-panel'].hidden,false);
+    assert.equal(f.requests.filter(r=>r.action==='ticket').length,2);
+    assert.equal(f.requests.filter(r=>r.action==='leave').length,0);
 });
 
 test('the first signal failure reuses the same lesson and waits for authoritative admission', async()=>{
@@ -1079,4 +1091,53 @@ test('only acknowledged changes publish a head, with one coalesced send under ba
     await assert.rejects(f.boardSend('board-ink',{board:1,seq:4}));
     await f.advance(320);
     assert.equal(f.cuePackets.length,2,'a failed write cannot announce an uncommitted change');
+});
+
+test('repeated school failures back off, keep waiting feedback visible and stop on lost session',async()=>{
+    const f=fixture(false);
+    f.srv.phase='live';
+    f.srv.fault = input=>input.action==='status' ? 503 : 0;
+    await f.advance(80000);
+    assert.ok(f.requests.length>=6 && f.requests.length<=10, `${f.requests.length} requests over 80 simulated seconds`);
+    assert.ok(f.requests.every(r=>r.action==='status' && !r.sid));
+    assert.equal(f.elements.waiting.dataset.wait,'yes');
+    f.srv.fault=()=>401;
+    await f.status();
+    assert.equal(f.elements.waiting.dataset.wait,'no');
+    const before=f.requests.length;
+    await f.advance(60000);
+    assert.equal(f.requests.length,before);
+});
+
+test('video economy suppresses camera subscriptions, not Opus or admission, without new HTTP calls',async()=>{
+    const f=fixture(false,0,{network:{saveData:true},permissions:id=>id==='teacher-1' ? {canPublish:true,canPublishSources:[1,2]} : listener});
+    f.srv.phase='live'; await f.time(); await f.time();
+    const host=f.room.remoteParticipants.get('teacher-1');
+    const video=f.remoteTrack(host,'camera',{kind:'video',source:'camera',attach(){},detach(){}});
+    const audio=f.remoteTrack(host,'microphone',{kind:'audio',source:'microphone',attach:()=>new Element('audio'),detach:()=>[]},'audio');
+    assert.equal(f.elements['audio-only'].checked,true);
+    assert.equal(video.isDesired,false);
+    assert.equal(audio.isDesired,true);
+    const requests=f.requests.length;
+    f.elements['audio-only'].checked=false; f.elements['audio-only'].handlers.change();
+    assert.equal(video.isDesired,true);
+    f.elements['audio-only'].checked=true; f.elements['audio-only'].handlers.change();
+    assert.equal(video.isDesired,false);
+    assert.equal(audio.isDesired,true);
+    assert.equal(f.requests.length,requests);
+});
+
+test('a stuck OTT media attempt has a deadline and gives the actual stage instead of a generic status error',async()=>{
+    const f=fixture(false);
+    f.srv.phase='live';
+    f.srv.onConnect=room=>{ room.emit('SignalConnected'); return new Promise(()=>{}); };
+    await f.advance(1000);
+    assert.match(f.elements['wait-message'].textContent,/سرور رسانه پاسخ داد/);
+    assert.equal(f.elements.waiting.dataset.wait,'yes');
+    await f.advance(114000);
+    assert.equal(f.requests.filter(r=>r.action==='ticket').length,3);
+    assert.equal(f.room.state,'disconnected');
+    assert.match(f.elements['wait-message'].textContent,/RTC-MEDIA.*نمای سبک/);
+    assert.equal(f.elements.waiting.dataset.wait,'no');
+    assert.ok(!f.requests.some(r=>r.action==='status' && r.sid),'a peer that never connected does not heartbeat a SID');
 });
