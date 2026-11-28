@@ -261,6 +261,9 @@ func run(dir, profile string) error {
 		return err
 	}
 	fmt.Printf("QA_SCHOOL_JOIN pupils=180 teachers=9 rooms=9 seconds=%.2f stagger_limit=16\n", time.Since(joinStart).Seconds())
+	if err := os.WriteFile(filepath.Join(dir, "peers-joined"), nil, 0600); err != nil {
+		return err
+	}
 	faults := make(chan error, schools*slots)
 	broadcast, stop := context.WithCancel(ctx)
 	var writers sync.WaitGroup

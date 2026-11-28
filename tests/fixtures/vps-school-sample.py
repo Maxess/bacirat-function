@@ -43,16 +43,29 @@ def sample(phase):
             'pids': int((name/'pids.current').read_text()),
             'oom_kill': read_pairs(name/'memory.events')['oom_kill'],
         }
-    objects = [file for job in SPOOL.iterdir() if job.is_dir() for file in job.glob('source-*.baci')]
-    sizes = []
-    for path in objects:
-        try:
-            sizes.append(path.stat().st_size)
-        except FileNotFoundError:
-            pass  # A receipt may have cleaned it between glob and stat.
+    # Live Timeline writes .capturing (and its index), only naming the sealed
+    # archive source-*.baci when the bell ends. Size all sources, and log an
+    # independent byte counter for each live bell (digits from fake bell IDs).
+    open_sources, source_bytes, spool_bytes = {}, 0, 0
+    for job in SPOOL.iterdir():
+        if not job.is_dir():
+            continue
+        for path in job.rglob('*'):
+            try:
+                if not path.is_file():
+                    continue
+                size = path.stat().st_size
+            except FileNotFoundError:
+                continue  # A receipt may have cleaned it between glob and stat.
+            spool_bytes += size
+            if path.name == '.capturing' or path.name.startswith('source-') or path.name == '.capturing.idx':
+                source_bytes += size
+            if path.name == '.capturing':
+                open_sources[str(int(job.name, 16))] = size
     return dict(t=time.monotonic(), phase=phase, hz=os.sysconf('SC_CLK_TCK'), cpu=raw, units=units, network=link(NICS[0]),
                 loopback=link(NET/'lo'), udp=udp(), mem_available=mem['MemAvailable'], mem_total=mem['MemTotal'],
-                swap_kib=mem['SwapTotal']-mem['SwapFree'], spool_bytes=sum(sizes), oom=read_pairs(Path('/proc/vmstat'))['oom_kill'])
+                swap_kib=mem['SwapTotal']-mem['SwapFree'], source_bytes=source_bytes, spool_bytes=spool_bytes,
+                open_sources=open_sources, oom=read_pairs(Path('/proc/vmstat'))['oom_kill'])
 
 
 start = time.monotonic()
@@ -60,8 +73,8 @@ while time.monotonic() - start < 1500:
     phase = PHASE.read_text().strip()
     if phase == 'halt':
         break
-    assert phase in ('idle','join','live','closing','wait','render'), phase
+    assert phase in ('idle','join','warmup','live','closing','wait','render'), phase
     print(json.dumps(sample(phase), separators=(',', ':')), flush=True)
-    time.sleep(1)
+    time.sleep(.25 if phase == 'join' else 1)
 else:
     raise SystemExit('benchmark sampler reached timeout')

@@ -175,6 +175,39 @@ try {
         exit;
     }
 
+    // The TLS stub never forwards this local-only synthetic writer. A write
+    // uses the real board helpers in the packaged plugin. A sample pupil per
+    // bell verifies the delta; this is deliberately not the web capacity test.
+    if ($_SERVER['REQUEST_METHOD'] === 'POST' && $_SERVER['REQUEST_URI'] === '/qa-local-board'
+        && $_SERVER['REMOTE_ADDR'] === '127.0.0.1') {
+        $tick = (int)file_get_contents('php://input', false, null, 0, 12);
+        need($tick > 0 && $tick <= 120, 'invalid board sample');
+        $sizes = [];
+        foreach (range(1, 7) as $c) {
+            $lesson = cl_active($s, $c);
+            need($lesson !== null && cl_lesson_live($lesson, $now), 'board needs live class');
+            $actor = teacher($c);
+            $board = cl_activity($s, $lesson['id']);
+            $rev = $board['rev'];
+            $ink = cl_layer($s, $lesson['id'], $board)['clock'] ?? 0;
+            $y = 2500 + ($tick % 22) * 225;
+            $points = [];
+            for ($i = 0; $i < 12; $i++) $points[] = [1600 + 430*$i, $y + (int)(220*sin($i/1.7))];
+            $input = ['wire'=>1,'board'=>$rev,'sid'=>$lesson['staff'][$actor['identity']], 'seq'=>$tick,
+                'strokes'=>[['tool'=>'pen','id'=>sprintf('%032x', $tick),'part'=>0,'end'=>true,
+                    'size'=>24,'color'=>'#ed1164','points'=>$points]]];
+            $stroke = cl_board_action($s,$lesson,cl_ink_input($lesson,$actor,$input),'board-ink');
+            $pupil = ['role'=>'student','id'=>($c-1)*QA_PUPILS+1,'identity'=>'student-' . (($c-1)*QA_PUPILS+1)];
+            $view = cl_board_view($s,$lesson['id'],$pupil,['wire'=>1,'compact'=>true,'board'=>$rev,'ink'=>$ink],cl_activity($s,$lesson['id']),$lesson,$now);
+            need($stroke['ink'] === $ink+count($points) && ($view['ink'] ?? $view['cursor'] ?? null) === $stroke['ink']
+                && count($view['ops'] ?? []) === 1 && $view['ops'][0]['points'] === $points, 'a sample pupil must receive the new ink');
+            $sizes[] = strlen(reply($view));
+        }
+        header('Content-Type: application/json');
+        echo reply(['tick'=>$tick,'readers'=>count($sizes),'max_delta_json_bytes'=>max($sizes)]);
+        exit;
+    }
+
     if ($_SERVER['REQUEST_METHOD'] !== 'POST' || $_SERVER['REQUEST_URI'] !== '/campus/plugins/school-plugins.php?plugin=school-classroom&route=recording') {
         http_response_code(404); exit;
     }

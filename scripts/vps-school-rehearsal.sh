@@ -27,6 +27,9 @@ run_school_rehearsal() (
         # All payloads/keys stay in the disposable fixture; upload only counters and sanitized receipts.
         if [[ -f "$q/counters.jsonl" ]]; then cp "$q/counters.jsonl" "$results/counters.jsonl"; fi
         if [[ -f "$q/load.log" ]]; then grep '^QA_SCHOOL_' "$q/load.log" > "$results/media.log" || true; fi
+        for f in active-captures.json board.jsonl closed.json; do
+            if [[ -f "$q/$f" ]]; then cp "$q/$f" "$results/$f"; fi
+        done
         if (( rc != 0 )); then
             echo 'QA_SCHOOL_FAILURE test fixture only; no production VPS was contacted' >&2
             for f in "$q/load.log" "$q/php.log" "$q/tls.log"; do
@@ -125,7 +128,14 @@ PY_GUEST
     ( umask 077; school tickets > "$q/tickets.json" )
     as_runner bash -c 'ulimit -Sn 8192; export GOMAXPROCS=2; exec "$@"' qa "$client" --fixture "$q" "$quality" > "$q/load.log" 2>&1 &
     local load_pid=$!
-    for n in $(seq 1 180); do
+    for n in $(seq 1 120); do
+        if [[ -f "$q/peers-joined" ]]; then break; fi
+        kill -0 "$load_pid"
+        sleep .25
+    done
+    test -f "$q/peers-joined"
+    phase warmup
+    for n in $(seq 1 60); do
         if [[ -f "$q/media-ready" ]]; then break; fi
         kill -0 "$load_pid"
         sleep 1
@@ -137,11 +147,18 @@ PY_GUEST
         school status | jq -ce --argjson n "$count" 'select(length==$n and all(.[]; .state=="recording" and .live))'
     }
     for n in $(seq 1 30); do if live_jobs >/dev/null; then break; fi; kill -0 "$load_pid"; sleep 1; done
-    live_jobs > "$q/live.json"
+    live_jobs > "$q/active-captures.json"
     grep '^QA_SCHOOL_JOIN ' "$q/load.log"
     echo "QA_SCHOOL_ACTIVE confirmed captures=$count vp8=$quality steady_window_s=$seconds"
     phase live
-    sleep "$seconds"
+    local live_start=$SECONDS tick=0
+    while (( SECONDS - live_start < seconds )); do
+        tick=$((tick+1))
+        as_runner curl --disable --noproxy '*' --fail --silent --show-error --max-time 3 \
+            --data "$tick" 'http://127.0.0.1:18391/qa-local-board' >> "$q/board.jsonl"
+        sleep 2
+    done
+    echo "QA_SCHOOL_BOARD active_whiteboards=7 synthetic_pen_lines_per_room=$tick sample_delta_checks=$((7*tick))"
     kill -0 "$load_pid"
     kill -0 "$sampler_pid"
     live_jobs >/dev/null
