@@ -45,6 +45,7 @@ type bell struct {
 type counts struct {
 	bytes atomic.Uint64
 	units atomic.Uint64
+	late  atomic.Uint64 // audio arrival gaps over two 20ms packet periods
 }
 
 type stream struct {
@@ -112,12 +113,27 @@ func (r *room) connect(url string, i int) error {
 		for k, s := range r.streams {
 			if from.Identity() == r.Tickets[s.owner].Identity && pub.Source() == s.kind && strings.EqualFold(track.Codec().MimeType, s.codec.MimeType) {
 				go func() {
+					var last time.Time
 					for {
 						pkt, _, err := track.ReadRTP()
 						if err != nil {
 							return
 						}
-						r.seen[i][k].bytes.Add(uint64(len(pkt.Payload)))
+						if len(pkt.Payload) == 0 {
+							continue
+						}
+						received := &r.seen[i][k]
+						received.bytes.Add(uint64(len(pkt.Payload)))
+						if s.kind == livekit.TrackSource_MICROPHONE {
+							now := time.Now()
+							if !last.IsZero() {
+								if now.Sub(last) > 40*time.Millisecond {
+									received.late.Add(1)
+								}
+								received.units.Add(1)
+							}
+							last = now
+						}
 					}
 				}()
 				return
@@ -193,9 +209,13 @@ func run(dir, profile string) error {
 		return err
 	}
 	cw, cf, sw, sh, sf := 128, 8, 640, 360, 5
-	if profile == "medium" {
+	switch profile {
+	case "low":
+	case "medium":
 		cw, cf, sw, sh, sf = 256, 12, 960, 540, 10
-	} else if profile != "low" {
+	case "high":
+		cw, cf, sw, sh, sf = 480, 18, 1280, 720, 15
+	default:
 		return errors.New("unknown quality profile")
 	}
 	api := lksdk.NewRoomServiceClient(pair.URL, pair.Key, pair.Secret)
@@ -300,7 +320,7 @@ func run(dir, profile string) error {
 		}
 	}
 	var sent, units [schools][slots]uint64
-	var seen [schools][pupils + 1][slots]uint64
+	var seen, gaps, late [schools][pupils + 1][slots]uint64
 	var previous time.Time
 	windows := 0
 	tick := time.NewTicker(10 * time.Second)
@@ -313,7 +333,8 @@ func run(dir, profile string) error {
 			return errors.New("load generation reached the test time limit")
 		case now := <-tick.C:
 			minBytes, minPace := 1., 1.
-			var audio, camera, share, speakerPackets uint64
+			var audio, camera, share, speakerPackets, audioGaps, lateGaps uint64
+			var worstGapRate float64
 			for ri, r := range rooms {
 				for k, s := range r.streams {
 					total, u := s.sent.bytes.Load(), s.sent.units.Load()
@@ -339,19 +360,30 @@ func run(dir, profile string) error {
 						if pi == s.owner {
 							continue
 						}
-						got := r.seen[pi][k].bytes.Load()
+						received := &r.seen[pi][k]
+						got := received.bytes.Load()
 						if !previous.IsZero() {
 							minBytes = min(minBytes, float64(got-seen[ri][pi][k])/float64(payload))
 						}
 						seen[ri][pi][k] = got
+						if s.kind == livekit.TrackSource_MICROPHONE {
+							g, l := received.units.Load(), received.late.Load()
+							ng, nl := g-gaps[ri][pi][k], l-late[ri][pi][k]
+							audioGaps, lateGaps = audioGaps+ng, lateGaps+nl
+							if ng != 0 {
+								worstGapRate = max(worstGapRate, float64(nl)/float64(ng))
+							}
+							gaps[ri][pi][k], late[ri][pi][k] = g, l
+						}
 					}
 				}
 			}
 			if !previous.IsZero() {
 				windows++
 				t := now.Sub(previous).Seconds()
-				fmt.Printf("QA_SCHOOL_MEDIA window=%d min_payload_ratio=%.3f min_offer_pace=%.3f audio_kbps=%.1f camera_kbps=%.1f screen_kbps=%.1f audio_source_pps=%.0f\n",
-					windows, minBytes, minPace, float64(audio)*.008/t, float64(camera)*.008/t, float64(share)*.008/t, float64(speakerPackets)/t)
+				fmt.Printf("QA_SCHOOL_MEDIA window=%d min_payload_ratio=%.3f min_offer_pace=%.3f audio_kbps=%.1f camera_kbps=%.1f screen_kbps=%.1f audio_source_pps=%.0f late_audio_gap_pct=%.4f worst_audio_gap_pct=%.4f\n",
+					windows, minBytes, minPace, float64(audio)*.008/t, float64(camera)*.008/t, float64(share)*.008/t, float64(speakerPackets)/t,
+					100*float64(lateGaps)/float64(max(1, audioGaps)), 100*worstGapRate)
 				if minPace < .96 || minBytes < .90 {
 					return errors.New("steady media was under-driven or did not reach every intended subscriber")
 				}
@@ -383,7 +415,7 @@ func run(dir, profile string) error {
 
 func main() {
 	if len(os.Args) != 4 || os.Args[1] != "--fixture" {
-		fmt.Fprintln(os.Stderr, "expected --fixture private-directory low|medium")
+		fmt.Fprintln(os.Stderr, "expected --fixture private-directory low|medium|high")
 		os.Exit(1)
 	}
 	if err := run(os.Args[2], os.Args[3]); err != nil {

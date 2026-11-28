@@ -1,0 +1,105 @@
+name: High-quality nine-recording UDP A/B
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/vps-high-udp-ab.yml
+permissions:
+  contents: read
+jobs:
+  matched:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 42
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version: '1.26.2'
+          cache-dependency-path: server/recorder/native/go.sum
+      - name: Prepare isolated high-profile media driver and exact VPS archive
+        env:
+          CGO_ENABLED: '0'
+          GOTOOLCHAIN: local
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/prepare.log"
+          trap 'proof=$(tail -15 "$log" | paste -sd "|"); echo "::error title=High A/B preparation::${proof:0:3100}"' ERR
+          (
+            sudo apt-get -q -o Acquire::Retries=3 -o APT::Update::Error-Mode=any update
+            sudo apt-get -qy -o Acquire::Retries=3 install --no-install-recommends qemu-system-x86 qemu-utils cloud-image-utils ffmpeg php8.3-cli php8.3-sqlite3 php8.3-curl
+            sudo chmod a+rw /dev/kvm
+            (cd server/recorder/native && go build -mod=readonly -trimpath -o "$RUNNER_TEMP/school-load" "$GITHUB_WORKSPACE/tests/fixtures/vps-school-load.go")
+            php -l tests/fixtures/vps-school-record.php
+            name=baci-classroom-vps-offline-v1.3.3-ubuntu24.04-amd64.tar.gz
+            gh release download vps-offline-v1.3.3 --repo Maxess/bacirat-function --pattern "$name" --dir "$RUNNER_TEMP"
+            printf '%s  %s\n' 33f90e0fa350078bdfaa487adda3ba66f0182eb272f0f15e1b67a927ad3fe176 "$RUNNER_TEMP/$name" | sha256sum --strict -c
+            printf 'BACI_ARCHIVE=%s\n' "$RUNNER_TEMP/$name" >> "$GITHUB_ENV"
+          ) > "$log" 2>&1
+          tail -10 "$log"
+      - name: Run both high-quality trials on the same runner and CPU allocation
+        env:
+          BACI_QA_SCHOOL_CAPTURES: 9
+          BACI_QA_SCHOOL_QUALITY: high
+          BACI_QA_SCHOOL_SECONDS: 60
+        run: |
+          set -euo pipefail
+          base="$RUNNER_TEMP/qa-high"
+          bad=0
+          for trial in baseline udp-batch; do
+            export BACI_QA_SCHOOL_TRIAL="$trial" BACI_QA_SCHOOL_RESULTS="$base/$trial"
+            mkdir -p "$BACI_QA_SCHOOL_RESULTS"
+            log="$RUNNER_TEMP/qa-high-$trial.log"
+            if bash scripts/test-vps-offline-vm.sh "$BACI_ARCHIVE" files 4096 '' default "$RUNNER_TEMP/school-load" 2>&1 | tee "$log"; then
+              test -s "$BACI_QA_SCHOOL_RESULTS/measurement.json"
+              go tool pprof -top -nodecount=18 "$BACI_QA_SCHOOL_RESULTS/sfu.pprof" > "$BACI_QA_SCHOOL_RESULTS/sfu-top.txt"
+              trace=$(tail -22 "$BACI_QA_SCHOOL_RESULTS/sfu-top.txt" | paste -sd '|')
+              echo "::notice title=SFU profile $trial::${trace:0:3700}"
+            else
+              bad=1
+              proof=$(grep -E '^QA_SCHOOL_(STAGE|CLOSE|RECEIPTS|ACTIVE|TRIAL|LOAD)|[Ee]rror:|AssertionError|VM guest failure|QA school:' "$log" | tail -12 | paste -sd '|') || true
+              echo "::error title=High A/B $trial::${proof:0:3700}"
+            fi
+            grep -E '^QA_SCHOOL_(JOIN|RECEIPTS)\b' "$log" | while read -r line; do echo "::notice title=High A/B $trial::$line"; done || true
+          done
+          python3 - "$base" <<'PY'
+          import json, sys
+          from pathlib import Path
+          base = Path(sys.argv[1])
+          keys = ('seconds','cpu_mean_pct','cpu_p95_pct','cpu_peak_pct','peak_core_p95_pct','steal_mean_pct',
+                  'ram_mib_used_peak','tx_mbps','tx_p95_mbps','rx_mbps','tx_pps','udp_buffer_errors','min_live_sources',
+                  'recorder_source_bytes_per_second','recorder_spool_peak_bytes','lo_tx_mbps')
+          paths = sorted(base.glob('*/measurement.json'))
+          reports = [json.loads(p.read_text()) for p in paths]
+          for result in reports:
+              phases = {k: {**{x: round(result['phases'][k][x],3) for x in keys},
+                            'units': {u: [round(v['cpu_cores_mean'],3),round(v['cpu_cores_p95'],3),round(v['ram_mib_peak_sampled'],1)]
+                                      for u,v in result['phases'][k]['units'].items()}}
+                        for k in ('join','live','render') if k in result['phases']}
+              films = result['films']
+              lengths = [v['duration_s'] for v in films.values()]
+              info = dict(host=result['cpu_model'], phase=phases, offer=result['media'], films=len(films),
+                          film_seconds_range=[round(min(lengths),2),round(max(lengths),2)],
+                          film_bytes=sum(v['bytes'] for v in films.values()), strokes_per_board=result['strokes_per_board'],
+                          source_starts=result['capture_bytes_by_room'])
+              print(f"::notice title=High A/B counters {result['variant']}::"+json.dumps(info,separators=(',',':')))
+          if len(reports) == 2:
+              before, after = reports
+              assert before['variant'] == 'baseline' and after['variant'] == 'udp-batch'
+              assert before['cpu_model'] == after['cpu_model']
+              for key in ('audio_kbps_median','camera_kbps_median','screen_kbps_median','audio_source_pps_median'):
+                  assert abs(after['media'][key]/before['media'][key]-1) < .03, f'unequal offered load: {key}'
+              delta = {u: round((1-after['phases']['live']['units'][u]['cpu_cores_mean']/before['phases']['live']['units'][u]['cpu_cores_mean'])*100,1)
+                       for u in ('sfu','recorder')}
+              print('::notice title=Equal load A/B::same host, both high VP8 inputs within 3%, CPU reduction (negative means increase): '+json.dumps(delta))
+          PY
+          exit "$bad"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: high-udp-ab-evidence
+          path: ${{ runner.temp }}/qa-high
+          if-no-files-found: ignore
+          retention-days: 14

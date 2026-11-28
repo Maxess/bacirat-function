@@ -6,10 +6,13 @@ run_school_rehearsal() (
     local php="$root/tests/fixtures/vps-school-record.php"
     local spool=/var/lib/school-classroom-recorder
     local results=${BACI_QA_SCHOOL_RESULTS:?}
-    local seconds=${BACI_QA_SCHOOL_SECONDS:-60}
+    local seconds=${BACI_QA_SCHOOL_SECONDS:-60} trial=${BACI_QA_SCHOOL_TRIAL:-}
     [[ "$seconds" =~ ^(60|90|120)$ && -d "$results" && "$VM_BENCH_CLIENT_CPUS" != '' ]]
-    [[ "$quality" == low || "$quality" == medium ]]
+    [[ "$quality" == low || "$quality" == medium || "$quality" == high ]]
     [[ "$count" == 0 || "$count" == 3 || "$count" == 9 ]]
+    if [[ -n "$trial" ]]; then
+        [[ "$quality" == high && "$count" == 9 && ( "$trial" == baseline || "$trial" == udp-batch ) ]]
+    fi
     mkdir -m 700 "$q"
     cp "$work/qa.crt" "$work/school.pem" "$work/school.key" "$q/"
     vm 'sudo cat /etc/school-classroom/site-pairing.json' > "$q/pair.json"
@@ -105,6 +108,32 @@ subprocess.run(['systemctl','restart','school-classroom-recorder.service'],check
 print('QA_SCHOOL_VARIANT disposable copies only: site and recorder admit nine; all other limits unchanged')
 PY_GUEST
     fi
+    if [[ -n "$trial" ]]; then
+        # Apply only to the fresh VM with the known synthetic pair. The loopback
+        # debugger is a QA instrument, never a production configuration.
+        vm "sudo /usr/bin/python3 -IB - '$trial'" <<'PY_SFU'
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+variant = sys.argv[1]
+assert variant in ('baseline', 'udp-batch')
+pair = json.loads(Path('/etc/school-classroom/site-pairing.json').read_text())
+assert pair['signal_url'] == 'wss://media.example.test' and pair['site'] == 'https://school.example.test/campus'
+assert Path('/home/vpsqa/qa-media').read_text().strip() == 'media.example.test'
+config = Path('/etc/school-classroom/livekit.yaml')
+body = config.read_text()
+anchor = '  udp_port: 7882\n'
+assert 'bind_addresses: [127.0.0.1]\n' in body and body.count(anchor) == 1
+assert 'batch_io:' not in body and 'debug_handler:' not in body
+if variant == 'udp-batch':
+    body = body.replace(anchor, anchor + '  batch_io:\n    batch_size: 64\n    max_flush_interval: 1ms\n')
+config.write_text(body + '\ndebug_handler:\n  port: 7070\n')
+subprocess.run(['systemctl', 'restart', 'school-classroom-sfu.service'],check=True)
+print(f'QA_SCHOOL_TRIAL {variant}: UDP 7882, loopback-only profiling in disposable VM')
+PY_SFU
+    fi
     python3 "$root/tests/fixtures/vps-record-inputs.py" "$q" "$quality"
     school init
     as_runner php -d "curl.cainfo=$q/qa.crt" -S 127.0.0.1:18391 "$php" > "$q/php.log" 2>&1 &
@@ -163,6 +192,13 @@ PY_GUEST
     kill -0 "$sampler_pid"
     live_jobs >/dev/null
     vm 'test -z "$(sudo find /var/lib/school-classroom-recorder \( -name "*.mp4" -o -name .render \) -print -quit)"'
+    if [[ -n "$trial" ]]; then
+        phase profile
+        vm 'curl --disable --noproxy "*" --fail --silent --show-error --max-time 18 "http://127.0.0.1:7070/debug/pprof/profile?seconds=12"' > "$q/sfu.pprof"
+        test -s "$q/sfu.pprof"
+        live_jobs >/dev/null
+        cp "$q/sfu.pprof" "$results/sfu.pprof"
+    fi
     phase closing
     touch "$q/media-stop"
     for n in $(seq 1 15); do
@@ -197,6 +233,6 @@ PY_GUEST
     phase halt
     wait "$sampler_pid"
     vm "test -z \"\$(sudo find '$spool' \\( -name '*.baci' -o -name '*.mp4' \\) -print -quit)\"; grep -Eq '^oom_kill +0$' /proc/vmstat"
-    python3 "$root/tests/fixtures/vps-school-results.py" "$q" "$results/measurement.json" "$count" "$quality" "$seconds"
+    python3 "$root/tests/fixtures/vps-school-results.py" "$q" "$results/measurement.json" "$count" "$quality" "$seconds" "${trial:-standard}"
     echo 'QA_SCHOOL_PASS exact UDP workload and all planned receipts verified'
 )

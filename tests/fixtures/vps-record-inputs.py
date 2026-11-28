@@ -15,13 +15,19 @@ quality = {
     'rehearsal': [('640x360', 10, '260k'), ('1280x720', 10, '420k')],
     'low': [('128x128', 8, '25k'), ('640x360', 5, '70k')],
     'medium': [('256x256', 12, '150k'), ('960x540', 10, '315k')],
+    'high': [('480x480', 18, '350k'), ('1280x720', 15, '500k')],
 }[profile]
 for (name, source, color), (size, fps, rate) in zip(
         [('camera', 'testsrc2', '0xe000ce'), ('screen', 'testsrc', '0x25dc30')], quality, strict=True):
     bounded = [] if profile == 'rehearsal' else ['-maxrate', rate, '-bufsize', f'{2*int(rate[:-1])}k']
+    if profile == 'high':
+        # A moving source fills most of the high preset's budget. The ordinary
+        # screen pattern is too easy to compress to stress this experiment.
+        source = 'testsrc2'
+        bounded = ['-minrate', rate, '-maxrate', rate, '-bufsize', rate]
     ffmpeg('-f', 'lavfi', '-i', f'{source}=size={size}:rate={fps}', '-t', '3', '-an',
            '-vf', f'drawbox=x=3*iw/8:y=3*ih/8:w=iw/4:h=ih/4:color={color}:t=fill', '-c:v', 'libvpx',
-           '-pix_fmt', 'yuv420p', '-deadline', 'realtime', '-cpu-used', '6', '-threads', '2', '-g', '15',
+           '-pix_fmt', 'yuv420p', '-deadline', 'realtime', '-cpu-used', '6', '-threads', '2', '-g', str(fps) if profile == 'high' else '15',
            '-b:v', rate, *bounded, '-f', 'ivf', str(p / f'{name}.ivf'))
 hz_by_source = [('teacher', 440), ('pupil', 730)]
 if profile != 'rehearsal':

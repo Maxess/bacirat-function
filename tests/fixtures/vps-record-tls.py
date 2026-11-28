@@ -102,7 +102,8 @@ class Peer(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             length = int(self.headers.get('Content-Length', '0'))
-            assert 0 < length <= 10_000_000
+            limit = 46_000_000 if self.server.multi and (self.headers.get('Host'), self.path) == VIDEO_ENDPOINTS[self.server.platform] else 10_000_000
+            assert 0 < length <= limit
             body = self.rfile.read(length)
             assert len(body) == length
             content = self.headers['Content-Type']

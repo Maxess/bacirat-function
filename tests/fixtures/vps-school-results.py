@@ -115,8 +115,9 @@ def main():
     p.add_argument('workdir',type=Path)
     p.add_argument('output',type=Path)
     p.add_argument('count',type=int,choices=[0,3,9])
-    p.add_argument('quality',choices=['low','medium'])
+    p.add_argument('quality',choices=['low','medium','high'])
     p.add_argument('seconds',type=int)
+    p.add_argument('trial',nargs='?',default='standard',choices=['standard','baseline','udp-batch'])
     a = p.parse_args()
     work = a.workdir
     rows = [json.loads(line) for line in (work/'counters.jsonl').read_text().splitlines()]
@@ -141,6 +142,9 @@ def main():
     peer = (work/'load.log').read_text()
     media = [dict(re.findall(r'(\w+)=([.\d]+)', line)) for line in peer.splitlines() if line.startswith('QA_SCHOOL_MEDIA ')]
     require(len(media) >= 6, 'too few valid offered and received media windows')
+    if a.quality == 'high':
+        require(statistics.median(float(w['camera_kbps']) for w in media) >= 310
+                and statistics.median(float(w['screen_kbps']) for w in media) >= 435, 'high-profile source was under-driven')
     films = {}
     for name, record in status.items():
         require(re.fullmatch(r'QA-C0[1-9]',name) is not None, 'unexpected synthetic class')
@@ -169,9 +173,11 @@ def main():
                   min_offer_pace=min(float(w['min_offer_pace']) for w in media),
                   **{key+'_median':statistics.median(float(w[key]) for w in media) for key in
                      ('audio_kbps','camera_kbps','screen_kbps','audio_source_pps')},
-                  media_windows=len(media))
+                  median_late_audio_gap_pct=statistics.median(float(w['late_audio_gap_pct']) for w in media),
+                  max_late_audio_gap_pct=max(float(w['late_audio_gap_pct']) for w in media),
+                  worst_receiver_late_audio_gap_pct=max(float(w['worst_audio_gap_pct']) for w in media), media_windows=len(media))
     print('QA_SCHOOL_OFFER', compact(bounds))
-    a.output.write_text(json.dumps(dict(pupils=180,teachers=9,rooms=9,active_microphones=25,quality=a.quality,recordings=a.count,
+    a.output.write_text(json.dumps(dict(pupils=180,teachers=9,rooms=9,active_microphones=25,quality=a.quality,recordings=a.count,variant=a.trial,
         profile='full',test_only_raised_capture_limit=a.count == 9,phases=results,media=bounds,films=films,
         **{k:overview[k] for k in ('cpu_model','active_whiteboards','strokes_per_board','max_board_delta_json_bytes','capture_bytes_by_room')}),indent=2)+'\n')
 

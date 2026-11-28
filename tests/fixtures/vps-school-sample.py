@@ -73,7 +73,7 @@ while time.monotonic() - start < 1500:
     phase = PHASE.read_text().strip()
     if phase == 'halt':
         break
-    assert phase in ('idle','join','warmup','live','closing','wait','render'), phase
+    assert phase in ('idle','join','warmup','live','profile','closing','wait','render'), phase
     print(json.dumps(sample(phase), separators=(',', ':')), flush=True)
     time.sleep(.25 if phase == 'join' else 1)
 else:
