@@ -65,6 +65,7 @@ jobs:
           grep -Fq 'QA_RESILIENCE offline launcher selected compact recording and local HTTPS files.' "$log"
           grep -Fq 'QA_RESILIENCE local launcher completed the compact install without Internet.' "$log"
           grep -Fq 'QA_RESILIENCE Chrome peers exchanged Opus and decoded VP8 with UDP blocked; selected TCP ICE port 7881.' "$log"
+          grep -Fq 'QA_RESILIENCE With UDP 7882 and TCP 7881 blocked, trusted WSS joined signaling but no ICE connection was possible.' "$log"
           grep -Fq 'QA_RESILIENCE managed swap active after reboot.' "$log"
           proof=$(grep -E '^QA_RESILIENCE|^VM memory|^VM passed' "$log" | paste -sd '|')
           echo "::notice title=Offline preparation and ICE fallback::$proof"

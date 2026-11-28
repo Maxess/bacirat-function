@@ -77,6 +77,15 @@ exit "${INSTALL_ERROR:-0}"
         for key, value in (('VERSION', RELEASE['version']), ('SHA256', RELEASE['installer_sha256'])):
             self.assertEqual(re.findall(rf'^readonly {key}=(.+)$', LAUNCHER, re.M), [value])
 
+    def test_documented_direct_command_pins_the_distributed_launcher(self):
+        if RELEASE['version'] != '1.3.5':
+            return  # Older guides start from a verified local copy instead.
+        guide = (ROOT / 'docs/install-vps-from-github.fa.md').read_text()
+        launcher = ARCHIVE_URL.rsplit('/', 1)[0] + '/install-vps.sh'
+        self.assertIn(launcher + ' -o install-vps.sh &&', guide)
+        self.assertIn("'" + sha256(LAUNCHER.encode()).hexdigest() + "' install-vps.sh | sha256sum --strict --check &&", guide)
+        self.assertIn(f'vps-offline-v{RELEASE["version"]}/baci-classroom-site-upgrade-v0.4.29.zip', guide)
+
     def test_verified_download_forwards_exact_flags_with_original_directory(self):
         args = ('--check', '--tls', 'files', '--site', 'https://school.example.test/campus',
                 '--media', 'rtc.example.test', '--ipv4', '192.0.0.9', '--cert', 'a chain.pem', '--key', './privkey.pem',

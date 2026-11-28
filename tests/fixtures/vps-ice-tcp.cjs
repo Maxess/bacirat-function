@@ -5,7 +5,8 @@ const { createHmac } = require('node:crypto');
 const { readFileSync } = require('node:fs');
 const { join } = require('node:path');
 
-const dir = process.argv[2];
+const [, , dir, mode='tcp'] = process.argv;
+assert.ok(mode==='tcp' || mode==='blocked');
 const { chromium } = require(process.env.BACI_QA_PLAYWRIGHT);
 const pair = JSON.parse(readFileSync(join(dir, 'pair.json'), 'utf8'));
 const school = 'https://school.example.test/campus/tcp-qa';
@@ -38,6 +39,27 @@ let stage = 'create';
         stage = 'browser';
         browser = await chromium.launch({ executablePath: process.env.BACI_QA_CHROMIUM,
             args: ['--use-fake-device-for-media-stream', '--autoplay-policy=no-user-gesture-required', '--no-proxy-server'] });
+        if (mode === 'blocked') {
+            stage = 'WSS works but neither ICE path is available';
+            const page = await browser.newPage();
+            await page.route(`${school}**`, r => r.fulfill({ contentType: 'text/html', body: '<!doctype html><title>Isolated no-ICE QA</title>' }));
+            await page.goto(school);
+            await page.addScriptTag({ path: join(dir, 'livekit-client.umd.js') });
+            const token = jwt({ roomJoin: true, room, canSubscribe: true, canPublish: false, canPublishData: false }, ids[0]);
+            const result = await page.evaluate(async ({ signal, token }) => {
+                const r = new LivekitClient.Room();
+                let signaling = false, connected = false;
+                r.on(LivekitClient.RoomEvent.SignalConnected, () => { signaling = true; });
+                try {
+                    await r.connect(signal, token, { maxRetries: 0, websocketTimeout: 10000, peerConnectionTimeout: 6000 });
+                    connected = true;
+                } catch {} finally { await r.disconnect(); }
+                return { signaling, connected };
+            }, { signal, token });
+            assert.deepEqual(result, { signaling: true, connected: false });
+            console.log('QA_RESILIENCE With UDP 7882 and TCP 7881 blocked, trusted WSS joined signaling but no ICE connection was possible.');
+            return;
+        }
         const pages = [];
         for (const id of ids) {
             stage = `join-${id}`;
