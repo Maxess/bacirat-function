@@ -72,7 +72,7 @@ logging:
 
 function observeRoom() {
     const lk = window.LivekitClient;
-    const state = window.boardQA={room:null,widget:null,hints:0,dropped:0,drop:false};
+    const state = window.boardQA={room:null,widget:null,hints:0,dropped:0,drop:false,connectError:null};
     const create = window.ClassroomBoard;
     window.ClassroomBoard = (root, options) => {
         state.widget=create(root,options);
@@ -83,6 +83,10 @@ function observeRoom() {
         constructor(...args) {
             super(...args);
             state.room=this;
+        }
+        async connect(...args) {
+            try { return await super.connect(...args); }
+            catch (error) { state.connectError=error.message; throw error; }
         }
         on(event,callback) {
             if (event!==lk.RoomEvent.DataReceived) return super.on(event,callback);
@@ -109,6 +113,7 @@ test('real lossy board notices are commit-only, recover from loss and respect SI
     const members = {}, ops = [], log = [];
     const lesson='qa-lesson', epoch='qa-epoch', owner='teacher-1', pupil='student-1';
     let head=0, seq=0, unlock, replay=false;
+    let lastStage='first admission';
     const {browser,origin}=await serveBrowser(t,async (req,res,pageUrl)=>{
         if (pageUrl.pathname==='/teacher') return send(res,'text/html; charset=UTF-8',staffHTML);
         if (pageUrl.pathname==='/student') return send(res,'text/html; charset=UTF-8',pupilHTML);
@@ -160,7 +165,18 @@ test('real lossy board notices are commit-only, recover from loss and respect SI
         // Model two different active devices rather than two tabs with one foreground.
         await page.addInitScript(()=>Object.defineProperty(document,'hidden',{get:()=>false}));
         await page.goto(origin+path);
-        await page.waitForFunction(()=>window.boardQA?.widget?.position().board===1,undefined,{timeout:12_000});
+        try {
+            await page.waitForFunction(()=>window.boardQA?.widget?.position().board===1,undefined,{timeout:12_000});
+        } catch (error) {
+            const state=await page.evaluate(()=>({
+                sdk:!!window.LivekitClient,
+                room:window.boardQA?.room?.state,
+                board:window.boardQA?.widget?.position(),
+                connectError:window.boardQA?.connectError?.replace(/eyJ[\w.-]+/g,'[test token]'),
+                notice:document.getElementById('notice')?.textContent,
+            }));
+            throw new Error(`${lastStage} ${path}: ${JSON.stringify({state,actions:log.slice(-8).map(r=>[r.staff,r.action,!!r.sid,r.ink])})}`,{cause:error});
+        }
         return page;
     }
     const teacher=await open('/teacher'), student=await open('/student');
@@ -205,6 +221,7 @@ test('real lossy board notices are commit-only, recover from loss and respect SI
     await student.close();
     await sendStroke(teacher,4);
     replay=true;
+    lastStage='paged pupil rejoin';
     const rejoined=await open('/student');
     const newSID=await rejoined.evaluate(()=>window.boardQA.room.localParticipant.sid);
     assert.notEqual(oldSID,newSID);
