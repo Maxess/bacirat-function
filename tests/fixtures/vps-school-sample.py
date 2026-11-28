@@ -100,7 +100,8 @@ def sample(phase):
                 source_bytes += size
             if path.name == '.capturing':
                 open_sources[str(int(job.name, 16))] = size
-    return dict(t=time.monotonic(), phase=phase, hz=os.sysconf('SC_CLK_TCK'), cpu=raw, units=units, network=link(NICS[0]),
+    usage = os.statvfs(SPOOL)
+    return dict(disk_free_bytes=usage.f_bavail * usage.f_frsize, t=time.monotonic(), phase=phase, hz=os.sysconf('SC_CLK_TCK'), cpu=raw, units=units, network=link(NICS[0]),
                 loopback=link(NET/'lo'), udp=udp(), sfu_syscalls=syscall_counts(), mem_available=mem['MemAvailable'], mem_total=mem['MemTotal'],
                 swap_kib=mem['SwapTotal']-mem['SwapFree'], source_bytes=source_bytes, spool_bytes=spool_bytes,
                 open_sources=open_sources, oom=read_pairs(Path('/proc/vmstat'))['oom_kill'])

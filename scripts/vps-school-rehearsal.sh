@@ -55,7 +55,10 @@ run_school_rehearsal() (
                 if [[ -f "$f" ]]; then tail -12 "$f" | sed "s#^#QA_SCHOOL $(basename "$f"): #"; fi
             done
             vm 'sudo journalctl --no-pager -n 18 -u school-classroom-recorder -u school-classroom-postprocess -o cat' || true
-            school status || true
+            for no in $(seq 1 "$bells"); do
+                school status "$no" | jq -c --arg bell "$no" '{bell:$bell,jobs:map_values({state,live,sent,cleaned,reason,rendered_at})}' \
+                    | sed 's/^/QA_SCHOOL_PARTIAL_SETTLEMENT /' || true
+            done
         fi
         phase halt || true
         local pids
@@ -295,7 +298,7 @@ PY_BATCH
         wait "$load_pid"
         grep '^QA_SCHOOL_MEDIA ' "$q/load.log"
         if (( bell_no < bells )); then
-            eligible_first=$(school status 1 | jq -er '[.[] | .not_before] | min | select(type=="number")')
+            eligible_first=$(school status 1 | jq -er '[.[] | .not_before] | max | select(type=="number")')
             phase halt
             wait "$sampler_pid"
             mkdir "$q/bell-1"
@@ -343,10 +346,12 @@ PY_BATCH
     fi
     phase halt
     wait "$sampler_pid"
+    stage=spool_cleanup
     vm "set -e; test -z \"\$(sudo find '$spool' \\( -name '*.baci' -o -name '*.mp4' \\) -print -quit)\"; grep -Eq '^oom_kill +0$' /proc/vmstat"
     local variant=${trial:-standard}
     if [[ "$candidate" == 1 ]]; then variant=candidate; fi
     if [[ "$bells" == 2 ]]; then
+        stage=collect_bells
         mkdir -p "$results/bell-1" "$results/bell-2" "$q/bell-2"
         for f in "$q"/received-*-B2.mp4; do name=$(basename "$f"); mv "$f" "$q/bell-2/${name%-B2.mp4}.mp4"; done
         mv "$q"/received-*.mp4 "$q/bell-1/"
@@ -355,6 +360,7 @@ PY_BATCH
             local evidence="$results/bell-$bell_no"
             cp "$q/bell-$bell_no/"{counters.jsonl,board.jsonl,closed.json,active-captures.json} "$evidence/"
             grep '^QA_SCHOOL_' "$q/bell-$bell_no/load.log" > "$evidence/media.log"
+            stage=verify_bell_$bell_no
             echo "QA_SCHOOL_VERIFY bell=$bell_no"
             python3 "$root/tests/fixtures/vps-school-results.py" "$q/bell-$bell_no" "$evidence/measurement.json" "$count" "$quality" "$seconds" "$variant" --bell "$bell_no"
         done

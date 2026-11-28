@@ -66,15 +66,17 @@ jobs:
                 jq -c '{cpu_model, media, recordings, live: (.phases.live | {seconds,cpu_mean_pct,cpu_p95_pct,steal_mean_pct,ram_mib_used_peak,
                        tx_mbps,rx_mbps,tx_pps,nic_drops,udp_receive_buffer_errors,udp_send_buffer_errors,recorder_spool_peak_bytes,
                        sfu_cores:.units.sfu.cpu_cores_mean,recorder_cores:.units.recorder.cpu_cores_mean}),
-                       peak_spool_bytes: ([.phases[]|.recorder_spool_peak_bytes]|max), render: (.phases.render|{seconds,cpu_mean_pct,ram_mib_used_peak}),
+                       peak_spool_bytes: ([.phases[]|.recorder_spool_peak_bytes]|max),
+                       spool_disk_min_free_mib: ([.phases[]|.spool_disk_min_free_mib]|min), render: (.phases.render|{seconds,cpu_mean_pct,ram_mib_used_peak}),
                        films: (.films | map_values({duration_s,bytes,rendered_after_eligible_s}))}' "$out/bell-$bell/measurement.json" \
                   | while read -r line; do echo "::notice title=Efficiency $arm bell $bell::$line"; done
               done
               grep -E '^QA_SCHOOL_(JOIN|BACK_TO_BACK|RECEIPTS) ' "$log" | while read -r line; do echo "::notice title=Efficiency $arm::$line"; done
             else
               bad=1
-              proof=$(grep -E '^QA_SCHOOL|AssertionError|VM guest failure|[Ee]rror:' "$log" | tail -15 | paste -sd '|') || true
-              echo "::error title=Efficiency $arm::${proof:0:3600}"
+              proof=$(grep -E '^QA_SCHOOL_(FAILURE|STAGE|PHASE|LOAD failed|BACK_TO_BACK|RECEIPTS|VERIFY|CLOSE)|^Baci VPS:|^curl:|AssertionError|VM guest failure|^[A-Za-z]+Error:' "$log" | tail -20 | paste -sd '|') || true
+              echo "::error title=Efficiency $arm::${proof:0:3500}"
+              grep '^QA_SCHOOL_PARTIAL_SETTLEMENT ' "$log" | while read -r line; do echo "::notice title=Partial $arm::$line"; done
             fi
           done
           test "$bad" = 0
@@ -88,6 +90,7 @@ jobs:
               for trial in (b,a):
                   assert trial['variant']=='candidate' and not trial['test_only_raised_capture_limit']
                   assert trial['phases']['live']['min_live_sources']==9 and len(trial['films'])==9
+                  assert min(row['spool_disk_min_free_mib'] for row in trial['phases'].values()) >= 512
               for key in ('audio_kbps_median','camera_kbps_median','screen_kbps_median','audio_source_pps_median'):
                   assert abs(a['media'][key]/b['media'][key]-1)<.03,f'unequal {bell} media offer: {key}'
           print('::notice title=Consecutive A/B::36 decoded 720p films and verified once-only mock delivery; two matched bells on both versions.')

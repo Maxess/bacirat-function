@@ -49,6 +49,7 @@ def metric(rows):
     return dict(vcpus=cpus, seconds=elapsed, intervals=len(windows), samples=len(rows), cpu_mean_pct=statistics.mean(cpu), cpu_p95_pct=percentile(cpu),
         cpu_peak_pct=max(cpu), peak_core_p95_pct=percentile(cores), steal_mean_pct=steal, ram_mib_visible=a['mem_total']/1024, ram_mib_used_peak=max(used),
         ram_mib_used_p95=percentile(used), ram_mib_available_min=min(r['mem_available'] for r in rows)/1024,
+        spool_disk_min_free_mib=min((r.get('disk_free_bytes', 0) for r in rows))/2**20 if 'disk_free_bytes' in a else None,
         swap_mib_peak=max(r['swap_kib'] for r in rows)/1024, tx_mbps=network('tx_bytes')*.000008, rx_mbps=network('rx_bytes')*.000008,
         tx_p95_mbps=percentile([(y['network']['tx_bytes']-x['network']['tx_bytes'])*.000008/dt for x,y,dt in windows]),
         tx_pps=network('tx_packets'), rx_pps=network('rx_packets'), nic_drops=delta(lambda r:r['network']['tx_dropped']+r['network']['rx_dropped']),
