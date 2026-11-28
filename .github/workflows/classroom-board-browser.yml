@@ -5,6 +5,10 @@ on:
     paths:
       - .github/workflows/classroom-board-browser.yml
       - tests/classroom-board-livekit-browser.cjs
+      - tests/classroom-entry-browser.cjs
+      - tests/fixtures/classroom-entry-request.php
+      - tests/fixtures/classroom-browser.cjs
+      - artifacts/school-classroom-plugin-v0.4.29.zip
 permissions:
   contents: read
 jobs:
@@ -21,7 +25,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get -q -o Acquire::Retries=3 -o APT::Update::Error-Mode=any update
-          sudo apt-get -qy -o Acquire::Retries=3 install --no-install-recommends php8.3-cli
+          sudo apt-get -qy -o Acquire::Retries=3 install --no-install-recommends php8.3-cli php8.3-sqlite3
           w="$RUNNER_TEMP/board-browser"
           mkdir -p "$w/site/assets/fonts/screen" "$w/sfu"
           cp server/recorder/fonts/*.woff2 "$w/site/assets/fonts/screen/"
@@ -42,9 +46,10 @@ jobs:
       - name: Verify the packaged classroom with a real teacher and pupil
         run: |
           set -euo pipefail
-          export MPM_TEST_CLASSROOM_ZIP="$GITHUB_WORKSPACE/artifacts/school-classroom-plugin-v0.4.28.zip" MPM_TEST_PHP=php8.3
+          export MPM_TEST_CLASSROOM_ZIP="$GITHUB_WORKSPACE/artifacts/school-classroom-plugin-v0.4.29.zip" MPM_TEST_PHP=php8.3
           log="$RUNNER_TEMP/board-chromium.log"
           trap 'proof=$(head -38 "$log" | paste -sd "|"); echo "::error title=Chromium board::${proof:0:3700}"' ERR
-          node --test tests/classroom-board-livekit-browser.cjs 2>&1 | tee "$log"
-          grep 'BACI_BOARD_RTC ' "$log" | while read -r line; do echo "::notice title=Real WebRTC board::$line"; done
+          (cd artifacts && sha256sum --strict -c SHA256SUMS-v0.4.29.txt)
+          node --test tests/classroom-entry-browser.cjs tests/classroom-board-livekit-browser.cjs 2>&1 | tee "$log"
+          grep -E 'BACI_(BOARD_RTC|ENTRY) ' "$log" | while read -r line; do echo "::notice title=Real WebRTC board::$line"; done
           grep -Fxq '# skipped 0' "$log"

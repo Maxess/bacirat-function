@@ -17,6 +17,9 @@ function packaged(t) {
     execFileSync('unzip',['-q',archive,'-d',work]);
     const render = (role='teacher', live=false) => execFileSync(php,[join(__dirname,'classroom-browser-room.php')],{env:{...process.env,
         MPM_TEST_CLASSROOM_ROOT:work, MPM_TEST_ROOM_ROLE:role, MPM_TEST_ROOM_LIVE:live?'yes':'no'}});
+    const entryRequest = (request = {}) => JSON.parse(execFileSync(php,[join(__dirname,'classroom-entry-request.php')],{env:{...process.env,
+        MPM_TEST_CLASSROOM_ROOT:work, MPM_TEST_ENTRY_REQUEST:JSON.stringify(request)}}));
+    const asset = name => readFileSync(join(work,'assets',name));
     const serve = (url,res) => {
         const route = url.searchParams.get('route'), name = url.searchParams.get('name') || '';
         const headers = {'Cache-Control':url.searchParams.has('v') ? 'private, max-age=31536000, immutable' : 'private, no-cache'};
@@ -32,7 +35,7 @@ function packaged(t) {
         }
         return false;
     };
-    return {render,serve};
+    return {render,entryRequest,asset,serve};
 }
 async function serveBrowser(t, handler) {
     const server = createServer((req,res) => {

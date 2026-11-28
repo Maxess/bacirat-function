@@ -70,8 +70,7 @@ logging:
     assert.fail('isolated media server not ready');
 }
 
-function observeRoom() {
-    const lk = window.LivekitClient;
+function observeBoard() {
     const state = window.boardQA={room:null,widget:null,hints:0,dropped:0,drop:false,connectError:null};
     const create = window.ClassroomBoard;
     window.ClassroomBoard = (root, options) => {
@@ -79,6 +78,10 @@ function observeRoom() {
         state.send=options.send;
         return state.widget;
     };
+}
+
+function observeRoom() {
+    const lk = window.LivekitClient, state = window.boardQA;
     class ObservedRoom extends lk.Room {
         constructor(...args) {
             super(...args);
@@ -106,20 +109,17 @@ test('real lossy board notices are commit-only, recover from loss and respect SI
     {skip:skip||!livekit, timeout:56_000}, async t => {
     await isolatedSfu(t);
     const fixture=packaged(t);
-    const sdk = '/plugins/school-plugins.php?plugin=school-classroom&amp;route=asset&amp;name=assets/livekit-client.umd.js';
-    const render = role => fixture.render(role,true).toString().replace('<script defer src="/fixture.js">',
-        `<script defer src="${sdk}"></script><script defer src="/fixture.js">`);
-    const staffHTML=render('teacher'), pupilHTML=render('student');
+    const staffHTML=fixture.render('teacher',true), pupilHTML=fixture.render('student',true);
     const members = {}, ops = [], log = [];
     const lesson='qa-lesson', epoch='qa-epoch', owner='teacher-1', pupil='student-1';
-    let head=0, seq=0, unlock, replay=false;
+    let head=0, seq=0, unlock, replay=false, loseStatus=false, lostStatusAt=0;
     let lastStage='first admission';
     const {browser,origin}=await serveBrowser(t,async (req,res,pageUrl)=>{
         if (pageUrl.pathname==='/teacher') return send(res,'text/html; charset=UTF-8',staffHTML);
         if (pageUrl.pathname==='/student') return send(res,'text/html; charset=UTF-8',pupilHTML);
-        if (pageUrl.pathname==='/fixture.js') {
-            // Load the real SDK first (the test fixture normally supplies a stub).
-            return send(res,'text/javascript',`/* Loaded after the pinned SDK. */\n(${observeRoom})();`);
+        if (pageUrl.pathname==='/fixture.js') return send(res,'text/javascript',`(${observeBoard})();`);
+        if (pageUrl.searchParams.get('name') === 'assets/livekit-client.umd.js') {
+            return send(res,'text/javascript',Buffer.concat([fixture.asset('livekit-client.umd.js'),Buffer.from(`\n;(${observeRoom})();`)]));
         }
         if (pageUrl.searchParams.get('route')==='api') {
             const staff=new URL(req.headers.referer).pathname==='/teacher', identity=staff?owner:pupil;
@@ -128,6 +128,11 @@ test('real lossy board notices are commit-only, recover from loss and respect SI
             assert.equal(input.class,22);
             assert.equal(req.headers['x-classroom-csrf'],'fixture');
             log.push({action:input.action,staff,sid:input.sid,ink:input.ink,at:performance.now()});
+            if (!staff && input.action==='status' && input.sid && loseStatus) {
+                loseStatus=false; lostStatusAt=performance.now();
+                res.destroy(); // No valid PHP response to this heartbeat; leave the SFU untouched.
+                return;
+            }
             const result={ok:true,phase:'live',lesson,epoch,ready:true,joinable:true,slot:11,mediaMode:'audio'};
             if (input.action==='ticket') Object.assign(result,{url:url.replace('http','ws'),token:ticket(identity)});
             else if (input.action==='leave') {
@@ -183,6 +188,16 @@ test('real lossy board notices are commit-only, recover from loss and respect SI
     await student.waitForFunction(()=>window.boardQA.hints>=1,{},{timeout:8_000});
     assert.equal(await student.evaluate(()=>window.boardQA.room.localParticipant.permissions.canPublishData),false);
     assert.equal(await teacher.evaluate(()=>window.boardQA.room.localParticipant.permissions.canPublishData),true);
+    const sidBeforeLoss=await student.evaluate(()=>window.boardQA.room.localParticipant.sid);
+    const callsBeforeLoss=log.length;
+    loseStatus=true;
+    await student.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));
+    await student.getByText(/SITE-STATUS/).waitFor({timeout:5500});
+    assert.equal(await student.locator('#live-panel').isVisible(),false);
+    await student.locator('#live-panel').waitFor({state:'visible',timeout:6500});
+    const schoolRecovery=performance.now()-lostStatusAt;
+    assert.equal(await student.evaluate(()=>window.boardQA.room.localParticipant.sid),sidBeforeLoss);
+    assert.ok(!log.slice(callsBeforeLoss).some(r=>!r.staff && ['ticket','leave'].includes(r.action)), 'one dropped HTTP response does not churn a real media SID');
     const initial = await student.evaluate(()=>window.boardQA.hints);
     const sendStroke = (page, seq) => page.evaluate(seq=>window.boardQA.send('board-ink',{board:1,seq,strokes:[{
         tool:'pen',id:'e'.repeat(16)+seq.toString(16).padStart(16,'0'),part:0,end:true,size:12,color:'#d01091',points:[[400,100],[800,200]]}]}),seq);
@@ -227,5 +242,5 @@ test('real lossy board notices are commit-only, recover from loss and respect SI
     assert.notEqual(oldSID,newSID);
     await rejoined.waitForFunction(()=>window.boardQA.widget.position().ink===8,undefined,{timeout:3000});
     for (const cursor of [0,2,4,6]) assert.ok(log.some(r=>!r.staff && r.sid===newSID && r.ink===cursor),`new SID consumes page after cursor ${cursor}`);
-    t.diagnostic(`BACI_BOARD_RTC Chromium teacher+pupil; ink after DB-ack fixture ${normal.toFixed(1)} ms; dropped recovery ${lostMs.toFixed(1)} ms; real permission revoke/restore, new SID, and paged checkpoints passed`);
+    t.diagnostic(`BACI_BOARD_RTC Chromium teacher+pupil; same SID after dropped school response ${schoolRecovery.toFixed(1)} ms; ink after DB-ack fixture ${normal.toFixed(1)} ms; dropped recovery ${lostMs.toFixed(1)} ms; real permission revoke/restore, new SID, and paged checkpoints passed`);
 });
