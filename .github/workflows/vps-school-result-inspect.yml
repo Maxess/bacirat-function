@@ -1,0 +1,50 @@
+name: Read back the nine-class synthetic measurements
+on:
+  push:
+    paths: ['.github/workflows/vps-school-result-inspect.yml']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  summary:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - name: Summarize only the pinned synthetic benchmark artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          id=46094769407
+          gh run watch "$id" --interval 15 > "$RUNNER_TEMP/watch.log"
+          out="$RUNNER_TEMP/qa-readback"
+          gh run download "$id" --pattern 'capacity-*' --dir "$out"
+          python3 - "$out" <<'PY'
+          import json, re, runpy, sys
+          from pathlib import Path
+          metric = runpy.run_path('tests/fixtures/vps-school-results.py')['metric']
+          for directory in sorted(Path(sys.argv[1]).iterdir()):
+              read = lambda name: (directory/name).read_text() if (directory/name).is_file() else ''
+              summary = json.loads(read('measurement.json') or '{}')
+              raw = [json.loads(line) for line in read('counters.jsonl').splitlines()]
+              result = {'all_checks_passed':bool(summary)}
+              result['metadata'] = {k:v for k,v in summary.items() if k not in ('phases','films','media')}
+              result['status'] = json.loads(read('closed.json') or '{}')
+              result['films'] = {k:{a:b for a,b in v.items() if a!='tone_levels'} for k,v in summary.get('films',{}).items()}
+              result['board_ticks'] = len(read('board.jsonl').splitlines())
+              result['join'] = next((line for line in read('media.log').splitlines() if line.startswith('QA_SCHOOL_JOIN ')),None)
+              result['media'] = summary.get('media') or {'lowest_seen_payload': min((float(p) for p in re.findall(r'min_payload_ratio=([\d.]+)',read('media.log'))),default=None)}
+              for phase in ('join','live','render'):
+                  points = [x for x in raw if x['phase']==phase]
+                  if len(points)<3: continue
+                  m = metric(points)
+                  result[phase] = {k:round(v,4) for k,v in m.items() if k!='units'}
+                  if phase=='live' and 'capture_bytes_by_room' not in result['metadata']:
+                      result['metadata']['capture_bytes_by_room'] = {k:v-points[0]['open_sources'].get(k,0) for k,v in points[-1]['open_sources'].items()}
+                  result[phase]['units'] = {u:[round(v[k],3) for k in ('cpu_cores_mean','cpu_cores_p95','cpu_cores_peak','ram_mib_peak_sampled')]
+                                              for u,v in m['units'].items()}
+              print(f'::notice title={directory.name}::'+json.dumps(result,separators=(',',':')))
+          PY
