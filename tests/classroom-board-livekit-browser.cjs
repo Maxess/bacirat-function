@@ -116,7 +116,7 @@ test('real peers open a cold bell, recover their SID, sync the board and can sto
     const staffHTML=fixture.render('teacher',true), pupilHTML=fixture.render('student',true);
     const bellDate=staffHTML.toString().match(/data-bell-date="([^"]+)"/)[1];
     const members = {}, ops = [], log = [];
-    const lesson='qa-lesson', epoch='qa-epoch', owner='teacher-1';
+    const lesson='qa-lesson', epoch='qa-epoch', owner='teacher-1', pupil='student-1';
     let head=0, seq=0, unlock, replay=false, startedAt, admittedAt;
     let lastStage='first admission';
     const {browser,origin}=await serveBrowser(t,async (req,res,pageUrl)=>{
@@ -195,7 +195,7 @@ test('real peers open a cold bell, recover their SID, sync the board and can sto
                 signal:window.boardQA?.signal,connectError:window.boardQA?.connectError,
                 waiting:document.getElementById('wait-message')?.textContent,
             }));
-            throw new Error(`${lastStage} ${path}: ${JSON.stringify({state,actions:log.slice(-8).map(r=>[r.staff,r.action,!!r.sid,r.ink]),
+            throw new Error(`${lastStage} ${path}: ${JSON.stringify({state,actions:log.filter(r=>r.staff===(path==='/teacher')).slice(-8).map(r=>[r.action,!!r.sid,r.ink]),
                 sfu:sfuDiag().replace(/eyJ[\w.-]+/g,'[test token]').slice(-550)})}`,{cause:error});
         }
         return page;
