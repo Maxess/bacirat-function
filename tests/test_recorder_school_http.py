@@ -28,8 +28,8 @@ def sha(data):
 
 class TransportTest(unittest.TestCase):
     def test_pins_and_repair_match_the_source_without_rewriting_the_release(self):
-        # The repair's setup pin refers to v1.3.1, not the latest installer source.
-        self.assertEqual(sha((ROOT / 'server/install.py').read_bytes()), fix.VPS_MEDIA)
+        # The repair checks the media helper from the supported older install, not master source.
+        self.assertEqual(fix.VPS_MEDIA, '6dd018f843995131fc69d6c434d900b4f10be1a84ac547c97d9f1833bd1c6993')
         with ZipFile(STOCK) as archive:
             raw = archive.read('transport.py')
             self.assertEqual(sha(archive.read('recording.py')), fix.STOCK_ENTRY)

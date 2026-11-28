@@ -40,7 +40,7 @@ class PackageTest(unittest.TestCase):
             self.assertEqual(before, stock.read('replay.js'))
             self.assertEqual(installer.digest(after), '54cb9ab61118e60412357b0555d72325fb0cd1b7c8a2136c70f17ba16de11a1c')
             self.assertNotEqual(before, after)
-            with ZipFile(ARTIFACTS / 'baci-classroom-recorder-v0.4.23-r3.zip') as fresh:
+            with ZipFile(ARTIFACTS / 'baci-classroom-recorder-v0.4.23-r4.zip') as fresh:
                 # The new renderer only changes composition; retain the reviewed audio implementation.
                 def pcm(data):
                     return data.split(b'    function placeSound(', 1)[1].split(b'    function composite(', 1)[0]
@@ -50,7 +50,8 @@ class PackageTest(unittest.TestCase):
                 ('postprocess.py', repair.read('postprocess.py')))})
             self.assertEqual(installer.UNIT_SHA, installer.digest(stock.read('school-classroom-postprocess.service')))
             self.assertEqual(installer.COMPACT_SHA, sha(ROOT / 'server/offline/compact-renderer.py'))
-            self.assertEqual(installer.HELPERS, {'vps_media.py': sha(ROOT / 'server/install.py'),
+            # These are helper bytes from the published v1.3.2 install, not the later media updater.
+            self.assertEqual(installer.HELPERS, {'vps_media.py': '6dd018f843995131fc69d6c434d900b4f10be1a84ac547c97d9f1833bd1c6993',
                                                 'baci-vps.py': '6455e2f0187f014d9dd5456a3165e8f05f632ef3dceae23283a7a776b7824f1a'})
             self.assertIn(sha(REPAIR), (ROOT / 'docs/repair-recorder-audio.fa.md').read_text())
 

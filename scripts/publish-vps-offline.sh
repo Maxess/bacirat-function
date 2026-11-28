@@ -18,7 +18,13 @@ tag="vps-offline-v$version"
 base="https://github.com/$repo/actions/runs/$run"
 setup_evidence="https://github.com/$repo/actions/runs/$setup_run"
 guide="baci-vps-install-v$version-fa.md"
-site=baci-classroom-site-upgrade-v0.4.26.zip
+case "$version" in
+    1.3.3) site_version=0.4.26; manager_version=0.1.33; revision=r3 ;;
+    1.3.4) site_version=0.4.27; manager_version=0.1.34; revision=r4 ;;
+    *) echo "No reviewed school/Recorder companion for $version" >&2; exit 1 ;;
+esac
+site=baci-classroom-site-upgrade-v$site_version.zip
+recorder=baci-classroom-recorder-v0.4.23-$revision.zip
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 stage=validate-ci-run
@@ -86,11 +92,11 @@ stage=check-published-inventory
     grep -Fxq "$installer  $name.tar.gz" "$sha_file"
     tar -xOf "$name.tar.gz" "baci-classroom-vps-offline/$site" | cmp - "$site"
     BUILD=$(tar -xOf "$name.tar.gz" baci-classroom-vps-offline/BUILD.json)
-    jq -e --arg sha "$commit" --arg ver "$version" '.git == $sha and .version == $ver and .arch == "amd64" and .ubuntu == "24.04"
+    jq -e --arg sha "$commit" --arg ver "$version" --arg recorder "$recorder" '.git == $sha and .version == $ver and .arch == "amd64" and .ubuntu == "24.04"
         and .tls_modes == ["auto", "files"] and .minimum_visible_ram_kib == 393216
         and .install_profiles == ["live", "compact", "full"] and .full_visible_ram_kib == 1835008
         and .recording_by_default == true and .school_recorder_user_agent == "Baci-Classroom-Recorder/0.4.23"
-        and (.pinned_payload_sha256["baci-classroom-recorder-v0.4.23-r3.zip"] | test("^[a-f0-9]{64}$"))
+        and (.pinned_payload_sha256[$recorder] | test("^[a-f0-9]{64}$"))
         and .compact_visible_ram_kib == 458752 and .compact_swap_kib == 512000
         and .compact_no_swap_visible_ram_kib == 917504' <<< "$BUILD" >/dev/null
 )
@@ -134,7 +140,7 @@ cat > "$work/notes.md" <<EOF_NOTES
 - **رفع ۴۰۳ Recorder داخل نصب:** درخواست‌های ضبطِ احرازشده با شناسهٔ واقعی Recorder به سایت می‌رسند؛ هیچ فایل اصلاحی جدا، غیرفعال‌کردن TLS یا تغییر مجوزهای سایت لازم نیست. بعد از جفت‌سازی و فعال‌کردن ضبط، \`sudo baci-vps doctor --online --wait\` heartbeat همان Recorder را بررسی می‌کند.
 - **پیش‌فرض ضبط را حفظ می‌کند:** \`compact\` از ۴۴۸ MiB RAM قابل‌مشاهده؛ زیر ۸۹۶ MiB، swap فعال در حد ۵۱۲ MiB لازم است. \`full\` از ۱۷۹۲ MiB قابل‌مشاهده. \`live\` فقط با انتخاب صریح، بدون ضبط. فایل \`baci-prepare-swap.sh\` اختیاری است و فقط با تأیید \`--apply\` روی VPS سازگار swap اختصاصی می‌سازد.
 - **HTTPS خودکار:** Caddy برای نام رسانه با رکورد A مستقیم و TCP 443 باز از Let’s Encrypt گواهی می‌گیرد. اگر VPS به مرجع صدور نمی‌رسد، نصب و HTTPS با گواهی عمومی آماده و \`--tls files\` بدون دسترسی به آن مرجع ممکن است. پورت ۸۰ لازم نیست. برای رسانه UDP 7882 مسیر ترجیحی است و TCP 7881 جایگزین در شبکهٔ سازگار؛ HTTPS به‌تنهایی رسانه را عبور نمی‌دهد.
-- **سایت مدرسه:** ZIP کوچک \`$site\` شامل مدیر ۰٫۱٫۳۳ و کلاس ۰٫۴٫۲۶ است. VPS تازه فایل جفت‌سازی خصوصی تازه می‌سازد که تنها در پنل HTTPS مدیر کل وارد می‌شود. روی نصب مدیریت‌شدهٔ سازگار در حالت \`live\` می‌توان با \`--add-recorder\` در زمان بیکاری و بدون تغییر اتصال قبلی ضبط را اضافه کرد؛ [شرایط آن در راهنما](https://github.com/$repo/releases/download/$tag/$guide) آمده است.
+- **سایت مدرسه:** ZIP کوچک \`$site\` شامل مدیر $manager_version و کلاس $site_version است. VPS تازه فایل جفت‌سازی خصوصی تازه می‌سازد که تنها در پنل HTTPS مدیر کل وارد می‌شود. روی نصب مدیریت‌شدهٔ سازگار در حالت \`live\` می‌توان با \`--add-recorder\` در زمان بیکاری و بدون تغییر اتصال قبلی ضبط را اضافه کرد؛ [شرایط آن در راهنما](https://github.com/$repo/releases/download/$tag/$guide) آمده است.
 - فایل‌های \`*-ubuntu-source.tar\` و \`*.tar.part-*\` صرفاً کد منبع متناظر Ubuntu هستند؛ برای نصب دانلودشان نکن. برای استفاده از منبع، پس از تأیید هش همهٔ بخش‌ها، روی رایانه با \`cat $source_tar.part-* > $source_tar\` یکپارچه و هش بازسازی‌شده را مقایسه کن.
 
 **رفع ناسازگاری ۱٫۳٫۰ با Ubuntu اولیه:** نسخه‌های هم‌خوان D-Bus، GLib و Python از مخزن امضاشده همراه بسته‌اند. پیش‌بررسی طرح واقعی APT را بدون تغییر بسته‌ها اجرا می‌کند. حذف یا پایین‌آوردن نسخه‌ها مجاز نیست و به بازنشانی VPS یا به‌روزرسانی کلی Ubuntu نیازی نیست.
