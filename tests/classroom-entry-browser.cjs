@@ -25,6 +25,9 @@ test('light mode has no media session, is read-only and enforces live class and 
         const r=f.entryRequest({query:lite,actor});
         assert.equal(r.status,actor===0?401:403); assert.doesNotMatch(r.body,/worksheet\.pdf|پیام تازهٔ آزمون/);
     }
+    const empty=f.entryRequest({query:lite,phase:'empty'});
+    assert.equal(empty.status,200); assert.doesNotMatch(empty.body,/worksheet\.pdf|Deprecated/);
+    assert.match(empty.body,/آخرین پیام‌های کلاس/);
     const good=f.entryRequest({query:file,range:'bytes=0-4'});
     assert.deepEqual(good,{status:206,body:'%PDF-'});
     for (const request of [{query:{...file,epoch:'9'.repeat(24)}},{query:{...file,doc:'c'.repeat(32)}},

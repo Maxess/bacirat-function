@@ -1,5 +1,7 @@
 <?php
 declare(strict_types=1);
+error_reporting(E_ALL);
+ini_set('display_errors', 'stderr');
 
 // Run the installed page/content PHP against an in-memory school and private files.
 $plugin = getenv('MPM_TEST_CLASSROOM_ROOT');
@@ -39,7 +41,7 @@ $s = cl_store();
 $phase = $request['phase'] ?? 'live';
 $lesson = ['id'=>$id,'class_id'=>22,'class_name'=>'هفتم۱','year'=>'1405/1406', 'teacher'=>1,'room'=>$cfg['room_prefix'] . '-22-' . str_repeat('e',24),
     'subject'=>'ریاضی', 'date'=>cl_day($now)->format('Y-m-d'), 'deadline'=>$now+120, 'sample'=>$phase === 'stale' ? $now-14 : $now,
-    'phase'=>$phase === 'stale' ? 'live' : $phase, 'staff'=>['teacher-1'=>'PA_Teacher'], 'seen'=>['teacher-1'=>'PA_Teacher'],
+    'phase'=>in_array($phase,['stale','empty'],true) ? 'live' : $phase, 'staff'=>['teacher-1'=>'PA_Teacher'], 'seen'=>['teacher-1'=>'PA_Teacher'],
     'pulses'=>['teacher-1'=>['sid'=>'PA_Teacher','at'=>$now]],'first_seen'=>[], 'seconds'=>[]];
 $s->put('active','22',['id'=>$id]);
 $s->put('lesson',$id,$lesson);
@@ -50,7 +52,7 @@ $oldFile = dirname($file) . '/' . $old;
 file_put_contents($oldFile,$bytes);
 $row = ['id'=>$doc,'name'=>'worksheet.pdf','mime'=>'application/pdf','pages'=>2,'bytes'=>strlen($bytes)];
 $activity = cl_activity($s,$id);
-$activity['doc'] = $doc; $activity['docs'] = [$doc=>$row, $old=>array_replace($row,['id'=>$old])]; $activity['page'] = 2;
+$activity['doc'] = $phase === 'empty' ? null : $doc; $activity['docs'] = [$doc=>$row, $old=>array_replace($row,['id'=>$old])]; $activity['page'] = 2;
 $s->put('activity',$id,$activity);
 for ($i=1; $i<=19; $i++) cl_chat($s,$lesson,['role'=>'student','identity'=>'student-1','name'=>'همکلاسی'] ,
     $i===19 ? '<b>پیام تازهٔ آزمون</b>' : "پیام آزمون $i",$now-80+$i*3);

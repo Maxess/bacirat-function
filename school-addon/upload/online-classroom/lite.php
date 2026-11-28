@@ -17,7 +17,7 @@ function cl_lite_snapshot(ClassroomStore $s, array $cfg, array $class, array $ac
         $state = cl_activity($s, $id);
         $layer = cl_layer($s, $id, $state);
         return ['lesson'=>$id, 'epoch'=>cl_epoch($lesson), 'subject'=>$lesson['subject'], 'at'=>$now,
-            'doc'=>$state['docs'][$state['doc']] ?? null, 'page'=>$state['page'],
+            'doc'=>$state['docs'][$state['doc'] ?? ''] ?? null, 'page'=>$state['page'],
             'chat'=>$state['messages'] ? $s->rows('chat:' . $id, CL_LITE_MESSAGES, cl_seq($state['messages'] + 1), true) : [],
             'undone'=>$layer['undone'] ?? [], 'ink'=>$layer['seq'] > CL_LITE_ROWS ? null
                 : ($layer['seq'] ? $s->rows('ink:' . $id . ':' . $layer['key'], CL_LITE_ROWS) : [])];
