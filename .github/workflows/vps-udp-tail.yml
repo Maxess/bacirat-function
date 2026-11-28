@@ -33,7 +33,7 @@ jobs:
           name=baci-classroom-vps-offline-v1.3.3-ubuntu24.04-amd64.tar.gz
           gh release download vps-offline-v1.3.3 --repo Maxess/bacirat-function --pattern "$name" --dir "$RUNNER_TEMP"
           bash scripts/prepare-vps-capacity-qa.sh "$RUNNER_TEMP/$name" "$RUNNER_TEMP/vps-before.tar.gz"
-      - name: Run matched 1 ms and 500 microsecond trials on one runner
+      - name: Repeat the same matched trial in reverse order
         env:
           BACI_QA_SCHOOL_CANDIDATE: '1'
           BACI_QA_SCHOOL_CAPTURES: '9'
@@ -42,7 +42,10 @@ jobs:
         run: |
           set -euo pipefail
           bad=0
-          for interval in 1ms 500us; do
+          intervals=(500us 1ms)
+          if (( GITHUB_RUN_ATTEMPT % 2 == 0 )); then intervals=(1ms 500us); fi
+          printf '::notice title=UDP trial order::%s\n' "${intervals[*]}"
+          for interval in "${intervals[@]}"; do
             out="$RUNNER_TEMP/udp-tail/$interval"
             mkdir -p "$out"
             log="$RUNNER_TEMP/udp-$interval.log"
@@ -60,6 +63,8 @@ jobs:
               bad=1
               proof=$(grep -E '^QA_SCHOOL_(UDP|PHASE|JOIN|ACTIVE|AUDIO|FAILURE|STAGE|CLOSE|PROFILE)|^Baci VPS:|^curl:|AssertionError|VM guest failure|^QA_SCHOOL_LOAD failed:' "$log" | tail -18 | paste -sd '|') || true
               echo "::error title=UDP $interval::${proof:0:3600}"
+              offered=$(grep -E 'load.log: QA_SCHOOL_MEDIA ' "$log" | tail -3 | paste -sd '|') || true
+              if [[ -n "$offered" ]]; then echo "::notice title=UDP $interval last driver samples::${offered:0:2400}"; fi
             fi
           done
           test "$bad" = 0
@@ -73,6 +78,8 @@ jobs:
               assert abs(after['media'][k] / before['media'][k] - 1) < .03, f'Unequal offered load: {k}'
           for trial in (before, after):
               assert trial['variant'] == 'candidate' and not trial['test_only_raised_capture_limit'] and len(trial['films']) == 9
+              probe = trial['audio_probe']
+              assert probe['stable']['matched'] / (probe['steady_seconds'] * 25*20*50) >= .95, 'missing steady RTP deliveries'
               for phase in ('stable','burst'):
                   p = trial['audio_probe'][phase]
                   assert p['unmatched'] / p['matched'] < .002, f'Insufficient Opus matching: {phase}'
