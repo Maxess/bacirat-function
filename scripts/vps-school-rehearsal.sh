@@ -50,6 +50,7 @@ run_school_rehearsal() (
             if [[ -s "$q/udp-probe.json" ]]; then
                 jq -c 'del(.stable.bins,.stable.bounds_us,.burst.bins,.burst.bounds_us)' "$q/udp-probe.json" | sed 's/^/QA_SCHOOL_AUDIO_PARTIAL /'
             fi
+            if [[ -f "$q/load.log" ]]; then grep '^QA_SCHOOL_LOAD failed:' "$q/load.log" >&2 || true; fi
             for f in "$q/load.log" "$q/php.log" "$q/tls.log"; do
                 if [[ -f "$f" ]]; then tail -12 "$f" | sed "s#^#QA_SCHOOL $(basename "$f"): #"; fi
             done

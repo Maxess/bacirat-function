@@ -53,11 +53,12 @@ jobs:
               jq -c '{cpu_model, media, audio: (.audio_probe | del(.stable.bins,.burst.bins,.stable.bounds_us,.burst.bounds_us)),
                         live: (.phases.live | {seconds,cpu_mean_pct,cpu_p95_pct,steal_mean_pct,ram_mib_used_peak,tx_mbps,rx_mbps,tx_pps,
                           udp_receive_buffer_errors,udp_send_buffer_errors,nic_drops,sfu_udp_syscalls_per_s,sfu_cores:.units.sfu.cpu_cores_mean,recorder_cores:.units.recorder.cpu_cores_mean}),
+                        rejoin: (.phases.reconnect // {} | {seconds,cpu_mean_pct,udp_receive_buffer_errors,udp_send_buffer_errors,nic_drops,sfu_udp_syscalls_per_s}),
                         films: (.films|length)}' "$out/measurement.json" | while read -r line; do echo "::notice title=UDP $interval::$line"; done
               grep -E '^QA_SCHOOL_(JOIN|RECEIPTS) ' "$log" | while read -r line; do echo "::notice title=UDP $interval::$line"; done
             else
               bad=1
-              proof=$(grep -E '^QA_SCHOOL_(UDP|PHASE|JOIN|ACTIVE|AUDIO|FAILURE|STAGE|CLOSE|PROFILE)|^Baci VPS:|^curl:|AssertionError|VM guest failure|^QA_SCHOOL LOAD failed' "$log" | tail -18 | paste -sd '|') || true
+              proof=$(grep -E '^QA_SCHOOL_(UDP|PHASE|JOIN|ACTIVE|AUDIO|FAILURE|STAGE|CLOSE|PROFILE)|^Baci VPS:|^curl:|AssertionError|VM guest failure|^QA_SCHOOL_LOAD failed:' "$log" | tail -18 | paste -sd '|') || true
               echo "::error title=UDP $interval::${proof:0:3600}"
             fi
           done

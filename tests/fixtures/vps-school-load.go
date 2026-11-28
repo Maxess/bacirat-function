@@ -68,7 +68,6 @@ type room struct {
 	streams [slots]*stream
 	peers   [pupils + 1]*lksdk.Room
 	seen    [pupils + 1][slots]counts
-	firstPacket [pupils + 1][slots]atomic.Int64
 }
 
 // These timings are measured on the external driver, using its one monotonic
@@ -135,21 +134,24 @@ func (p *audioProbe) run(ctx context.Context, dir, url string, rooms []*room) er
 		}
 	}
 	if !wait("audio-steady") { return ctx.Err() }
+	steadyStart := time.Now()
 	p.phase.Store(1)
 	if !wait("audio-reconnect") { return ctx.Err() }
+	start := time.Now()
 	p.phase.Store(2)
 	const n = 4
-	start := time.Now()
+	// These observations belong to each NEW subscription; old RTP-reader
+	// goroutines cannot mark a rejoined pupil ready as they finish closing.
+	var first [2][2][slots]atomic.Bool
 	var all sync.WaitGroup
-	errs := make(chan error,n)
-	for _, r := range rooms[7:] {
-		for _, i := range []int{pupils-1,pupils} {
+	errs := make(chan error, n)
+	for rindex, r := range rooms[7:] {
+		for seat, i := range []int{pupils - 1, pupils} {
 			all.Go(func() {
 				old := r.peers[i]
 				sid := old.LocalParticipant.SID()
 				old.Disconnect()
-				for j := range r.streams { r.firstPacket[i][j].Store(0) }
-				if err := r.connect(url,i); err != nil { errs <- err; return }
+				if err := r.connect(url, i, &first[rindex][seat]); err != nil { errs <- err; return }
 				if r.peers[i].LocalParticipant.SID() == sid { errs <- errors.New("fresh reconnect SID required") }
 			})
 		}
@@ -160,22 +162,22 @@ func (p *audioProbe) run(ctx context.Context, dir, url string, rooms []*room) er
 	connected := time.Since(start).Milliseconds()
 	for {
 		ready := 0
-		for _, r := range rooms[7:] {
-			for _, i := range []int{pupils-1,pupils} {
-				for j := range r.streams {
-					if r.firstPacket[i][j].Load() > 0 { ready++ }
+		for ri := range first {
+			for seat := range first[ri] {
+				for stream := range first[ri][seat] {
+					if first[ri][seat][stream].Load() { ready++ }
 				}
 			}
 		}
 		if ready == n * slots { break }
-		if time.Since(start) >= 10*time.Second { return errors.New("rejoined pupils did not receive every source") }
+		if time.Since(start) >= 10*time.Second { return fmt.Errorf("rejoined pupils received %d of %d source subscriptions", ready, n*slots) }
 		time.Sleep(20*time.Millisecond)
 	}
 	resumed := time.Since(start).Milliseconds()
 	// Keep an observation window after the last new subscription/keyframe.
 	time.Sleep(4*time.Second)
 	p.phase.Store(0)
-	out, err := json.Marshal(map[string]any{"rejoin_peers":n,"connected_ms":connected,"all_sources_resumed_ms":resumed,"stable":p.stable.summary(),"burst":p.burst.summary()})
+	out, err := json.Marshal(map[string]any{"rejoin_peers":n,"connected_ms":connected,"all_sources_resumed_ms":resumed,"steady_seconds":start.Sub(steadyStart).Seconds(),"burst_seconds":time.Since(start).Seconds(),"stable":p.stable.summary(),"burst":p.burst.summary()})
 	if err != nil { return err }
 	file := filepath.Join(dir,"udp-probe.json")
 	if err := os.WriteFile(file+".tmp", append(out,'\n'),0600); err != nil { return err }
@@ -224,7 +226,7 @@ func frames(path string, video bool) ([][]byte, error) {
 	return nil, errors.New("invalid synthetic media file")
 }
 
-func (r *room) connect(url string, i int) error {
+func (r *room) connect(url string, i int, first *[slots]atomic.Bool) error {
 	cb := lksdk.NewRoomCallback()
 	cb.OnTrackSubscribed = func(track *webrtc.TrackRemote, pub *lksdk.RemoteTrackPublication, from *lksdk.RemoteParticipant) {
 		for k, s := range r.streams {
@@ -239,10 +241,12 @@ func (r *room) connect(url string, i int) error {
 						if len(pkt.Payload) == 0 {
 							continue
 						}
+						if first != nil && !first[k].Load() { first[k].Store(true) }
 						received := &r.seen[i][k]
 						received.bytes.Add(uint64(len(pkt.Payload)))
 						if s.kind == livekit.TrackSource_MICROPHONE {
 							now := time.Now()
+							if s.probe != nil { s.observe(pkt.Payload, now) }
 							if !last.IsZero() {
 								if now.Sub(last) > 40*time.Millisecond {
 									received.late.Add(1)
@@ -393,7 +397,7 @@ func run(dir, profile string) error {
 			all.Go(func() {
 				gate <- struct{}{}
 				defer func() { <-gate }()
-				if err := r.connect(pair.URL, i); err != nil {
+				if err := r.connect(pair.URL, i, nil); err != nil {
 					joinErrors <- err
 				}
 			})
