@@ -46,5 +46,10 @@ jobs:
                       result['metadata']['capture_bytes_by_room'] = {k:v-points[0]['open_sources'].get(k,0) for k,v in points[-1]['open_sources'].items()}
                   result[phase]['units'] = {u:[round(v[k],3) for k in ('cpu_cores_mean','cpu_cores_p95','cpu_cores_peak','ram_mib_peak_sampled')]
                                               for u,v in m['units'].items()}
-              print(f'::notice title={directory.name}::'+json.dumps(result,separators=(',',':')))
+              # REST check annotations cap a message at 4096 characters. Keep
+              # phase counters separate from the small film/receipt evidence.
+              for section, keys in [('counters', ('join','live','render','media')), ('proof', ('all_checks_passed','metadata','status','films','board_ticks'))]:
+                  item = json.dumps({k:result[k] for k in keys if k in result},separators=(',',':'))
+                  assert len(item) < 4096, (directory.name, section)
+                  print(f'::notice title={directory.name} {section}::{item}')
           PY
