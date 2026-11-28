@@ -434,14 +434,23 @@ class DeferredRunner:
         path, site = self.local(job)
         cap, failures = None, 0
         try:
-            if await asyncio.to_thread(lambda: path.is_symlink() or (path / '.capturing').exists() or (path / '.cleaned').exists()):
-                raise CaptureError('interrupted or expired source capture')
-            while not self.stopping and (self.paged or job in self.wanted):
+            def local_expiry():
+                if path.is_symlink() or (path / '.capturing').exists() or (path / '.cleaned').exists():
+                    raise CaptureError('interrupted or expired source capture')
+                return self.expiry(path) if path.exists() else time.time() + TTL
+
+            expires = await asyncio.to_thread(local_expiry)
+            while not self.stopping and time.time() < expires and (self.paged or job in self.wanted):
                 if not cap and (fault := await asyncio.to_thread(read_obj, path / '.fault.json')):
-                    with suppress(ProtocolError):
+                    try:
                         await site.rpc('fault', reason=fault.get('reason'))
-                    await asyncio.sleep(2)
-                    continue
+                    except ProtocolError as error:
+                        if error.status not in (400, 404, 410):
+                            await asyncio.sleep(2)
+                            continue
+                    # A confirmed fault (including a replay for a terminal job)
+                    # releases this task. Maintenance decides cleanup with its own poll.
+                    return
                 if cap and not (await cap.status())['running']:
                     closing, cap = cap, None
                     await closing.stop(True)
@@ -463,7 +472,10 @@ class DeferredRunner:
                     continue
                 if op != 'record' or reply.get('id') != job or not isinstance(room, str) or not ROOM.fullmatch(room):
                     raise ProtocolError()
-                lease = reply.get('lease')
+                lease, deadline = reply.get('lease'), reply.get('expires')
+                if type(deadline) is not int:
+                    raise ProtocolError()
+                expires = min(expires, deadline)
                 if type(lease) is not int or lease_ms(lease) < 1000:
                     await asyncio.sleep(.5)
                     continue
@@ -492,7 +504,7 @@ class DeferredRunner:
                 await asyncio.sleep(1.25)
             if cap:
                 closing, cap = cap, None
-                await closing.stop(self.paged or job in self.pending)
+                await closing.stop(time.time() < expires and (self.paged or job in self.pending))
         except Exception as error:
             if cap:
                 with suppress(Exception):

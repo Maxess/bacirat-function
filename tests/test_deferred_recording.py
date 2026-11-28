@@ -220,6 +220,27 @@ class SchedulingTest(unittest.IsolatedAsyncioTestCase):
                 await asyncio.gather(*runner.captures.values(), *(t for t in (runner.discovery, runner.scan_task) if t))
         self.assertEqual(occupied, set())
 
+    async def test_paged_fault_replay_and_expiry_release_capture_without_a_plan_removal(self):
+        path = self.fixture(A)
+        atomic(path/'.fault.json', {'reason':'space'})
+        calls = []
+
+        def school(action, job, **kwargs):
+            calls.append((action, job, kwargs))
+            if len(calls) > 1:
+                raise ProtocolError(400)  # A terminal job no longer accepts a fault.
+            return {}
+
+        r = DeferredRunner(school, self.root, None, None, None)
+        r.paged = True
+        await asyncio.wait_for(r.capture(A), .5)
+        await asyncio.wait_for(r.capture(A), .5)
+        self.assertEqual(calls, [('fault',A,{'reason':'space'})]*2)
+        path = self.fixture(B)
+        atomic(path/'meta.json', {'created':int(time.time())-600,'expires':int(time.time())-1})
+        await asyncio.wait_for(r.capture(B), .5)
+        self.assertEqual(len(calls), 2, 'expired local work ends even if no new plan is available')
+
     async def test_expired_work_releases_finishing_slot_even_during_pause(self):
         path = self.fixture(A)
         r = DeferredRunner(None,self.root,None,None,None)

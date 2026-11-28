@@ -73,7 +73,7 @@ PAYLOAD = {
     media.ASSET: media.SHA256,
     CADDY_ASSET: '5b8cb7faf8726a2028ad96a66e54e6e81e8f361bc6175e5d22bbd997cc5177fb',
     CHROME_ASSET: '88817c574c1838a39f88fda0bbd043b4481fd385fb10e92c323e230844d636ce',
-    REC_ASSET: 'fd1889a15638ff8092b75b183eeba8211b5fa80b0632a1bed3d4833e0bb5a8bd',
+    REC_ASSET: '08da383d01c2d96d596e7d0df9e9bc9d751cf5edc8d8d09f020790c8258fa1bc',
     SCHOOL_HTTP_ASSET: '72550ec6cb374a0e86e618e65b84a455fbeb506a7b8cafdf4c5c8e6736c953c4',
 }
 ENV = {'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LC_ALL': 'C', 'HOME': '/root'}
