@@ -8,6 +8,7 @@ import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
+import re
 import socket
 import ssl
 import sys
@@ -72,8 +73,14 @@ class Peer(BaseHTTPRequestHandler):
         if endpoint == VIDEO_ENDPOINTS.get(platform):
             fields = self.multipart(content, body)
             assert fields['chat_id'] == b'-100321' and fields['supports_streaming'] == b'true' and fields['caption']
-            self.save_video('received.mp4', fields['video'])
-            self.reply_json({'ok': True, 'result': {'chat': {'id': -100321}, 'message_id': 321}})
+            file, message = 'received.mp4', 321
+            if self.server.multi:
+                marker = re.search(rb'\bQA-C0[1-9]\b', fields['caption'])
+                assert marker is not None
+                classroom = marker[0].decode('ascii')
+                file, message = f'received-{classroom}.mp4', 3200 + int(classroom[-2:])
+            self.save_video(file, fields['video'])
+            self.reply_json({'ok': True, 'result': {'chat': {'id': -100321}, 'message_id': message}})
         elif platform == 'rubika' and endpoint == (RUBIKA_API, RUBIKA_PATH + 'requestSendFile'):
             assert json.loads(body) == {'type': 'Video'}
             (self.server.directory / 'rubika-requested').touch(exist_ok=False)
@@ -137,6 +144,8 @@ if __name__ == '__main__':
     with ThreadingHTTPServer(('172.30.124.2', 443), Peer) as server:
         server.directory = directory
         server.platform = sys.argv[2]
+        server.multi = len(sys.argv) == 4 and sys.argv[3] == '--multi'
+        assert not server.multi or server.platform == 'telegram'
         server.pair = json.loads((directory / 'pair.json').read_text())
         tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         tls.load_cert_chain(directory / 'school.pem', directory / 'school.key')

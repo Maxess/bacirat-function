@@ -13,6 +13,7 @@ swap_mib=${8:-0}
 # Release transport QA: exercise the separately shipped helper and launcher,
 # and close UDP on two external browser peers, using the exact release payload.
 resilience=${BACI_QA_RESILIENCE:-0}
+school_captures=${BACI_QA_SCHOOL_CAPTURES:-}
 vm_baseline=${BACI_QA_BASELINE:-minimal}
 provider=${BACI_QA_PROVIDER:-telegram}
 [[ "$vm_baseline" == minimal || "$vm_baseline" == noble-ga-server ]]
@@ -36,6 +37,19 @@ if [[ "$ram" != 4096 ]]; then cpus=1; profile=live; fi
 if [[ "$scenario" == compact ]]; then profile=compact; fi
 if [[ "$scenario" == upgrade ]]; then profile=live; fi
 if [[ "$scenario" != default ]]; then test "$ram" != 4096; fi
+vm_affinity=()
+if [[ -n "$school_captures" ]]; then
+    # For capacity comparisons never fall back to software emulation or run
+    # the synthetic WebRTC peers on the measured guest's allowed CPUs.
+    [[ "$school_captures" =~ ^(0|3|9)$ && -x "$capacity" && "$ram" == 4096 && "$mode" == files \
+        && "$scenario" == default && "$swap_mib" == 0 && "$resilience" == 0 && "$vm_baseline" == minimal \
+        && "$provider" == telegram && -r /dev/kvm && -w /dev/kvm && -z ${4:-} ]]
+    mapfile -t host_cpus < <(python3 -c 'import os; print(*sorted(os.sched_getaffinity(0)), sep="\n")')
+    (( ${#host_cpus[@]} >= 4 ))
+    vm_affinity=(taskset -c "${host_cpus[0]},${host_cpus[1]}")
+    VM_BENCH_CLIENT_CPUS="${host_cpus[2]},${host_cpus[3]}"
+    printf 'QA_SCHOOL_CI guest_cpu_affinity=%s fixture_cpu_affinity=%s\n' "${vm_affinity[2]}" "$VM_BENCH_CLIENT_CPUS"
+fi
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 work=$(mktemp -d)
 port=22131
@@ -165,7 +179,7 @@ PY_TAP
     extra_nic=(python3 "$work/tap-launch.py")
 fi
 printf 'VM accelerator: %s\n' "${accel[*]}"
-"${extra_nic[@]}" qemu-system-x86_64 "${accel[@]}" -m "$ram" -smp "$cpus" -display none -monitor none -serial file:"$work/serial.log" \
+"${extra_nic[@]}" "${vm_affinity[@]}" qemu-system-x86_64 "${accel[@]}" -m "$ram" -smp "$cpus" -display none -monitor none -serial file:"$work/serial.log" \
     -drive file="$work/vm.img",if=virtio,format=qcow2 -drive file="$work/seed.img",if=virtio,format=raw,readonly=on \
     -netdev user,id=nic,restrict=on,hostfwd=tcp:127.0.0.1:$port-:22 -device virtio-net-pci,netdev=nic &
 vm_pid=$!
@@ -612,7 +626,11 @@ if [[ ${BACI_QA_AUDIO_REPAIR:-0} == 1 ]]; then
     source "$root/scripts/vps-audio-repair-rehearsal.sh"
     run_audio_repair_rehearsal
 fi
-if [[ -n "$capacity" ]]; then
+if [[ -n "$school_captures" ]]; then
+    # shellcheck source=vps-school-rehearsal.sh
+    source "$root/scripts/vps-school-rehearsal.sh"
+    run_school_rehearsal "$capacity" "$school_captures" "${BACI_QA_SCHOOL_QUALITY:-low}"
+elif [[ -n "$capacity" ]]; then
     # shellcheck source=vps-recording-rehearsal.sh
     source "$root/scripts/vps-recording-rehearsal.sh"
     run_recording_rehearsal "$capacity"

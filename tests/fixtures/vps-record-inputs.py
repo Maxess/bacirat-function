@@ -10,16 +10,27 @@ def ffmpeg(*args):
 
 
 p = Path(sys.argv[1])
-for name, size, rate, source, color in [('camera', '640x360', '260k', 'testsrc2', '0xe000ce'),
-                                       ('screen', '1280x720', '420k', 'testsrc', '0x25dc30')]:
-    ffmpeg('-f', 'lavfi', '-i', f'{source}=size={size}:rate=10', '-t', '3', '-an',
+profile = sys.argv[2] if len(sys.argv) == 3 else 'rehearsal'
+quality = {
+    'rehearsal': [('640x360', 10, '260k'), ('1280x720', 10, '420k')],
+    'low': [('128x128', 8, '25k'), ('640x360', 5, '70k')],
+    'medium': [('256x256', 12, '150k'), ('960x540', 10, '315k')],
+}[profile]
+for (name, source, color), (size, fps, rate) in zip(
+        [('camera', 'testsrc2', '0xe000ce'), ('screen', 'testsrc', '0x25dc30')], quality, strict=True):
+    bounded = [] if profile == 'rehearsal' else ['-maxrate', rate, '-bufsize', f'{2*int(rate[:-1])}k']
+    ffmpeg('-f', 'lavfi', '-i', f'{source}=size={size}:rate={fps}', '-t', '3', '-an',
            '-vf', f'drawbox=x=3*iw/8:y=3*ih/8:w=iw/4:h=ih/4:color={color}:t=fill', '-c:v', 'libvpx',
            '-pix_fmt', 'yuv420p', '-deadline', 'realtime', '-cpu-used', '6', '-threads', '2', '-g', '15',
-           '-b:v', rate, '-f', 'ivf', str(p / f'{name}.ivf'))
-for name, hz in [('teacher', 440), ('pupil', 730)]:
+           '-b:v', rate, *bounded, '-f', 'ivf', str(p / f'{name}.ivf'))
+hz_by_source = [('teacher', 440), ('pupil', 730)]
+if profile != 'rehearsal':
+    hz_by_source += [('pupil2', 1030)]
+for name, hz in hz_by_source:
     ogg = p / f'{name}.ogg'
+    opus = ['-b:a', '24k'] if profile == 'rehearsal' else ['-b:a', '12k', '-vbr', 'off', '-application', 'voip']
     ffmpeg('-f', 'lavfi', '-i', f'sine=frequency={hz}:sample_rate=48000', '-t', '2', '-vn',
-           '-c:a', 'libopus', '-b:a', '24k', '-frame_duration', '20', str(ogg))
+           '-c:a', 'libopus', *opus, '-frame_duration', '20', str(ogg))
     raw = ogg.read_bytes()
     pos, packet, packets = 0, b'', []
     while pos < len(raw):
