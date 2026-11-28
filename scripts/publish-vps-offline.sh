@@ -67,9 +67,11 @@ if [[ "$version" == 1.3.5 ]]; then
     gh api "repos/$repo/actions/runs/$entry_run/jobs" | jq -e '
         any(.jobs[]; .name == "real-peers" and .conclusion == "success"
             and any(.steps[]; .name == "Verify the packaged classroom with a real teacher and pupil" and .conclusion == "success"))' >/dev/null
-    entry_site_sha=$(gh api "repos/$repo/contents/artifacts/SHA256SUMS-v$site_version.txt?ref=$entry_commit" --jq .content | base64 -d \
-        | awk -v site="$site" '$2 == site {print $1}')
-    [[ "$entry_site_sha" =~ ^[a-f0-9]{64}$ ]]
+    entry_manifest=$(gh api "repos/$repo/contents/artifacts/SHA256SUMS-v$site_version.txt?ref=$entry_commit" --jq .content | base64 -d)
+    entry_site_sha=$(awk -v site="$site" '$2 == site {print $1}' <<< "$entry_manifest")
+    entry_plugin="school-classroom-plugin-v$site_version.zip"
+    entry_plugin_sha=$(awk -v plugin="$entry_plugin" '$2 == plugin {print $1}' <<< "$entry_manifest")
+    [[ "$entry_site_sha" =~ ^[a-f0-9]{64}$ && "$entry_plugin_sha" =~ ^[a-f0-9]{64}$ ]]
 fi
 stage=verify-distribution-helpers
 # These are separate assets, not a modification or rebuild of the tested archive.
@@ -105,7 +107,10 @@ stage=check-published-inventory
     cmp <(printf '%s\n' "$name.tar.gz" "$name-ubuntu-source.tar" "$site" | sort) \
         <(cut -c67- "$sha_file" | sort)
     sha256sum --check --strict "$sha_file"
-    if [[ "$version" == 1.3.5 ]]; then printf '%s  %s\n' "$entry_site_sha" "$site" | sha256sum --check --strict; fi
+    if [[ "$version" == 1.3.5 ]]; then
+        printf '%s  %s\n' "$entry_site_sha" "$site" | sha256sum --check --strict
+        unzip -p "$site" "$entry_plugin" | sha256sum | grep -Fx "$entry_plugin_sha  -"
+    fi
     grep -Fxq "$installer  $name.tar.gz" "$sha_file"
     tar -xOf "$name.tar.gz" "baci-classroom-vps-offline/$site" | cmp - "$site"
     BUILD=$(tar -xOf "$name.tar.gz" baci-classroom-vps-offline/BUILD.json)

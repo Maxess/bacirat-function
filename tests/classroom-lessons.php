@@ -2,6 +2,7 @@
 declare(strict_types=1);
 require __DIR__ . '/../school-addon/upload/online-classroom/events.php';
 require __DIR__ . '/../school-addon/upload/online-classroom/reports.php';
+require_once __DIR__ . '/../school-addon/upload/online-classroom/lite.php';
 
 function must(bool $ok, string $why): void { if (!$ok) throw new RuntimeException($why); }
 function denied(int $status, callable $call): void {
@@ -993,6 +994,8 @@ $wire($demo['room'],['teacher-4'=>'PA_StaffOld','teacher-1'=>'PA_Teacher']);
 $pulse(10,$priorYear,'PA_StaffOld',$fri+3); $pulse(10,$teacher,'PA_Teacher',$fri+3);
 $liveDemo = cl_reconcile($s,$trial,$first,cl_active($s,10),$fri+3,$rpc);
 must(cl_check_live($trial,$liveDemo,$teacher,$bind($liveDemo,'PA_Teacher'),$fri+3)['phase'] === 'live', 'both teachers become admitted after the verified event and presence');
+must(cl_readable_lesson($trial,$liveDemo,$first,$priorYear,$fri+3)
+    && !cl_readable_lesson($trial,$liveDemo,$first,$student,$fri+3), 'staff-only Friday does not expose lite payloads to pupils');
 $demoWake = $bind($liveDemo,'PA_StaffOld') + ['mode'=>'system'];
 denied(403,fn()=>cl_set_wake($s,$liveDemo,$teacher,$bind($liveDemo,'PA_Teacher') + ['mode'=>'idle']));
 must(cl_set_wake($s,$liveDemo,$priorYear,$demoWake)['wakeMode'] === 'system', 'only the teacher who started the Friday lesson may change wake');
@@ -1026,6 +1029,17 @@ cl_event_apply($s,$withPupils,['event'=>'participant_joined','room'=>['name'=>$r
 $practicing = cl_reconcile($s,$withPupils,$first,cl_active($s,10),$start+2,$rpc);
 denied(409,fn()=>cl_ticket($withPupils,$practicing,$wrongClass,$bind($practicing,'PA_OtherStudent'),$start+2));
 must(cl_ticket($withPupils,$practicing,$student,$bind($practicing,'PA_Student'),$start+2)['lesson'] === $pupilDemo['id'], 'pupil gets a ticket after confirmed staff arrives');
+must(cl_readable_lesson($withPupils,$practicing,$first,$student,$start+2)
+    && !cl_entered($practicing,$student,'PA_Student',$start+2), 'lite has no media SID or attendance on authorized Friday');
+$noPilot = $withPupils;
+unset($noPilot['friday_test']['students']);
+foreach ([[$noPilot,$practicing,$first,$student,$start+2],[$withPupils,$practicing,$first,$wrongClass,$start+2],
+    [$withPupils,$practicing,$first,array_replace($student,['year'=>'1404/1405']),$start+2],
+    [$withPupils,array_replace($practicing,['sample'=>$start+2-CL_SAMPLE_TTL-1]),$first,$student,$start+2],
+    [$withPupils,array_replace($practicing,['pulses'=>['admin-3'=>['sid'=>'PA_Other','at'=>$start+2]]]),$first,$student,$start+2],
+    [$withPupils,$practicing,$first,$student,$sat]] as $case) {
+    must(!cl_readable_lesson(...$case), 'lite rejects revoked Friday settings, wrong class/year, stale supervision or expiry');
+}
 $wire($room,$staffWire+$studentWire);
 $pulse(10,$student,'PA_Student',$start+4);
 $practicing = cl_reconcile($s,$withPupils,$first,cl_active($s,10),$start+5,$rpc);
@@ -1067,6 +1081,18 @@ must($existing['room'] === $real['room'], 'changing the cap applies to new room 
 must(!cl_is_friday_test($real) && $real['deadline'] === $fri+9*3600+15*60, 'the weekly bell and its deadline remain ordinary even during a Friday pilot');
 denied(409,fn()=>cl_ticket($trial,$real,$priorYear,$bind($real,'PA_StaffOld'),$morning));
 denied(409,fn()=>$trialOpen($priorYear,$first,$morning));
+
+// Large or legacy geometry must not turn erased ink into a misleading partial preview.
+$removedId = str_repeat('a',32);
+$inkFixture = ['tool'=>'pen','id'=>$removedId,'color'=>'#156097','size'=>3,'points'=>[[100,100],[200,300]]];
+$nextInk = array_replace($inkFixture, ['id'=>str_repeat('b',32)]);
+must(cl_lite_paths([$inkFixture,$nextInk],[$removedId=>true]) === cl_lite_paths([$nextInk], []),
+    'undo removes a whole stroke, including its earlier batched pieces');
+must(count(cl_lite_paths([$inkFixture,$nextInk],[])) === 2, 'redo can restore the stroke');
+must(cl_lite_paths(array_fill(0,CL_LITE_ROWS+1,$inkFixture),[]) === null, 'too many rows fail closed');
+must(cl_lite_paths(array_fill(0,42,array_replace($inkFixture,['points'=>array_fill(0,64,[100,100])])),[]) === null,
+    'too many points fail closed even on a small number of rows');
+must(cl_lite_paths([$inkFixture,['tool'=>'erase']],[]) === null, 'legacy pixel erase is not misrepresented');
 cl_close_lesson($s,$trial,$real,$morning+1,$rpc);
 
 // Exercise the actual job entrypoint after one close. Both pupils share the same

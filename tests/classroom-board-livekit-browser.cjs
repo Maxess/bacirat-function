@@ -114,6 +114,7 @@ test('real peers open a cold bell, recover their SID, sync the board and can sto
     const sfuDiag=await isolatedSfu(t);
     const fixture=packaged(t);
     const staffHTML=fixture.render('teacher',true), pupilHTML=fixture.render('student',true);
+    const bellDate=staffHTML.toString().match(/data-bell-date="([^"]+)"/)[1];
     const members = {}, ops = [], log = [];
     const lesson='qa-lesson', epoch='qa-epoch', owner='teacher-1';
     let head=0, seq=0, unlock, replay=false, startedAt, admittedAt;
@@ -141,7 +142,7 @@ test('real peers open a cold bell, recover their SID, sync the board and can sto
             } else if (!startedAt) {
                 assert.equal(input.action,'status');
                 return send(res,'application/json',JSON.stringify({ok:true,phase:'idle',ready:true,
-                    schedule:{choices:[{id:11,label:'زنگ ۱'}]}}));
+                    schedule:{date:bellDate,choices:[{id:11,label:'زنگ ۱'}]}}));
             } else if (input.action==='ticket') Object.assign(result,{url:url.replace('http','ws'),token:ticket(identity)});
             else if (input.action==='leave') {
                 if (members[identity]===input.sid) delete members[identity];
