@@ -16,12 +16,19 @@ function teacher(int $c): array
 {
     return ['role'=>'teacher','id'=>700 + $c,'identity'=>'teacher-' . (700 + $c),'office'=>null];
 }
-function bell(int $c): string { return sprintf('%032x', $c); }
+function bell(int $c, ?int $number = null): string
+{
+    return sprintf('%032x', (($number ?? $GLOBALS['QA_BELL']) - 1) * 16 + $c);
+}
 function room(int $c): string { return QA_PREFIX . '-v4-c' . $c . '-' . substr(bell($c), -24); }
 function reply(mixed $data): string { return json_encode($data, JSON_THROW_ON_ERROR) . "\n"; }
 
 $dir = getenv('BACI_QA_DIR');
 need(is_string($dir) && realpath($dir) === $dir, 'private fixture directory required');
+$bellFile = $dir . '/bell-number';
+$round = is_file($bellFile) ? (int)file_get_contents($bellFile) : 1;
+need(in_array($round,[1,2],true), 'fixture bell must be one or two');
+$GLOBALS['QA_BELL'] = $round;
 $pair = json_decode(file_get_contents($dir . '/pair.json'), true, 8, JSON_THROW_ON_ERROR);
 need($pair['signal_url'] === 'wss://media.example.test' && $pair['site'] === 'https://school.example.test/campus', 'isolated pair required');
 require $dir . '/site/events.php';
@@ -106,7 +113,7 @@ try {
                     need($kinds === $expected, 'actual source mix must match the scenario');
                     $trackTotals[] = $kinds;
                     $sid = $seen[$teacher['identity']];
-                    $live = ['id'=>$id,'class_id'=>$c,'class_name'=>$roster[$c]['name'],'year'=>$roster[$c]['year'],
+                    $live = ['id'=>$id,'class_id'=>$c,'class_name'=>$roster[$c]['name'] . ($round === 2 ? '-B2' : ''),'year'=>$roster[$c]['year'],
                         'teacher'=>$teacher['id'],'slot'=>1,'subject'=>'آزمایش ظرفیت','period'=>'زنگ ۱','date'=>cl_day($now)->format('Y-m-d'),
                         'phase'=>'live','sample'=>$now,'room'=>room($c),'started'=>$now-10,'created'=>$now-11,'deadline'=>$now+360,
                         'staff'=>[$teacher['identity']=>$sid],'active_seconds'=>10,
@@ -145,11 +152,13 @@ try {
                 break;
             case 'status':
                 $jobs = [];
+                $statusBell = isset($argv[2]) ? (int)$argv[2] : $round;
+                need(in_array($statusBell,[1,2],true), 'invalid fixture bell for status');
                 foreach ($classes as $c) {
-                    $job = $s->get('recording', bell($c));
+                    $job = $s->get('recording', bell($c, $statusBell));
                     if ($job === null) continue;
                     $jobs[sprintf('QA-C%02d', $c)] = ['state'=>$job['state'],'live'=>$job['live'],'sent'=>$job['sent'],'total'=>$job['total'],
-                        'reason'=>$job['reason'] ?? '','not_before'=>$job['not_before'] ?? null,'rendered_at'=>$job['rendered_at'] ?? null,
+                        'reason'=>$job['reason'] ?? '','closed_at'=>$job['closed_at'] ?? null,'not_before'=>$job['not_before'] ?? null,'rendered_at'=>$job['rendered_at'] ?? null,
                         'message'=>$job['last']['message'] ?? null,'cleaned'=>isset($job['cleaned'])];
                 }
                 echo reply((object)$jobs);

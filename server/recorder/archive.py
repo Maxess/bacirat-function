@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import struct
 from threading import RLock
 import time
@@ -54,6 +55,33 @@ def sources(path):
     return result
 
 
+def directory_usage(path):
+    """Count the same regular files once; never follow a spool symlink."""
+    source = rendered = 0
+    folders = [path]
+    while folders:
+        folder = folders.pop()
+        is_render = os.path.basename(folder) == '.render'
+        try:
+            with os.scandir(folder) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            folders.append(entry.path)
+                            continue
+                        info = entry.stat(follow_symlinks=False)
+                    except FileNotFoundError:
+                        continue  # Another worker renamed or removed a film.
+                    if stat.S_ISREG(info.st_mode):
+                        if is_render:
+                            rendered += info.st_size
+                        else:
+                            source += info.st_size
+        except FileNotFoundError:
+            continue
+    return source, rendered
+
+
 class Budget:
     """Shared accounting for three writers. Keep a whole-film reserve *and* OS free space."""
     def __init__(self, root):
@@ -67,23 +95,18 @@ class Budget:
         with self.lock:
             if time.monotonic() - self.measured < 2:
                 return
-            self.total = self.rendered = 0
-            self.per_job = {}
-            for path in self.root.iterdir():
-                if HEX.fullmatch(path.name) and not path.is_symlink() and path.is_dir():
-                    amount = 0
-                    for file in path.rglob('*'):
-                        try:
-                            if not file.is_symlink() and file.is_file():
-                                size = file.stat().st_size
-                                if file.parent.name == '.render':
-                                    self.rendered += size
-                                else:
-                                    self.total += size
-                                amount += size
-                        except FileNotFoundError:
-                            pass  # The independent finishing/cleanup worker may rename a part.
-                    self.per_job[path] = amount
+            total = rendered = 0
+            per_job = {}
+            with os.scandir(self.root) as entries:
+                for entry in entries:
+                    if HEX.fullmatch(entry.name) and entry.is_dir(follow_symlinks=False):
+                        path = self.root / entry.name
+                        source, film = directory_usage(path)
+                        total += source
+                        rendered += film
+                        per_job[path] = source + film
+            # Publish only a complete pass, not a partial undercount if a scan fails.
+            self.total, self.rendered, self.per_job = total, rendered, per_job
             self.measured = time.monotonic()
 
     def room(self, size=0):

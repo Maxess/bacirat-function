@@ -120,6 +120,7 @@ def main():
     p.add_argument('quality',choices=['low','medium','high'])
     p.add_argument('seconds',type=int)
     p.add_argument('trial',nargs='?',default='standard',choices=['standard','baseline','udp-batch','candidate'])
+    p.add_argument('--bell', type=int, choices=[1,2], default=1)
     a = p.parse_args()
     work = a.workdir
     rows = [json.loads(line) for line in (work/'counters.jsonl').read_text().splitlines()]
@@ -130,7 +131,9 @@ def main():
     board = [json.loads(row) for row in (work/'board.jsonl').read_text().splitlines()]
     require(len(board) >= (a.seconds-6)//2 and all(t['readers'] == 7 and t['tick'] == i for i,t in enumerate(board,1)),
             'all seven PDF whiteboards must receive the synthetic updates')
-    expected = set(map(str, (range(1,10) if a.count == 9 else [1,8,9] if a.count == 3 else [])))
+    offset = (a.bell-1)*16
+    rooms = range(1,10) if a.count == 9 else [1,8,9] if a.count == 3 else []
+    expected = {str(offset+i) for i in rooms}
     require(all(set(r['open_sources']) == expected for r in live_rows), 'expected independent active source per approved class throughout window')
     observed = {key:live_rows[-1]['open_sources'][key]-live_rows[0]['open_sources'][key] for key in expected}
     require(all(size > 5000*live['seconds'] for size in observed.values()), 'one or more live sources did not grow through the measurement')
@@ -152,7 +155,7 @@ def main():
         require(re.fullmatch(r'QA-C0[1-9]',name) is not None, 'unexpected synthetic class')
         index = int(name[-2:])
         require(record['state'] == 'delivered' and record['cleaned'] and record['sent'] == record['total'] == 1
-                and str(record['message']) == str(3200+index), 'school receipt did not settle')
+                and str(record['message']) == str(3200+index+100*(a.bell-1)), 'school receipt did not settle')
         require(record['rendered_at'] >= record['not_before'], 'render before permission')
         print(f'QA_SCHOOL_RECEIPT verifying {name}: {record["state"]}',flush=True)
         films[name] = verify_film(work/f'received-{name}.mp4', a.seconds-2, index)

@@ -42,6 +42,8 @@ R1_SHA = '07d51104f5fa7bbfd90d6329931fa0e9d03967b9c8fc617c8fe08f10b4d38cfd'
 R3_RECORDER = f'baci-classroom-recorder-v{RECORDER_VERSION}-r3.zip'
 R3_RECORDER_SHA = '7f5863dd842fbcc3298d0605aa745b517a7e0298baae0c471215ab4df407cd26'
 FRESH_RECORDER = f'baci-classroom-recorder-v{RECORDER_VERSION}-r4.zip'
+FRESH_RECORDER_SHA = '08da383d01c2d96d596e7d0df9e9bc9d751cf5edc8d8d09f020790c8258fa1bc'
+SPOOL_CANDIDATE = f'baci-classroom-recorder-v{RECORDER_VERSION}-r5-candidate.zip'
 MAINTENANCE_SHA = '2782b003fb54886777e2ea3e06b76d9587d1b3ef89bcc0e736e15283ca5782f6'
 # Go 1.26.2, linux/amd64, same bytes as the verified GitHub Actions build.
 NATIVE = {
@@ -258,13 +260,13 @@ def recorder_release(output_dir, native_build):
     assets['board.js'] = (SRC / 'assets/board.js').read_bytes()
     files = {name: (RECORDER_SRC / name).read_bytes() for name in ('requirements.txt',
              'capture.py', 'view.html', 'view.css', 'view.js',
-             'archive.py', 'clock.py', 'disk_writer.py', 'native_capture.py', 'ingest.html', 'ingest.js', 'encoded.js',
+             'clock.py', 'disk_writer.py', 'native_capture.py', 'ingest.html', 'ingest.js', 'encoded.js',
              'school-classroom-recorder.service', 'school-classroom-postprocess.service',
              'school-classroom-recorder.service.d/10-recorder-credential.conf',
              'school-classroom-recorder.service.d/60-native-recorder.conf', 'fonts/README.md')}
     # Renderer candidates and HTTP repairs never change the published 0.4.23 ZIP.
     with frozen_recorder() as published:
-        files.update({name: published.read(name) for name in (*RENDERER_FIX, 'README-fa.md', 'replay.js', 'frame.js', 'recording.py', 'transport.py')})
+        files.update({name: published.read(name) for name in (*RENDERER_FIX, 'README-fa.md', 'replay.js', 'frame.js', 'recording.py', 'transport.py', 'archive.py')})
     for name, digest in NATIVE.items():
         data = (native_build / name).read_bytes()
         if hashlib.sha256(data).hexdigest() != digest:
@@ -294,6 +296,18 @@ def recorder_fresh(output_dir):
     files['recording.py'] = (RECORDER_SRC / 'recording.py').read_bytes()
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / FRESH_RECORDER
+    write_zip(path, files)
+    print(f'{path}: {hashlib.sha256(path.read_bytes()).hexdigest()}')
+    return path
+
+
+def recorder_spool_candidate(output_dir):
+    """QA r5 only: leave the shipped r4 scheduler and all protocols byte-identical."""
+    with ZipFile(BytesIO(verified_release(FRESH_RECORDER, FRESH_RECORDER_SHA))) as baseline:
+        files = {name: baseline.read(name) for name in baseline.namelist()}
+    files['archive.py'] = (RECORDER_SRC / 'archive.py').read_bytes()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / SPOOL_CANDIDATE
     write_zip(path, files)
     print(f'{path}: {hashlib.sha256(path.read_bytes()).hexdigest()}')
     return path
@@ -349,6 +363,7 @@ def main():
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--recorder-only', action='store_true', help='rebuild the unchanged standalone VPS release')
     mode.add_argument('--recorder-fresh', action='store_true', help='build the r4 Recorder pack for fresh installs and managed upgrades')
+    mode.add_argument('--recorder-spool-candidate', action='store_true', help='build a test-only r5 spool inventory pack')
     mode.add_argument('--renderer-candidate', action='store_true', help='build an offline test ZIP, not a production upgrade')
     mode.add_argument('--renderer-repair', action='store_true', help='rebuild the pinned renderer-only r1 repair ZIP')
     mode.add_argument('--audio-repair', action='store_true', help='build the standalone renderer-only r2 audio repair for VPS 1.3.2')
@@ -357,10 +372,11 @@ def main():
     parser.add_argument('--pdf-archive', type=Path, help='use a local copy of the same pinned PDF.js npm archive')
     parser.add_argument('--native-build', type=Path, help='output of scripts/build-recorder-native.py (Linux x86-64)')
     opts = parser.parse_args()
-    if opts.renderer_candidate or opts.renderer_repair or opts.audio_repair or opts.recorder_fresh:
+    if opts.renderer_candidate or opts.renderer_repair or opts.audio_repair or opts.recorder_fresh or opts.recorder_spool_candidate:
         if not opts.output_dir or opts.approve_reviewed_manifest or opts.pdf_archive or opts.native_build:
-            parser.error('renderer-only builds need an explicit --output-dir and no release build options')
+            parser.error('Recorder variants need an explicit --output-dir and no release build options')
         build = (audio_repair if opts.audio_repair else recorder_fresh if opts.recorder_fresh
+                 else recorder_spool_candidate if opts.recorder_spool_candidate
                  else renderer_repair if opts.renderer_repair else renderer_candidate)
         build(opts.output_dir)
         return

@@ -13,7 +13,11 @@ run_school_rehearsal() (
     if [[ -n "$trial" ]]; then
         [[ "$quality" == high && "$count" == 9 && ( "$trial" == baseline || "$trial" == udp-batch ) ]]
     fi
-    local udp_ab=${BACI_QA_SCHOOL_UDP_INTERVAL:-}
+    local udp_ab=${BACI_QA_SCHOOL_UDP_INTERVAL:-} bells=${BACI_QA_SCHOOL_BELLS:-1}
+    local site_version=${BACI_QA_SCHOOL_SITE_VERSION:-0.4.27}
+    [[ "$bells" == 1 || "$bells" == 2 ]]
+    [[ "$site_version" == 0.4.27 || ( "$site_version" == 0.4.28 && "$candidate" == 1 ) ]]
+    if [[ "$bells" == 2 ]]; then [[ "$candidate" == 1 && -z "$udp_ab" ]]; fi
     if [[ "$candidate" == 1 ]]; then [[ "$count" == 9 && "$quality" == high && -z "$trial" ]]; fi
     if [[ -n "$udp_ab" ]]; then [[ "$candidate" == 1 && ( "$udp_ab" == 1ms || "$udp_ab" == 500us ) ]]; fi
     mkdir -m 700 "$q"
@@ -70,12 +74,12 @@ GUEST
     local digest=493b09e48376222001f728616d0fc0445a75c29951bdf488a1e8467acd35bebf
     local patched=$count
     if [[ "$candidate" == 1 ]]; then
-        site=baci-classroom-site-upgrade-v0.4.27.zip
-        plugin=school-classroom-plugin-v0.4.27.zip
+        site=baci-classroom-site-upgrade-v$site_version.zip
+        plugin=school-classroom-plugin-v$site_version.zip
         digest=$(sha256sum "$root/artifacts/$site" | cut -d ' ' -f 1)
         patched=0
         vm 'sudo grep -Fxq "    batch_size: 64" /etc/school-classroom/livekit.yaml && sudo grep -Fxq "    max_flush_interval: 1ms" /etc/school-classroom/livekit.yaml && sudo grep -Fxq "  udp_port: 7882" /etc/school-classroom/livekit.yaml'
-        echo 'QA_SCHOOL_VARIANT shipping candidate: packaged Recorder r4, site 0.4.27, UDP batching enabled by installer; no cap/config overrides'
+        echo "QA_SCHOOL_VARIANT packaged site $site_version, UDP batching enabled by installer; no cap overrides"
     fi
     vm "cat baci-classroom-vps-offline/$site" > "$q/$site"
     printf '%s  %s\n' "$digest" "$q/$site" | sha256sum --strict -c
@@ -184,85 +188,105 @@ PY_BATCH
     vm 'set -o pipefail; sudo baci-vps doctor --online --wait | tee school-online.log; grep -Fxq school_recorder=ready school-online.log'
     vm "awk -F': ' '/^model name/{print \$2; exit}' /proc/cpuinfo" > "$q/cpu-model.txt"
     send "$root/tests/fixtures/vps-school-sample.py"
-    phase idle
-    vm 'sudo /usr/bin/python3 -IB ./vps-school-sample.py qa-phase' > "$q/counters.jsonl" &
-    local sampler_pid=$!
-    sleep 5
-    kill -0 "$sampler_pid"
-    phase join
-    ( umask 077; school tickets > "$q/tickets.json" )
-    as_runner bash -c 'ulimit -Sn 8192; export GOMAXPROCS=2; exec "$@"' qa "$client" --fixture "$q" "$quality" > "$q/load.log" 2>&1 &
-    local load_pid=$!
-    for n in $(seq 1 120); do
-        if [[ -f "$q/peers-joined" ]]; then break; fi
-        kill -0 "$load_pid"
-        sleep .25
-    done
-    test -f "$q/peers-joined"
-    phase warmup
-    for n in $(seq 1 60); do
-        if [[ -f "$q/media-ready" ]]; then break; fi
-        kill -0 "$load_pid"
-        sleep 1
-    done
-    test -f "$q/media-ready"
-    school open
-    school start "$count"
-    live_jobs() {
-        school status | jq -ce --argjson n "$count" 'select(length==$n and all(.[]; .state=="recording" and .live))'
-    }
-    for n in $(seq 1 30); do if live_jobs >/dev/null; then break; fi; kill -0 "$load_pid"; sleep 1; done
-    live_jobs > "$q/active-captures.json"
-    grep '^QA_SCHOOL_JOIN ' "$q/load.log"
-    echo "QA_SCHOOL_ACTIVE confirmed captures=$count vp8=$quality steady_window_s=$seconds"
-    phase live
-    if [[ -n "$udp_ab" ]]; then touch "$q/audio-steady"; fi
-    local live_start=$SECONDS tick=0
-    while (( SECONDS - live_start < seconds )); do
-        tick=$((tick+1))
-        as_runner curl --disable --noproxy '*' --fail --silent --show-error --max-time 3 \
-            --data "$tick" 'http://127.0.0.1:18391/qa-local-board' >> "$q/board.jsonl"
-        sleep 2
-    done
-    echo "QA_SCHOOL_BOARD active_whiteboards=7 synthetic_pen_lines_per_room=$tick sample_delta_checks=$((7*tick))"
-    kill -0 "$load_pid"
-    kill -0 "$sampler_pid"
-    live_jobs >/dev/null
-    vm 'test -z "$(sudo find /var/lib/school-classroom-recorder \( -name "*.mp4" -o -name .render \) -print -quit)"'
-    if [[ -n "$udp_ab" ]]; then
-        phase reconnect
-        # Rejoin two listen-only pupils in each high-video room while all
-        # publishers continue. Their subscriptions stimulate new keyframes.
-        touch "$q/audio-reconnect"
-        for n in $(seq 1 22); do
-            if [[ -s "$q/udp-probe.json" ]]; then break; fi
+    local bell_no live_start tick eligible_first=''
+    for bell_no in $(seq 1 "$bells"); do
+        printf '%s\n' "$bell_no" > "$q/bell-number.tmp"
+        mv "$q/bell-number.tmp" "$q/bell-number"
+        phase idle
+        vm 'sudo /usr/bin/python3 -IB ./vps-school-sample.py qa-phase' > "$q/counters.jsonl" &
+        local sampler_pid=$!
+        sleep 5
+        kill -0 "$sampler_pid"
+        phase join
+        ( umask 077; school tickets > "$q/tickets.json" )
+        as_runner bash -c 'ulimit -Sn 8192; export GOMAXPROCS=2; exec "$@"' qa "$client" --fixture "$q" "$quality" > "$q/load.log" 2>&1 &
+        local load_pid=$!
+        for n in $(seq 1 120); do
+            if [[ -f "$q/peers-joined" ]]; then break; fi
+            kill -0 "$load_pid"
+            sleep .25
+        done
+        test -f "$q/peers-joined"
+        phase warmup
+        for n in $(seq 1 60); do
+            if [[ -f "$q/media-ready" ]]; then break; fi
             kill -0 "$load_pid"
             sleep 1
         done
-        test -s "$q/udp-probe.json"
-        jq -ce 'select(.rejoin_peers == 4 and .stable.matched > 10000 and .burst.matched > 1000)' "$q/udp-probe.json" \
-            | sed 's/^/QA_SCHOOL_AUDIO /'
-        live_jobs >/dev/null
-    fi
-    if [[ -n "$trial$udp_ab" ]]; then
-        phase profile
-        vm 'curl --disable --noproxy "*" --fail --silent --show-error --max-time 18 "http://127.0.0.1:7070/debug/pprof/profile?seconds=12"' > "$q/sfu.pprof"
-        test -s "$q/sfu.pprof"
-        live_jobs >/dev/null
-        cp "$q/sfu.pprof" "$results/sfu.pprof"
-    fi
-    phase closing
-    touch "$q/media-stop"
-    for n in $(seq 1 15); do
-        if [[ -f "$q/media-paused" ]]; then break; fi
+        test -f "$q/media-ready"
+        school open
+        school start "$count"
+        live_jobs() {
+            school status | jq -ce --argjson n "$count" 'select(length==$n and all(.[]; .state=="recording" and .live))'
+        }
+        for n in $(seq 1 30); do if live_jobs >/dev/null; then break; fi; kill -0 "$load_pid"; sleep 1; done
+        live_jobs > "$q/active-captures.json"
+        grep '^QA_SCHOOL_JOIN ' "$q/load.log"
+        echo "QA_SCHOOL_ACTIVE confirmed captures=$count vp8=$quality steady_window_s=$seconds"
+        phase live
+        if [[ -n "$udp_ab" ]]; then touch "$q/audio-steady"; fi
+        live_start=$SECONDS tick=0
+        while (( SECONDS - live_start < seconds )); do
+            tick=$((tick+1))
+            as_runner curl --disable --noproxy '*' --fail --silent --show-error --max-time 3 \
+                --data "$tick" 'http://127.0.0.1:18391/qa-local-board' >> "$q/board.jsonl"
+            sleep 2
+        done
+        echo "QA_SCHOOL_BOARD active_whiteboards=7 synthetic_pen_lines_per_room=$tick sample_delta_checks=$((7*tick))"
         kill -0 "$load_pid"
-        sleep 1
+        kill -0 "$sampler_pid"
+        live_jobs >/dev/null
+        if [[ "$bell_no" == 2 ]]; then
+            test "$(date +%s)" -ge "$eligible_first"
+            school status 1 | jq -e 'length == 9 and all(.[]; .state == "queued" and .rendered_at == null and .sent == 0)' >/dev/null
+            test ! -f "$q/uploads.log"
+            echo 'QA_SCHOOL_BACK_TO_BACK prior nine already eligible, but next live bell still prevents rendering and delivery'
+        fi
+        vm 'test -z "$(sudo find /var/lib/school-classroom-recorder \( -name "*.mp4" -o -name .render \) -print -quit)"'
+        if [[ -n "$udp_ab" ]]; then
+            phase reconnect
+            # Rejoin two listen-only pupils in each high-video room while all
+            # publishers continue. Their subscriptions stimulate new keyframes.
+            touch "$q/audio-reconnect"
+            for n in $(seq 1 22); do
+                if [[ -s "$q/udp-probe.json" ]]; then break; fi
+                kill -0 "$load_pid"
+                sleep 1
+            done
+            test -s "$q/udp-probe.json"
+            jq -ce 'select(.rejoin_peers == 4 and .stable.matched > 10000 and .burst.matched > 1000)' "$q/udp-probe.json" \
+                | sed 's/^/QA_SCHOOL_AUDIO /'
+            live_jobs >/dev/null
+        fi
+        if [[ -n "$trial$udp_ab" ]]; then
+            phase profile
+            vm 'curl --disable --noproxy "*" --fail --silent --show-error --max-time 18 "http://127.0.0.1:7070/debug/pprof/profile?seconds=12"' > "$q/sfu.pprof"
+            test -s "$q/sfu.pprof"
+            live_jobs >/dev/null
+            cp "$q/sfu.pprof" "$results/sfu.pprof"
+        fi
+        phase closing
+        touch "$q/media-stop"
+        for n in $(seq 1 15); do
+            if [[ -f "$q/media-paused" ]]; then break; fi
+            kill -0 "$load_pid"
+            sleep 1
+        done
+        test -f "$q/media-paused"
+        school close
+        touch "$q/rooms-closed"
+        wait "$load_pid"
+        grep '^QA_SCHOOL_MEDIA ' "$q/load.log"
+        if (( bell_no < bells )); then
+            eligible_first=$(school status 1 | jq -er '[.[] | .not_before] | min | select(type=="number")')
+            phase halt
+            wait "$sampler_pid"
+            mkdir "$q/bell-1"
+            cp "$q/cpu-model.txt" "$q/bell-1/"
+            mv "$q/"{counters.jsonl,load.log,board.jsonl,active-captures.json} "$q/bell-1/"
+            rm "$q/"{tickets.json,peers-joined,media-ready,media-stop,media-paused,rooms-closed}
+        fi
     done
-    test -f "$q/media-paused"
-    school close
-    touch "$q/rooms-closed"
-    wait "$load_pid"
-    grep '^QA_SCHOOL_MEDIA ' "$q/load.log"
     phase wait
     school status > "$q/closed.json"
     if (( count > 0 )); then
@@ -270,15 +294,33 @@ PY_BATCH
         eligible=$(jq -er '[.[] | .not_before] | min | select(type=="number")' "$q/closed.json")
         for n in $(seq 1 75); do if (( $(date +%s) >= eligible )); then break; fi; sleep 1; done
         phase render
-        for n in $(seq 1 220); do
-            school status > "$q/closed.json"
-            jq -e 'all(.[]; .state != "failed" and .state != "uncertain" and .state != "discarded")' "$q/closed.json" >/dev/null
-            if jq -e --argjson n "$count" 'length==$n and all(.[]; .state=="delivered" and .cleaned)' "$q/closed.json" >/dev/null; then break; fi
+        all_delivered() {
+            local no ok=0
+            for no in $(seq 1 "$bells"); do
+                local status="$q/closed.json"
+                if (( no < bells )); then status="$q/bell-1/closed.json"; fi
+                school status "$no" > "$status"
+                jq -e 'all(.[]; .state != "failed" and .state != "uncertain" and .state != "discarded")' "$status" >/dev/null || return 2
+                if ! jq -e --argjson n "$count" 'length==$n and all(.[]; .state=="delivered" and .cleaned)' "$status" >/dev/null; then ok=1; fi
+            done
+            return "$ok"
+        }
+        local wait_checks=220 rc
+        if [[ "$bells" == 2 ]]; then wait_checks=320; fi
+        for n in $(seq 1 "$wait_checks"); do
+            if all_delivered; then break; else rc=$?; fi
+            if [[ "$rc" != 1 ]]; then return "$rc"; fi
             sleep 3
         done
-        jq -e --argjson n "$count" 'length==$n and all(.[]; .state=="delivered" and .cleaned)' "$q/closed.json" >/dev/null
-        test "$(wc -l < "$q/uploads.log")" -eq "$count"
-        echo "QA_SCHOOL_RECEIPTS completed=$count after_first_eligible_s=$(($(date +%s)-eligible))"
+        all_delivered
+        test "$(wc -l < "$q/uploads.log")" -eq "$((count*bells))"
+        if [[ "$bells" == 2 ]]; then
+            local closed_second
+            closed_second=$(jq -er '[.[] | .closed_at] | max | select(type=="number")' "$q/closed.json")
+            jq -e --argjson t "$closed_second" 'all(.[]; .rendered_at >= $t)' "$q/bell-1/closed.json" >/dev/null
+            echo 'QA_SCHOOL_BACK_TO_BACK both queues settled once, no first-bell render committed during the second bell'
+        fi
+        echo "QA_SCHOOL_RECEIPTS completed=$((count*bells)) after_last_bell_first_eligible_s=$(($(date +%s)-eligible))"
     else
         test ! -f "$q/uploads.log"
     fi
@@ -287,6 +329,20 @@ PY_BATCH
     vm "set -e; test -z \"\$(sudo find '$spool' \\( -name '*.baci' -o -name '*.mp4' \\) -print -quit)\"; grep -Eq '^oom_kill +0$' /proc/vmstat"
     local variant=${trial:-standard}
     if [[ "$candidate" == 1 ]]; then variant=candidate; fi
-    python3 "$root/tests/fixtures/vps-school-results.py" "$q" "$results/measurement.json" "$count" "$quality" "$seconds" "$variant"
+    if [[ "$bells" == 2 ]]; then
+        mkdir -p "$results/bell-1" "$results/bell-2" "$q/bell-2"
+        for f in "$q"/received-*-B2.mp4; do name=$(basename "$f"); mv "$f" "$q/bell-2/${name%-B2.mp4}.mp4"; done
+        mv "$q"/received-*.mp4 "$q/bell-1/"
+        cp "$q/"{counters.jsonl,load.log,board.jsonl,closed.json,active-captures.json,cpu-model.txt} "$q/bell-2/"
+        for bell_no in 1 2; do
+            local evidence="$results/bell-$bell_no"
+            cp "$q/bell-$bell_no/"{counters.jsonl,board.jsonl,closed.json,active-captures.json} "$evidence/"
+            grep '^QA_SCHOOL_' "$q/bell-$bell_no/load.log" > "$evidence/media.log"
+            echo "QA_SCHOOL_VERIFY bell=$bell_no"
+            python3 "$root/tests/fixtures/vps-school-results.py" "$q/bell-$bell_no" "$evidence/measurement.json" "$count" "$quality" "$seconds" "$variant" --bell "$bell_no"
+        done
+    else
+        python3 "$root/tests/fixtures/vps-school-results.py" "$q" "$results/measurement.json" "$count" "$quality" "$seconds" "$variant"
+    fi
     echo 'QA_SCHOOL_PASS exact UDP workload and all planned receipts verified'
 )

@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -342,8 +343,14 @@ func run(dir, profile string) error {
 	rooms := make([]*room, schools)
 	var probe *audioProbe
 	if _, err := os.Stat(filepath.Join(dir, "udp-probe")); err == nil { probe = &audioProbe{begin:time.Now()} }
+	bellNumber := 1
+	if raw, err := os.ReadFile(filepath.Join(dir,"bell-number")); err == nil {
+		n, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+		if err != nil || n < 1 || n > 2 { return errors.New("invalid test bell number") }
+		bellNumber = n
+	}
 	for k, p := range plans {
-		want := fmt.Sprintf("test-%s-v4-c%d-%024x", strings.Repeat("a", 20), k+1, k+1)
+		want := fmt.Sprintf("test-%s-v4-c%d-%024x", strings.Repeat("a", 20), k+1, (bellNumber-1)*16+k+1)
 		if p.Room != want || len(p.Tickets) != pupils+1 {
 			return errors.New("unexpected room or seat count")
 		}

@@ -75,10 +75,10 @@ class Peer(BaseHTTPRequestHandler):
             assert fields['chat_id'] == b'-100321' and fields['supports_streaming'] == b'true' and fields['caption']
             file, message = 'received.mp4', 321
             if self.server.multi:
-                marker = re.search(rb'\bQA-C0[1-9]\b', fields['caption'])
+                marker = re.search(rb'\b(QA-C0[1-9])(-B2)?\b', fields['caption'])
                 assert marker is not None
                 classroom = marker[0].decode('ascii')
-                file, message = f'received-{classroom}.mp4', 3200 + int(classroom[-2:])
+                file, message = f'received-{classroom}.mp4', 3200 + int(marker[1][-2:]) + (100 if marker[2] else 0)
             self.save_video(file, fields['video'])
             self.reply_json({'ok': True, 'result': {'chat': {'id': -100321}, 'message_id': message}})
         elif platform == 'rubika' and endpoint == (RUBIKA_API, RUBIKA_PATH + 'requestSendFile'):

@@ -1,0 +1,101 @@
+name: Matched VPS efficiency and consecutive bell rehearsal
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/vps-efficiency-ab.yml
+permissions:
+  contents: read
+jobs:
+  matched:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 62
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version: '1.26.2'
+          cache-dependency-path: server/recorder/native/go.sum
+      - name: Prepare verified before/after packs and one media driver
+        env:
+          CGO_ENABLED: '0'
+          GOTOOLCHAIN: local
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sudo apt-get -q -o Acquire::Retries=3 -o APT::Update::Error-Mode=any update
+          sudo apt-get -qy -o Acquire::Retries=3 install --no-install-recommends qemu-system-x86 qemu-utils cloud-image-utils ffmpeg php8.3-cli php8.3-sqlite3 php8.3-curl
+          sudo chmod a+rw /dev/kvm
+          (cd server/recorder/native && go build -mod=readonly -trimpath -o "$RUNNER_TEMP/school-load" "$GITHUB_WORKSPACE/tests/fixtures/vps-school-load.go")
+          php8.3 -l tests/fixtures/vps-school-record.php
+          PYTHONPATH=tests python3 -m unittest test_deferred_recording test_native_capture test_classroom_site_release
+          name=baci-classroom-vps-offline-v1.3.3-ubuntu24.04-amd64.tar.gz
+          gh release download vps-offline-v1.3.3 --repo Maxess/bacirat-function --pattern "$name" --dir "$RUNNER_TEMP"
+          for v in baseline efficient; do bash scripts/prepare-vps-capacity-qa.sh "$RUNNER_TEMP/$name" "$RUNNER_TEMP/$v.tar.gz" "$v"; done
+      - name: Measure exact-count spool inventories with equal bytes and the same guards
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/efficiency/spool"
+          mkdir -p "$out"
+          for n in 18 256; do
+            python3 tests/fixtures/vps-spool-ab.py "$n" | tee "$out/$n.json" | while read -r line; do echo "::notice title=Spool inventory::$line"; done
+            jq -e '.candidate.p95_ms < .r4.p95_ms' "$out/$n.json" >/dev/null
+          done
+      - name: Rehearse two consecutive 120 second bells per arm on the same 2 vCPU runner VM
+        env:
+          BACI_QA_SCHOOL_CANDIDATE: '1'
+          BACI_QA_SCHOOL_CAPTURES: '9'
+          BACI_QA_SCHOOL_QUALITY: high
+          BACI_QA_SCHOOL_SECONDS: '120'
+          BACI_QA_SCHOOL_BELLS: '2'
+        run: |
+          set -euo pipefail
+          bad=0
+          for arm in baseline efficient; do
+            out="$RUNNER_TEMP/efficiency/$arm"
+            log="$RUNNER_TEMP/efficiency-$arm.log"
+            mkdir -p "$out"
+            site=0.4.27
+            if [[ "$arm" == efficient ]]; then site=0.4.28; fi
+            if BACI_QA_SCHOOL_SITE_VERSION="$site" BACI_QA_SCHOOL_RESULTS="$out" \
+                bash scripts/test-vps-offline-vm.sh "$RUNNER_TEMP/$arm.tar.gz" files 4096 '' default "$RUNNER_TEMP/school-load" 2>&1 | tee "$log"; then
+              for bell in 1 2; do
+                jq -c '{cpu_model, media, recordings, live: (.phases.live | {seconds,cpu_mean_pct,cpu_p95_pct,steal_mean_pct,ram_mib_used_peak,
+                       tx_mbps,rx_mbps,tx_pps,nic_drops,udp_receive_buffer_errors,udp_send_buffer_errors,recorder_spool_peak_bytes,
+                       sfu_cores:.units.sfu.cpu_cores_mean,recorder_cores:.units.recorder.cpu_cores_mean}),
+                       peak_spool_bytes: ([.phases[]|.recorder_spool_peak_bytes]|max), render: (.phases.render|{seconds,cpu_mean_pct,ram_mib_used_peak}),
+                       films: (.films | map_values({duration_s,bytes,rendered_after_eligible_s}))}' "$out/bell-$bell/measurement.json" \
+                  | while read -r line; do echo "::notice title=Efficiency $arm bell $bell::$line"; done
+              done
+              grep -E '^QA_SCHOOL_(JOIN|BACK_TO_BACK|RECEIPTS) ' "$log" | while read -r line; do echo "::notice title=Efficiency $arm::$line"; done
+            else
+              bad=1
+              proof=$(grep -E '^QA_SCHOOL|AssertionError|VM guest failure|[Ee]rror:' "$log" | tail -15 | paste -sd '|') || true
+              echo "::error title=Efficiency $arm::${proof:0:3600}"
+            fi
+          done
+          test "$bad" = 0
+          python3 - "$RUNNER_TEMP/efficiency" <<'PY'
+          import json, sys
+          from pathlib import Path
+          p=Path(sys.argv[1])
+          for bell in ('bell-1','bell-2'):
+              b,a=[json.loads((p/arm/bell/'measurement.json').read_text()) for arm in ('baseline','efficient')]
+              assert b['cpu_model']==a['cpu_model']
+              for trial in (b,a):
+                  assert trial['variant']=='candidate' and not trial['test_only_raised_capture_limit']
+                  assert trial['phases']['live']['min_live_sources']==9 and len(trial['films'])==9
+              for key in ('audio_kbps_median','camera_kbps_median','screen_kbps_median','audio_source_pps_median'):
+                  assert abs(a['media'][key]/b['media'][key]-1)<.03,f'unequal {bell} media offer: {key}'
+          print('::notice title=Consecutive A/B::36 decoded 720p films and verified once-only mock delivery; two matched bells on both versions.')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: efficiency-ab-evidence
+          path: ${{ runner.temp }}/efficiency
+          if-no-files-found: ignore
+          retention-days: 14
