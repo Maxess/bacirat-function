@@ -1,0 +1,50 @@
+name: Chromium classroom board over actual WebRTC
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/classroom-board-browser.yml
+      - tests/classroom-board-livekit-browser.cjs
+permissions:
+  contents: read
+jobs:
+  real-peers:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - name: Prepare the pinned SFU and actual Chromium
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sudo apt-get -q -o Acquire::Retries=3 -o APT::Update::Error-Mode=any update
+          sudo apt-get -qy -o Acquire::Retries=3 install --no-install-recommends php8.3-cli
+          w="$RUNNER_TEMP/board-browser"
+          mkdir -p "$w/site/assets/fonts/screen" "$w/sfu"
+          cp server/recorder/fonts/*.woff2 "$w/site/assets/fonts/screen/"
+          npm --prefix "$w" install --no-save --ignore-scripts playwright-core@1.60.0
+          sfu=livekit_1.13.11_linux_amd64.tar.gz
+          if ! gh release download v1.13.11 --repo livekit/livekit --pattern "$sfu" --dir "$w"; then
+            base=baci-classroom-vps-offline-v1.3.3-ubuntu24.04-amd64.tar.gz
+            gh release download vps-offline-v1.3.3 --repo Maxess/bacirat-function --pattern "$base" --dir "$w"
+            printf '%s  %s\n' 33f90e0fa350078bdfaa487adda3ba66f0182eb272f0f15e1b67a927ad3fe176 "$w/$base" | sha256sum --strict -c
+            tar -xzf "$w/$base" -O "baci-classroom-vps-offline/payload/$sfu" > "$w/$sfu"
+          fi
+          printf '%s  %s\n' 1e9ee90ca301e1842b2887fc77cb122759756a9c8aeb4334ee91de3325ec43fb "$w/$sfu" | sha256sum --strict -c
+          tar -xzf "$w/$sfu" -C "$w/sfu"
+          bin=$(find "$w/sfu" -type f -name livekit-server -print -quit)
+          test -x "$bin"
+          printf 'MPM_TEST_LIVEKIT=%s\nMPM_TEST_CHROMIUM=%s\nMPM_TEST_BACI=%s\nMPM_TEST_PLAYWRIGHT=%s\n' \
+            "$bin" "$(command -v google-chrome)" "$w/site" "$w/node_modules/playwright-core" >> "$GITHUB_ENV"
+      - name: Verify a real teacher and pupil, screen/permission UI, and packaged PDF
+        run: |
+          set -euo pipefail
+          export MPM_TEST_CLASSROOM_ZIP="$GITHUB_WORKSPACE/artifacts/school-classroom-plugin-v0.4.28.zip" MPM_TEST_PHP=php8.3
+          log="$RUNNER_TEMP/board-chromium.log"
+          trap 'proof=$(tail -55 "$log" | paste -sd "|"); echo "::error title=Chromium board::${proof:0:3600}"' ERR
+          node --test --test-concurrency=1 tests/classroom-board-livekit-browser.cjs tests/classroom-pdf-browser.cjs tests/classroom-screen-browser.cjs 2>&1 | tee "$log"
+          grep 'BACI_BOARD_RTC ' "$log" | while read -r line; do echo "::notice title=Real WebRTC board::$line"; done
+          grep -Fxq '# skipped 0' "$log"
