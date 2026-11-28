@@ -52,6 +52,8 @@ def metric(rows):
         swap_mib_peak=max(r['swap_kib'] for r in rows)/1024, tx_mbps=network('tx_bytes')*.000008, rx_mbps=network('rx_bytes')*.000008,
         tx_p95_mbps=percentile([(y['network']['tx_bytes']-x['network']['tx_bytes'])*.000008/dt for x,y,dt in windows]),
         tx_pps=network('tx_packets'), rx_pps=network('rx_packets'), nic_drops=delta(lambda r:r['network']['tx_dropped']+r['network']['rx_dropped']),
+        udp_receive_buffer_errors=delta(lambda r:r['udp'].get('RcvbufErrors',0)),
+        udp_send_buffer_errors=delta(lambda r:r['udp'].get('SndbufErrors',0)),
         udp_buffer_errors=delta(lambda r:r['udp'].get('RcvbufErrors',0)+r['udp'].get('SndbufErrors',0)),
         lo_tx_mbps=delta(lambda r:r['loopback']['tx_bytes'])*.000008/elapsed,
         oom_kills=delta(lambda r:r['oom']), recorder_source_bytes_per_second=max(0,delta(lambda r:r['source_bytes']))/elapsed,
@@ -121,7 +123,7 @@ def main():
     a = p.parse_args()
     work = a.workdir
     rows = [json.loads(line) for line in (work/'counters.jsonl').read_text().splitlines()]
-    results = {phase:metric(phase_rows) for phase in ('idle','join','warmup','live','wait','render')
+    results = {phase:metric(phase_rows) for phase in ('idle','join','warmup','live','reconnect','wait','render')
                if len(phase_rows := [r for r in rows if r['phase'] == phase]) >= 3}
     live = results['live']
     live_rows = [r for r in rows if r['phase'] == 'live']
@@ -177,9 +179,11 @@ def main():
                   max_late_audio_gap_pct=max(float(w['late_audio_gap_pct']) for w in media),
                   worst_receiver_late_audio_gap_pct=max(float(w['worst_audio_gap_pct']) for w in media), media_windows=len(media))
     print('QA_SCHOOL_OFFER', compact(bounds))
+    probe = work/'udp-probe.json'
+    measured = {'audio_probe':json.loads(probe.read_text())} if probe.exists() else {}
     a.output.write_text(json.dumps(dict(pupils=180,teachers=9,rooms=9,active_microphones=25,quality=a.quality,recordings=a.count,variant=a.trial,
         profile='full',test_only_raised_capture_limit=a.count == 9 and a.trial != 'candidate',phases=results,media=bounds,films=films,
-        **{k:overview[k] for k in ('cpu_model','active_whiteboards','strokes_per_board','max_board_delta_json_bytes','capture_bytes_by_room')}),indent=2)+'\n')
+        **measured, **{k:overview[k] for k in ('cpu_model','active_whiteboards','strokes_per_board','max_board_delta_json_bytes','capture_bytes_by_room')}),indent=2)+'\n')
 
 
 if __name__ == '__main__':

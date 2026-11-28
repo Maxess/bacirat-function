@@ -13,7 +13,9 @@ run_school_rehearsal() (
     if [[ -n "$trial" ]]; then
         [[ "$quality" == high && "$count" == 9 && ( "$trial" == baseline || "$trial" == udp-batch ) ]]
     fi
+    local udp_ab=${BACI_QA_SCHOOL_UDP_INTERVAL:-}
     if [[ "$candidate" == 1 ]]; then [[ "$count" == 9 && "$quality" == high && -z "$trial" ]]; fi
+    if [[ -n "$udp_ab" ]]; then [[ "$candidate" == 1 && ( "$udp_ab" == 1ms || "$udp_ab" == 500us ) ]]; fi
     mkdir -m 700 "$q"
     cp "$work/qa.crt" "$work/school.pem" "$work/school.key" "$q/"
     vm 'sudo cat /etc/school-classroom/site-pairing.json' > "$q/pair.json"
@@ -31,7 +33,7 @@ run_school_rehearsal() (
         # All payloads/keys stay in the disposable fixture; upload only counters and sanitized receipts.
         if [[ -f "$q/counters.jsonl" ]]; then cp "$q/counters.jsonl" "$results/counters.jsonl"; fi
         if [[ -f "$q/load.log" ]]; then grep '^QA_SCHOOL_' "$q/load.log" > "$results/media.log" || true; fi
-        for f in active-captures.json board.jsonl closed.json; do
+        for f in active-captures.json board.jsonl closed.json udp-probe.json; do
             if [[ -f "$q/$f" ]]; then cp "$q/$f" "$results/$f"; fi
         done
         if (( rc != 0 )); then
@@ -145,6 +147,29 @@ subprocess.run(['systemctl', 'restart', 'school-classroom-sfu.service'],check=Tr
 print(f'QA_SCHOOL_TRIAL {variant}: UDP 7882, loopback-only profiling in disposable VM')
 PY_SFU
     fi
+    if [[ -n "$udp_ab" ]]; then
+        # Both trials use the packaged .27/r4/LiveKit baseline. Only the
+        # interval changes, on a disposable synthetic installation.
+        vm "sudo /usr/bin/python3 -IB - '$udp_ab'" <<'PY_BATCH'
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+interval = sys.argv[1]
+assert interval in ('1ms', '500us')
+pair = json.loads(Path('/etc/school-classroom/site-pairing.json').read_text())
+assert pair['signal_url'] == 'wss://media.example.test' and pair['site'] == 'https://school.example.test/campus'
+config = Path('/etc/school-classroom/livekit.yaml')
+body = config.read_text()
+anchor = '  batch_io:\n    batch_size: 64\n    max_flush_interval: 1ms\n'
+assert body.count(anchor) == 1 and 'debug_handler:' not in body
+config.write_text(body.replace(anchor, anchor.replace('1ms', interval)) + '\ndebug_handler:\n  port: 7070\n')
+subprocess.run(['systemctl', 'restart', 'school-classroom-sfu.service'],check=True)
+print(f'QA_SCHOOL_UDP interval={interval} batch_size=64 profile=loopback')
+PY_BATCH
+        touch "$q/udp-probe"
+    fi
     python3 "$root/tests/fixtures/vps-record-inputs.py" "$q" "$quality"
     school init
     as_runner php -d "curl.cainfo=$q/qa.crt" -S 127.0.0.1:18391 "$php" > "$q/php.log" 2>&1 &
@@ -191,6 +216,7 @@ PY_SFU
     grep '^QA_SCHOOL_JOIN ' "$q/load.log"
     echo "QA_SCHOOL_ACTIVE confirmed captures=$count vp8=$quality steady_window_s=$seconds"
     phase live
+    if [[ -n "$udp_ab" ]]; then touch "$q/audio-steady"; fi
     local live_start=$SECONDS tick=0
     while (( SECONDS - live_start < seconds )); do
         tick=$((tick+1))
@@ -203,7 +229,22 @@ PY_SFU
     kill -0 "$sampler_pid"
     live_jobs >/dev/null
     vm 'test -z "$(sudo find /var/lib/school-classroom-recorder \( -name "*.mp4" -o -name .render \) -print -quit)"'
-    if [[ -n "$trial" ]]; then
+    if [[ -n "$udp_ab" ]]; then
+        phase reconnect
+        # Rejoin two listen-only pupils in each high-video room while all
+        # publishers continue. Their subscriptions stimulate new keyframes.
+        touch "$q/audio-reconnect"
+        for n in $(seq 1 22); do
+            if [[ -s "$q/udp-probe.json" ]]; then break; fi
+            kill -0 "$load_pid"
+            sleep 1
+        done
+        test -s "$q/udp-probe.json"
+        jq -ce 'select(.rejoin_peers == 4 and .stable.matched > 10000 and .burst.matched > 1000)' "$q/udp-probe.json" \
+            | sed 's/^/QA_SCHOOL_AUDIO /'
+        live_jobs >/dev/null
+    fi
+    if [[ -n "$trial$udp_ab" ]]; then
         phase profile
         vm 'curl --disable --noproxy "*" --fail --silent --show-error --max-time 18 "http://127.0.0.1:7070/debug/pprof/profile?seconds=12"' > "$q/sfu.pprof"
         test -s "$q/sfu.pprof"

@@ -1,0 +1,86 @@
+name: Current VPS UDP interval and audio tail A/B
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/vps-udp-tail.yml
+permissions:
+  contents: read
+jobs:
+  matched:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 38
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version: '1.26.2'
+          cache-dependency-path: server/recorder/native/go.sum
+      - name: Prepare the pinned capacity baseline and test driver
+        env:
+          CGO_ENABLED: '0'
+          GOTOOLCHAIN: local
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sudo apt-get -q -o Acquire::Retries=3 -o APT::Update::Error-Mode=any update
+          sudo apt-get -qy -o Acquire::Retries=3 install --no-install-recommends qemu-system-x86 qemu-utils cloud-image-utils ffmpeg php8.3-cli php8.3-sqlite3 php8.3-curl
+          sudo chmod a+rw /dev/kvm
+          (cd server/recorder/native && go build -mod=readonly -trimpath -o "$RUNNER_TEMP/school-load" "$GITHUB_WORKSPACE/tests/fixtures/vps-school-load.go")
+          name=baci-classroom-vps-offline-v1.3.3-ubuntu24.04-amd64.tar.gz
+          gh release download vps-offline-v1.3.3 --repo Maxess/bacirat-function --pattern "$name" --dir "$RUNNER_TEMP"
+          bash scripts/prepare-vps-capacity-qa.sh "$RUNNER_TEMP/$name" "$RUNNER_TEMP/vps-before.tar.gz"
+      - name: Run matched 1 ms and 500 microsecond trials on one runner
+        env:
+          BACI_QA_SCHOOL_CANDIDATE: '1'
+          BACI_QA_SCHOOL_CAPTURES: '9'
+          BACI_QA_SCHOOL_QUALITY: high
+          BACI_QA_SCHOOL_SECONDS: '60'
+        run: |
+          set -euo pipefail
+          bad=0
+          for interval in 1ms 500us; do
+            out="$RUNNER_TEMP/udp-tail/$interval"
+            mkdir -p "$out"
+            log="$RUNNER_TEMP/udp-$interval.log"
+            if BACI_QA_SCHOOL_UDP_INTERVAL="$interval" BACI_QA_SCHOOL_RESULTS="$out" \
+                bash scripts/test-vps-offline-vm.sh "$RUNNER_TEMP/vps-before.tar.gz" files 4096 '' default "$RUNNER_TEMP/school-load" 2>&1 | tee "$log"; then
+              test -s "$out/measurement.json"
+              go tool pprof -top -nodecount=18 "$out/sfu.pprof" > "$out/sfu-top.txt"
+              jq -c '{cpu_model, media, audio: (.audio_probe | del(.stable.bins,.burst.bins,.stable.bounds_ms,.burst.bounds_ms)),
+                        live: (.phases.live | {seconds,cpu_mean_pct,cpu_p95_pct,steal_mean_pct,ram_mib_used_peak,tx_mbps,rx_mbps,tx_pps,
+                          udp_receive_buffer_errors,udp_send_buffer_errors,nic_drops,sfu_cores:.units.sfu.cpu_cores_mean,recorder_cores:.units.recorder.cpu_cores_mean}),
+                        films: (.films|length)}' "$out/measurement.json" | while read -r line; do echo "::notice title=UDP $interval::$line"; done
+              grep -E '^QA_SCHOOL_(JOIN|RECEIPTS) ' "$log" | while read -r line; do echo "::notice title=UDP $interval::$line"; done
+            else
+              bad=1
+              proof=$(grep -E '^QA_SCHOOL|AssertionError|VM guest failure|[Ee]rror:' "$log" | tail -13 | paste -sd '|') || true
+              echo "::error title=UDP $interval::${proof:0:3600}"
+            fi
+          done
+          test "$bad" = 0
+          python3 - "$RUNNER_TEMP/udp-tail" <<'PY'
+          import json, sys
+          from pathlib import Path
+          base = Path(sys.argv[1])
+          before, after = [json.loads((base/i/'measurement.json').read_text()) for i in ('1ms','500us')]
+          assert before['cpu_model'] == after['cpu_model']
+          for k in ('audio_kbps_median', 'camera_kbps_median', 'screen_kbps_median', 'audio_source_pps_median'):
+              assert abs(after['media'][k] / before['media'][k] - 1) < .03, f'Unequal offered load: {k}'
+          for trial in (before, after):
+              assert trial['variant'] == 'candidate' and not trial['test_only_raised_capture_limit'] and len(trial['films']) == 9
+              for phase in ('stable','burst'):
+                  p = trial['audio_probe'][phase]
+                  assert p['unmatched'] / p['matched'] < .002, f'Insufficient Opus matching: {phase}'
+          print('::notice title=UDP A/B::Exact .27/r4, same host, inputs within 3%, nine verified films each, matching above 99.8%.')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: udp-tail-evidence
+          path: ${{ runner.temp }}/udp-tail
+          if-no-files-found: ignore
+          retention-days: 14

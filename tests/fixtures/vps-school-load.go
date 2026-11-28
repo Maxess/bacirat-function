@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -56,6 +57,9 @@ type stream struct {
 	fps           int
 	frames        [][]byte
 	sent          counts
+	stampIndex    map[string]int
+	stamps        []atomic.Int64
+	probe         *audioProbe
 }
 
 type room struct {
@@ -63,6 +67,118 @@ type room struct {
 	streams [slots]*stream
 	peers   [pupils + 1]*lksdk.Room
 	seen    [pupils + 1][slots]counts
+	firstPacket [pupils + 1][slots]atomic.Int64
+}
+
+// These timings are measured on the external driver, using its one monotonic
+// clock and unchanged, unique synthetic Opus payloads. They include publisher,
+// network, SFU and receiver overhead, not just an SFU flush or playout latency.
+var flightBounds = [...]int64{1, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20, 30, 40, 60, 100, 150, 250, 500}
+
+type flight struct {
+	bins [len(flightBounds) + 1]atomic.Uint64
+	unmatched atomic.Uint64
+}
+
+type audioProbe struct {
+	begin time.Time
+	phase atomic.Uint32
+	stable, burst flight
+}
+
+func (f *flight) summary() map[string]any {
+	var bins [len(flightBounds) + 1]uint64
+	var total uint64
+	for i := range bins {
+		bins[i] = f.bins[i].Load()
+		total += bins[i]
+	}
+	bound := func(pct uint64) int64 {
+		var seen uint64
+		for i, n := range bins {
+			seen += n
+			if seen * 100 >= total * pct {
+				if i < len(flightBounds) { return flightBounds[i] }
+				return 501 // Explicit overflow marker.
+			}
+		}
+		return 501
+	}
+	return map[string]any{"matched":total,"unmatched":f.unmatched.Load(),"p50_ms_le":bound(50),"p95_ms_le":bound(95),"p99_ms_le":bound(99),"bins":bins,"bounds_ms":flightBounds}
+}
+
+func (s *stream) observe(payload []byte, now time.Time) {
+	phase := s.probe.phase.Load()
+	if phase == 0 { return }
+	f := &s.probe.stable
+	if phase == 2 { f = &s.probe.burst }
+	i, ok := s.stampIndex[string(payload)]
+	if !ok { f.unmatched.Add(1); return }
+	t := s.stamps[i].Load()
+	dt := now.Sub(s.probe.begin).Microseconds() - t
+	// A cycle lasts two seconds. Never use an unmatched or stale record
+	// as a low-latency observation; report the matching coverage separately.
+	if t <= 0 || dt < 0 || dt > 1_000_000 { f.unmatched.Add(1); return }
+	bucket := sort.Search(len(flightBounds),func(j int) bool { return dt <= flightBounds[j]*1000 })
+	f.bins[bucket].Add(1)
+}
+
+func (p *audioProbe) run(ctx context.Context, dir, url string, rooms []*room) error {
+	wait := func(name string) bool {
+		for {
+			if _, err := os.Stat(filepath.Join(dir, name)); err == nil { return true }
+			select {
+			case <-ctx.Done(): return false
+			case <-time.After(50*time.Millisecond):
+			}
+		}
+	}
+	if !wait("audio-steady") { return ctx.Err() }
+	p.phase.Store(1)
+	if !wait("audio-reconnect") { return ctx.Err() }
+	p.phase.Store(2)
+	const n = 4
+	start := time.Now()
+	var all sync.WaitGroup
+	errs := make(chan error,n)
+	for _, r := range rooms[7:] {
+		for _, i := range []int{pupils-1,pupils} {
+			all.Go(func() {
+				old := r.peers[i]
+				sid := old.LocalParticipant.SID()
+				old.Disconnect()
+				for j := range r.streams { r.firstPacket[i][j].Store(0) }
+				if err := r.connect(url,i); err != nil { errs <- err; return }
+				if r.peers[i].LocalParticipant.SID() == sid { errs <- errors.New("fresh reconnect SID required") }
+			})
+		}
+	}
+	all.Wait()
+	close(errs)
+	if err := <-errs; err != nil { return err }
+	connected := time.Since(start).Milliseconds()
+	for {
+		ready := 0
+		for _, r := range rooms[7:] {
+			for _, i := range []int{pupils-1,pupils} {
+				for j := range r.streams {
+					if r.firstPacket[i][j].Load() > 0 { ready++ }
+				}
+			}
+		}
+		if ready == n * slots { break }
+		if time.Since(start) >= 10*time.Second { return errors.New("rejoined pupils did not receive every source") }
+		time.Sleep(20*time.Millisecond)
+	}
+	resumed := time.Since(start).Milliseconds()
+	// Keep an observation window after the last new subscription/keyframe.
+	time.Sleep(4*time.Second)
+	p.phase.Store(0)
+	out, err := json.Marshal(map[string]any{"rejoin_peers":n,"connected_ms":connected,"all_sources_resumed_ms":resumed,"stable":p.stable.summary(),"burst":p.burst.summary()})
+	if err != nil { return err }
+	file := filepath.Join(dir,"udp-probe.json")
+	if err := os.WriteFile(file+".tmp", append(out,'\n'),0600); err != nil { return err }
+	return os.Rename(file+".tmp",file)
 }
 
 func frames(path string, video bool) ([][]byte, error) {
@@ -159,7 +275,9 @@ func send(ctx context.Context, s *stream, track *lksdk.LocalTrack, faults chan<-
 			return
 		case <-tick.C:
 		}
-		p := s.frames[i%len(s.frames)]
+		index := i%len(s.frames)
+		p := s.frames[index]
+		if s.stamps != nil { s.stamps[index].Store(time.Since(s.probe.begin).Microseconds()) }
 		if err := track.WriteSample(media.Sample{Data: p, Duration: period}, nil); err != nil {
 			if ctx.Err() == nil {
 				faults <- errors.New("synthetic publisher stopped writing samples")
@@ -222,6 +340,8 @@ func run(dir, profile string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer cancel()
 	rooms := make([]*room, schools)
+	var probe *audioProbe
+	if _, err := os.Stat(filepath.Join(dir, "udp-probe")); err == nil { probe = &audioProbe{begin:time.Now()} }
 	for k, p := range plans {
 		want := fmt.Sprintf("test-%s-v4-c%d-%024x", strings.Repeat("a", 20), k+1, k+1)
 		if p.Room != want || len(p.Tickets) != pupils+1 {
@@ -235,6 +355,14 @@ func run(dir, profile string) error {
 			r.streams[2] = &stream{owner: 0, kind: livekit.TrackSource_CAMERA, codec: vp8, width: cw, height: cw, fps: cf, frames: cam}
 		} else if k == 8 {
 			r.streams[2] = &stream{owner: 0, kind: livekit.TrackSource_SCREEN_SHARE, codec: vp8, width: sw, height: sh, fps: sf, frames: screen}
+		}
+		for _, s := range r.streams {
+			s.probe = probe
+			if probe == nil || s.kind != livekit.TrackSource_MICROPHONE { continue }
+			s.stamps = make([]atomic.Int64,len(s.frames))
+			s.stampIndex = make(map[string]int,len(s.frames))
+			for j, payload := range s.frames { s.stampIndex[string(payload)] = j }
+			if len(s.stampIndex) != len(s.frames) { return errors.New("cannot match duplicate synthetic Opus payloads") }
 		}
 		created, err := api.CreateRoom(ctx, &livekit.CreateRoomRequest{Name: p.Room, EmptyTimeout: 90, MaxParticipants: 24})
 		if err != nil || created.GetMaxParticipants() != 24 {
@@ -284,7 +412,16 @@ func run(dir, profile string) error {
 	if err := os.WriteFile(filepath.Join(dir, "peers-joined"), nil, 0600); err != nil {
 		return err
 	}
-	faults := make(chan error, schools*slots)
+	faults := make(chan error, schools*slots+1)
+	probeDone := make(chan struct{})
+	if probe != nil {
+		probeCtx, stopProbe := context.WithCancel(ctx)
+		go func() {
+			defer close(probeDone)
+			if err := probe.run(probeCtx,dir,pair.URL,rooms); err != nil && probeCtx.Err() == nil { faults <- err }
+		}()
+		defer func() { stopProbe(); <-probeDone }()
+	}
 	broadcast, stop := context.WithCancel(ctx)
 	var writers sync.WaitGroup
 	defer func() { stop(); writers.Wait() }()
@@ -356,7 +493,7 @@ func run(dir, profile string) error {
 					case livekit.TrackSource_SCREEN_SHARE:
 						share += payload
 					}
-					for pi := range r.peers {
+					for pi := 0; pi < len(r.peers); pi++ {
 						if pi == s.owner {
 							continue
 						}
@@ -384,7 +521,7 @@ func run(dir, profile string) error {
 				fmt.Printf("QA_SCHOOL_MEDIA window=%d min_payload_ratio=%.3f min_offer_pace=%.3f audio_kbps=%.1f camera_kbps=%.1f screen_kbps=%.1f audio_source_pps=%.0f late_audio_gap_pct=%.4f worst_audio_gap_pct=%.4f\n",
 					windows, minBytes, minPace, float64(audio)*.008/t, float64(camera)*.008/t, float64(share)*.008/t, float64(speakerPackets)/t,
 					100*float64(lateGaps)/float64(max(1, audioGaps)), 100*worstGapRate)
-				if minPace < .96 || minBytes < .90 {
+				if minPace < .96 || (minBytes < .90 && !recentReconnect(dir,previous)) {
 					return errors.New("steady media was under-driven or did not reach every intended subscriber")
 				}
 				if windows == 1 {
@@ -411,6 +548,12 @@ func run(dir, profile string) error {
 			}
 		}
 	}
+}
+
+func recentReconnect(dir string, previous time.Time) bool {
+	info, err := os.Stat(filepath.Join(dir,"audio-reconnect"))
+	if err != nil { return false }
+	return info.ModTime().After(previous.Add(-12*time.Second))
 }
 
 func main() {
