@@ -37,7 +37,7 @@ function packaged(t) {
     };
     return {render,entryRequest,asset,serve};
 }
-async function serveBrowser(t, handler) {
+async function serveBrowser(t, handler, browserArgs = []) {
     const server = createServer((req,res) => {
         Promise.resolve().then(() => handler(req,res,new URL(req.url,'http://fixture'))).catch(error=>{
             if (!res.headersSent) res.writeHead(500).end(String(error)); else res.destroy(error);
@@ -45,7 +45,7 @@ async function serveBrowser(t, handler) {
     });
     await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
     t.after(()=>{server.closeAllConnections(); server.close();});
-    const browser = await require(playwright).chromium.launch({executablePath:chromium,headless:true,args:['--no-sandbox']});
+    const browser = await require(playwright).chromium.launch({executablePath:chromium,headless:true,args:['--no-sandbox',...browserArgs]});
     t.after(()=>browser.close());
     return {browser,origin:`http://127.0.0.1:${server.address().port}`};
 }

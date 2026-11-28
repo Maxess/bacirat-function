@@ -21,12 +21,14 @@ function signed(claims) {
     return body+'.'+createHmac('sha256',secret).update(body).digest('base64url');
 }
 function ticket(identity) {
-    return signed({sub:identity,video:{roomJoin:true,room,canSubscribe:true,canPublish:false,canPublishData:identity==='teacher-1'}});
+    return signed({sub:identity,video:{roomJoin:true,room,canSubscribe:true,canPublish:false,canPublishData:identity==='teacher-1'},
+        exp:Math.floor(Date.now()/1000)+35});
 }
-async function dataGrant(identity, allowed) {
+async function dataGrant(identity, allowed, media = false) {
     const response=await fetch(url+'/twirp/livekit.RoomService/UpdateParticipant',{
         method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+signed({video:{roomAdmin:true,room}})},
-        body:JSON.stringify({room,identity,permission:{canSubscribe:true,canPublish:false,canPublishData:allowed}})
+        body:JSON.stringify({room,identity,permission:{canSubscribe:true,canPublish:media,canPublishData:allowed,
+            ...(media?{canPublishSources:['MICROPHONE','CAMERA']}:{})}})
     });
     assert.equal(response.status,200,await response.text());
 }
@@ -107,14 +109,14 @@ function observeRoom() {
     window.LivekitClient={...lk,Room:ObservedRoom};
 }
 
-test('real lossy board notices are commit-only, recover from loss and respect SID and data grants',
-    {skip:skip||!livekit, timeout:90_000}, async t => {
+test('real peers open a cold bell, recover their SID, sync the board and can stop receiving only video',
+    {skip:skip||!livekit, timeout:110_000}, async t => {
     const sfuDiag=await isolatedSfu(t);
     const fixture=packaged(t);
     const staffHTML=fixture.render('teacher',true), pupilHTML=fixture.render('student',true);
     const members = {}, ops = [], log = [];
-    const lesson='qa-lesson', epoch='qa-epoch', owner='teacher-1', pupil='student-1';
-    let head=0, seq=0, unlock, replay=false;
+    const lesson='qa-lesson', epoch='qa-epoch', owner='teacher-1';
+    let head=0, seq=0, unlock, replay=false, startedAt, admittedAt;
     let lastStage='first admission';
     const {browser,origin}=await serveBrowser(t,async (req,res,pageUrl)=>{
         if (pageUrl.pathname==='/teacher') return send(res,'text/html; charset=UTF-8',staffHTML);
@@ -130,8 +132,17 @@ test('real lossy board notices are commit-only, recover from loss and respect SI
             assert.equal(input.class,22);
             assert.equal(req.headers['x-classroom-csrf'],'fixture');
             log.push({action:input.action,staff,sid:input.sid,ink:input.ink,at:performance.now()});
-            const result={ok:true,phase:'live',lesson,epoch,ready:true,joinable:true,slot:11,mediaMode:'audio'};
-            if (input.action==='ticket') Object.assign(result,{url:url.replace('http','ws'),token:ticket(identity)});
+            const result={ok:true,phase:'live',lesson,epoch,ready:true,joinable:true,slot:11,mediaMode:'standard',cameraCodec:'vp8'};
+            if (input.action==='open') {
+                assert.equal(input.slot,11);
+                assert.ok(staff && !startedAt,'the cold bell is opened exactly once, by staff');
+                startedAt=performance.now();
+                Object.assign(result,{phase:'starting',url:url.replace('http','ws'),token:ticket(identity)});
+            } else if (!startedAt) {
+                assert.equal(input.action,'status');
+                return send(res,'application/json',JSON.stringify({ok:true,phase:'idle',ready:true,
+                    schedule:{choices:[{id:11,label:'زنگ ۱'}]}}));
+            } else if (input.action==='ticket') Object.assign(result,{url:url.replace('http','ws'),token:ticket(identity)});
             else if (input.action==='leave') {
                 if (members[identity]===input.sid) delete members[identity];
             } else if (input.action==='board-ink') {
@@ -144,6 +155,11 @@ test('real lossy board notices are commit-only, recover from loss and respect SI
                 ops.push({...op,from,seq:head,author:owner});
                 Object.assign(result,{ink:head,seq});
             } else if (input.sid) {
+                assert.equal(input.lesson,lesson); assert.equal(input.epoch,epoch);
+                if (!admittedAt) {
+                    assert.ok(staff && performance.now()-startedAt<32_000, 'staff connects within the school startup window');
+                    admittedAt=performance.now();
+                }
                 members[identity]=input.sid;
                 result.admitted=true;
                 const reset=input.board!==1;
@@ -160,13 +176,14 @@ test('real lossy board notices are commit-only, recover from loss and respect SI
             return send(res,'application/json',JSON.stringify(result),{'Cache-Control':'no-store'});
         }
         if (!fixture.serve(pageUrl,res)) res.writeHead(404).end();
-    });
-    async function open(path) {
-        const page=await browser.newPage();
+    }, ['--use-fake-device-for-media-stream','--autoplay-policy=no-user-gesture-required']);
+    async function open(path, beforeGoto) {
+        const page=await browser.newPage({permissions:path==='/teacher'?['microphone','camera']:[]});
         page.on('pageerror',error=>t.diagnostic(error.message));
         // Model two different active devices rather than two tabs with one foreground.
         await page.addInitScript(()=>Object.defineProperty(document,'hidden',{get:()=>false}));
-        await page.goto(origin+path);
+        await beforeGoto?.(page);
+        await page.goto(origin+path,{waitUntil:'domcontentloaded'});
         try {
             await page.waitForFunction(()=>window.boardQA?.widget?.position().board===1,undefined,{timeout:22_000});
         } catch (error) {
@@ -182,7 +199,24 @@ test('real lossy board notices are commit-only, recover from loss and respect SI
         }
         return page;
     }
-    const teacher=await open('/teacher'), student=await open('/student');
+    const isMediaSdk=url=>url.searchParams.get('name')==='assets/livekit-client.umd.js';
+    let releaseSdk, sdkRequested;
+    const sdkHold=new Promise(resolve=>{releaseSdk=resolve;});
+    const sdkRequest=new Promise(resolve=>{sdkRequested=resolve;});
+    t.after(releaseSdk);
+    const coldTeacher=open('/teacher',page=>page.route(isMediaSdk,async route=>{
+        sdkRequested(page); await sdkHold; return route.continue();
+    }));
+    // Assert while the actual SDK response is held, not from a comment or timer that may miss a race.
+    await Promise.race([sdkRequest, coldTeacher.then(()=>assert.fail('missing cold SDK request')), delay(8000).then(()=>assert.fail('SDK not requested'))]);
+    try {
+        assert.equal(startedAt,undefined,'no server-side startup window or ticket starts before the SDK loads');
+        const page=await sdkRequest;
+        await page.getByText('در حال بارگیری بخش صدا و ویدیو…',{exact:true}).waitFor({timeout:2000});
+        assert.equal(await page.locator('#waiting').getAttribute('data-wait'),'yes');
+    } finally { releaseSdk(); }
+    const teacher=await coldTeacher, student=await open('/student');
+    assert.ok(admittedAt-startedAt>=0 && admittedAt-startedAt<32_000);
     await student.waitForFunction(()=>window.boardQA.hints>=1,{},{timeout:8_000});
     assert.equal(await student.evaluate(()=>window.boardQA.room.localParticipant.permissions.canPublishData),false);
     assert.equal(await teacher.evaluate(()=>window.boardQA.room.localParticipant.permissions.canPublishData),true);
@@ -257,4 +291,35 @@ test('real lossy board notices are commit-only, recover from loss and respect SI
     await rejoined.waitForFunction(()=>window.boardQA.widget.position().ink===8,undefined,{timeout:3000});
     for (const cursor of [0,2,4,6]) assert.ok(log.some(r=>!r.staff && r.sid===newSID && r.ink===cursor),`new SID consumes page after cursor ${cursor}`);
     t.diagnostic(`BACI_BOARD_RTC Chromium teacher+pupil; same SID after dropped school response ${schoolRecovery.toFixed(1)} ms; ink after DB-ack fixture ${normal.toFixed(1)} ms; dropped recovery ${lostMs.toFixed(1)} ms; real permission revoke/restore, new SID, and paged checkpoints passed`);
+    await dataGrant(owner,true,true);
+    const sourceGrant = () => window.boardQA.room.localParticipant.permissions?.canPublishSources?.includes(2);
+    await teacher.waitForFunction(sourceGrant,undefined,{timeout:5000});
+    await rejoined.getByRole('checkbox',{name:/دریافت فقط صدا/}).uncheck();
+    await teacher.evaluate(async () => {
+        // Chromium supplies synthetic tracks; the real SDK and SFU carry their RTP.
+        const raw=await navigator.mediaDevices.getUserMedia({audio:true,video:{width:320,height:240,frameRate:10}});
+        const lk=window.LivekitClient, local=window.boardQA.room.localParticipant;
+        await local.publishTrack(raw.getAudioTracks()[0],{source:lk.Track.Source.Microphone,dtx:false});
+        await local.publishTrack(raw.getVideoTracks()[0],{source:lk.Track.Source.Camera,videoCodec:'vp8',simulcast:false});
+    });
+    const decoded = async ({owner,minAudio,minFrames,videoOff})=>{
+        const peer=window.boardQA.room.remoteParticipants.get(owner);
+        const mic=peer?.getTrackPublication('microphone'), camera=peer?.getTrackPublication('camera');
+        const metric=async (pub,kind,key)=>{
+            const report=await pub?.track?.getRTCStatsReport();
+            return report ? [...report.values()].find(row=>row.type==='inbound-rtp' && row.kind===kind)?.[key] ?? 0 : 0;
+        };
+        const packets=await metric(mic,'audio','packetsReceived');
+        if (packets<=minAudio) return false;
+        if (videoOff ? camera?.isDesired!==false || camera.isSubscribed : await metric(camera,'video','framesDecoded')<minFrames) return false;
+        return packets;
+    };
+    const received=await (await rejoined.waitForFunction(decoded,{owner,minAudio:10,minFrames:3,videoOff:false},{timeout:10_000})).jsonValue();
+    const priorTickets=log.filter(r=>r.action==='ticket').length;
+    await rejoined.getByRole('checkbox',{name:/دریافت فقط صدا/}).check();
+    await rejoined.waitForFunction(decoded,{owner,minAudio:received+10,minFrames:0,videoOff:true},{timeout:6000});
+    assert.equal(await rejoined.evaluate(()=>window.boardQA.room.localParticipant.sid),newSID);
+    assert.equal(log.filter(r=>r.action==='ticket').length,priorTickets);
+    assert.equal(await rejoined.locator('#live-panel').isVisible(),true);
+    t.diagnostic(`BACI_ENTRY cold staff: SDK first, admission ${(admittedAt-startedAt).toFixed(1)} ms after open in the fixture; real camera frames before audio-only, ongoing audio RTP without video or a new SID after toggle`);
 });
