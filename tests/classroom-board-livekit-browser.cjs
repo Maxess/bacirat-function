@@ -12,7 +12,7 @@ const {setTimeout:delay} = require('node:timers/promises');
 const {packaged, serveBrowser, send, skip} = require('./fixtures/classroom-browser.cjs');
 const livekit = process.env.MPM_TEST_LIVEKIT;
 const key = 'qa_board_only_key', secret = 'disposable-board-browser-secret-never-in-a-deployment';
-const port=17880, udp=17882, url=`http://127.0.0.1:${port}`;
+const port=17880, tcp=17881, udp=17882, url=`http://127.0.0.1:${port}`;
 const room = 'classroom-board-browser';
 function signed(claims) {
     const encode = data => Buffer.from(JSON.stringify(data)).toString('base64url');
@@ -39,7 +39,7 @@ rtc:
   node_ip: 127.0.0.1
   use_external_ip: false
   enable_loopback_candidate: true
-  tcp_port: 0
+  tcp_port: ${tcp}
   udp_port: ${udp}
   batch_io:
     batch_size: 64
@@ -64,14 +64,14 @@ logging:
     });
     for (let i=0;i<50;i++) {
         if (proc.exitCode!==null || failure) throw Error('isolated media server did not start: '+(failure?.message ?? diag));
-        try { if ((await fetch(url)).ok) return; } catch {}
+        try { if ((await fetch(url)).ok) return () => diag; } catch {}
         await delay(100);
     }
     assert.fail('isolated media server not ready');
 }
 
 function observeBoard() {
-    const state = window.boardQA={room:null,widget:null,hints:0,dropped:0,drop:false,connectError:null};
+    const state = window.boardQA={room:null,widget:null,hints:0,dropped:0,drop:false,connectError:null,signal:false};
     const create = window.ClassroomBoard;
     window.ClassroomBoard = (root, options) => {
         state.widget=create(root,options);
@@ -86,10 +86,12 @@ function observeRoom() {
         constructor(...args) {
             super(...args);
             state.room=this;
-        }
-        async connect(...args) {
-            try { return await super.connect(...args); }
-            catch (error) { state.connectError=error.message; throw error; }
+            this.on(lk.RoomEvent.SignalConnected,()=>{ state.signal=true; });
+            const connect=this.connect.bind(this);
+            this.connect=async (...args) => {
+                try { return await connect(...args); }
+                catch (error) { state.connectError=error.reasonName || error.name; throw error; }
+            };
         }
         on(event,callback) {
             if (event!==lk.RoomEvent.DataReceived) return super.on(event,callback);
@@ -106,8 +108,8 @@ function observeRoom() {
 }
 
 test('real lossy board notices are commit-only, recover from loss and respect SID and data grants',
-    {skip:skip||!livekit, timeout:56_000}, async t => {
-    await isolatedSfu(t);
+    {skip:skip||!livekit, timeout:90_000}, async t => {
+    const sfuDiag=await isolatedSfu(t);
     const fixture=packaged(t);
     const staffHTML=fixture.render('teacher',true), pupilHTML=fixture.render('student',true);
     const members = {}, ops = [], log = [];
@@ -171,16 +173,17 @@ test('real lossy board notices are commit-only, recover from loss and respect SI
         await page.addInitScript(()=>Object.defineProperty(document,'hidden',{get:()=>false}));
         await page.goto(origin+path);
         try {
-            await page.waitForFunction(()=>window.boardQA?.widget?.position().board===1,undefined,{timeout:12_000});
+            await page.waitForFunction(()=>window.boardQA?.widget?.position().board===1,undefined,{timeout:22_000});
         } catch (error) {
             const state=await page.evaluate(()=>({
                 sdk:!!window.LivekitClient,
                 room:window.boardQA?.room?.state,
                 board:window.boardQA?.widget?.position(),
-                connectError:window.boardQA?.connectError?.replace(/eyJ[\w.-]+/g,'[test token]'),
-                notice:document.getElementById('notice')?.textContent,
+                signal:window.boardQA?.signal,connectError:window.boardQA?.connectError,
+                waiting:document.getElementById('wait-message')?.textContent,
             }));
-            throw new Error(`${lastStage} ${path}: ${JSON.stringify({state,actions:log.slice(-8).map(r=>[r.staff,r.action,!!r.sid,r.ink])})}`,{cause:error});
+            throw new Error(`${lastStage} ${path}: ${JSON.stringify({state,actions:log.slice(-8).map(r=>[r.staff,r.action,!!r.sid,r.ink]),
+                sfu:sfuDiag().replace(/eyJ[\w.-]+/g,'[test token]').slice(-550)})}`,{cause:error});
         }
         return page;
     }

@@ -66,6 +66,13 @@ test('old or media-blocked Chromium can open the lesson with no JS and no automa
     await old.getByText('<b>پیام تازهٔ آزمون</b>',{exact:true}).waitFor();
     await old.close();
 
+    const blockedScript=await browser.newPage();
+    await blockedScript.route(url=>url.searchParams.get('name')==='assets/classroom.js',route=>route.abort('failed'));
+    await blockedScript.goto(origin);
+    await blockedScript.getByText(/PAGE-ASSETS/).waitFor();
+    assert.equal(await blockedScript.locator('#waiting').getAttribute('data-wait'),'no');
+    await blockedScript.close();
+
     const htmlOnly=await browser.newPage({javaScriptEnabled:false,viewport:{width:320,height:600}});
     await htmlOnly.goto(origin);
     await htmlOnly.getByText(/ورود صوتی به جاوااسکریپت/).waitFor();
