@@ -6,6 +6,7 @@ on:
       - .github/workflows/classroom-board-ab.yml
       - tests/fixtures/vps-board-*.php
       - tests/fixtures/vps-board-*.cjs
+      - tests/fixtures/classroom-ui.cjs
       - artifacts/school-classroom-plugin-v0.4.28.zip
 permissions:
   contents: read
@@ -48,6 +49,8 @@ jobs:
           mkdir -p "$out"
           mapfile -t cpus < <(python3 -c 'import os; print(*sorted(os.sched_getaffinity(0)),sep="\n")')
           test "${#cpus[@]}" -ge 4
+          printf '::notice title=Board runner::%s; allocated CPUs %s\n' "$(awk -F': ' '/^model name/{print $2; exit}' /proc/cpuinfo)" "${cpus[*]}"
+          bad=0
           for v in 0.4.27 0.4.28; do
             export BACI_BOARD_QA_SITE="$RUNNER_TEMP/site-$v"
             mkdir "$BACI_BOARD_QA_SITE"
@@ -57,29 +60,38 @@ jobs:
             pid=$!
             trap 'kill -TERM -- "-$pid" 2>/dev/null || true' EXIT
             sleep 1
-            if ! taskset -c "${cpus[2]},${cpus[3]}" node tests/fixtures/vps-board-load.cjs "$BACI_BOARD_QA_SITE/assets/classroom.js" "$out/$v.json" "$pid"; then
-              tail -18 "$RUNNER_TEMP/board-$v.log"
+            cli="$RUNNER_TEMP/board-client-$v.log"
+            if ! taskset -c "${cpus[2]},${cpus[3]}" node tests/fixtures/vps-board-load.cjs "$BACI_BOARD_QA_SITE/assets/classroom.js" "$out/$v.json" "$pid" 2>&1 | tee "$cli"; then
+              bad=1
+              proof=$(grep -E 'QA_BOARD_FAILURE|Error:' "$cli" | tail -8 | paste -sd '|') || true
+              echo "::error title=Board client $v::${proof:0:2300}"
               proof=$(grep 'QA board:' "$RUNNER_TEMP/board-$v.log" | tail -10 | paste -sd '|') || true
-              echo "::error title=Board PHP $v::${proof:0:3000}"
-              exit 1
+              if [[ -n "$proof" ]]; then echo "::error title=Board PHP $v::${proof:0:2300}"; fi
             fi
-            kill -TERM -- "-$pid"
+            kill -TERM -- "-$pid" 2>/dev/null || true
             wait "$pid" || true
             trap - EXIT
-            jq -c 'to_entries[]' "$out/$v.json" | while read -r line; do echo "::notice title=Board $v::$line"; done
+            if [[ -s "$out/$v.json" ]]; then
+              jq -c 'to_entries[]' "$out/$v.json" | while read -r line; do echo "::notice title=Board $v::$line"; done
+            fi
           done
+          test "$bad" = 0
           python3 - "$out" <<'PY'
           import json, sys
           from pathlib import Path
           p = Path(sys.argv[1])
           b, a = [json.loads((p/(v+'.json')).read_text()) for v in ('0.4.27','0.4.28')]
           assert b['idle']['head_publishes'] == 0 and a['idle']['head_publishes'] > 0
+          print('::notice title=Board ratios::' + json.dumps({key: {metric: round(a[key][metric] / b[key][metric],4)
+                 for metric in ('requests_per_s','sql_per_s','php_cpu_cores')} for key in ('idle','writing','missed')}), flush=True)
           for phase, limit in [('idle',.75),('writing',.85)]:
               before, after = b[phase], a[phase]
               assert before['cursor_observations'] == after['cursor_observations']
               assert after['requests_per_s'] < before['requests_per_s'] * limit, phase
               assert after['sql_per_s'] < before['sql_per_s'] * limit, phase
           assert a['writing']['ink_p95_ms'] <= b['writing']['ink_p95_ms'] + 100
+          assert a['missed']['cursor_observations'] == b['missed']['cursor_observations'] == 140
+          assert a['missed']['head_publishes'] == 0
           print('::notice title=Board A/B::Equal stroke/cursor counts; fewer PHP requests and SQL calls; no normal-path p95 regression over 100 ms.')
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

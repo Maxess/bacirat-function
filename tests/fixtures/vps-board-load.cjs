@@ -8,7 +8,8 @@ const {fixture} = require('./classroom-ui.cjs');
 const [asset, out, serverPid] = process.argv.slice(2);
 const endpoint = 'http://127.0.0.1:18392/board';
 const rooms = [], failures = [], report = {};
-let phase = '', lost = false, running = true;
+let phase = 'warmup', lost = false, running = true;
+const results = {};
 const classroomScript = readFileSync(asset,'utf8');
 const clk = +execFileSync('getconf',['CLK_TCK']).toString();
 const parents = p => readFileSync(`/proc/${p}/task/${p}/children`,'utf8').trim().split(/\s+/).filter(Boolean).map(Number);
@@ -101,17 +102,21 @@ async function measure(name, ms, activity) {
     const events = await activity?.(start) ?? [];
     await delay(Math.max(0,ms-(performance.now()-start)));
     const elapsed=(performance.now()-start)/1000, after=readProc();
-    phase='';
-    assert.ok(!failures.length, failures.slice(0,4).join(' | '));
+    phase='between windows';
     const expected=events.length*20, waits=events.flatMap(e=>e.wait);
-    assert.equal(waits.length,expected,`${name}: all committed cursors observed by all 140 pupils`);
     const requests=Object.values(w.requests).reduce((a,b)=>a+b,0);
-    return {tabs:147,seconds:round(elapsed),requests:w.requests,requests_per_s:round(requests/elapsed),
+    const stats = {tabs:147,seconds:round(elapsed),requests:w.requests,requests_per_s:round(requests/elapsed),
         sql_per_s:round(w.sql/elapsed),body_bytes_per_s:round(w.bodyBytes/elapsed),head_publishes:w.notices,
-        batch_ink_commits:events.length,cursor_observations:expected,ink_p50_ms:round(percent(waits,.5)),
+        batch_ink_commits:events.length,cursor_observations:waits.length,expected_cursor_observations:expected,ink_p50_ms:round(percent(waits,.5)),
         ink_p95_ms:round(percent(waits,.95)),ink_p99_ms:round(percent(waits,.99)),ink_max_ms:waits.length?round(Math.max(...waits)):null,
         lock_entry_p95_ms:round(percent(w.lock,.95)),php_app_p95_ms:round(percent(w.app,.95)),
         php_cpu_cores:round((after.ticks-before.ticks)/clk/elapsed),php_rss_sum_mib_at_end:round(after.rssMiB)};
+    results[name] = stats;
+    writeFileSync(out,JSON.stringify(results,null,2)+'\n');
+    console.log('QA_BOARD_PHASE',JSON.stringify({name,...stats}));
+    assert.ok(!failures.length, failures.slice(0,4).join(' | '));
+    assert.equal(waits.length,expected,`${name}: all committed cursors observed by all 140 pupils`);
+    return stats;
 }
 async function run() {
     for (let c=1;c<=7;c++) { rooms.push(room(c)); await delay(125); }
@@ -119,8 +124,11 @@ async function run() {
     await delay(5500);
     const notices = rooms.map(r=>r.peers[0].position?.notice === true);
     assert.ok(notices.every(n=>n) || notices.every(n=>!n),'head capability must be negotiated for all seven test rooms or none');
-    if (notices[0]) assert.ok(rooms.every(r=>r.receivers.size===20),'all seven fanout groups must actually receive the supported notices');
-    const idle=await measure('idle',18_000);
+    if (notices[0]) {
+        const reached = rooms.map(r=>r.receivers.size);
+        assert.deepEqual(reached,Array(7).fill(20),'all seven fanout groups must actually receive the supported notices');
+    }
+    await measure('idle',18_000);
     const writing=await measure('writing',28_000,async start=>{
         const events=[];
         for(let i=0;i<24;i++) {
@@ -132,13 +140,13 @@ async function run() {
         return events;
     });
     await delay(2400);
-    const missed=await measure('no_hint',6500,async()=>{
+    const missed=await measure('missed',6500,async()=>{
         lost=true; // First commit starts with a warm notice path, then all datagrams stop.
         return Promise.all(rooms.map(write));
     });
-    assert.ok((writing.ink_p99_ms ?? Infinity)<1200 && (missed.ink_max_ms ?? Infinity)<3200,'ink recovery deadline');
-    return {idle,writing,missed};
+    assert.ok((writing.ink_p99_ms ?? Infinity)<1200,'healthy ink p99 <= 1200 ms');
+    assert.ok((missed.ink_max_ms ?? Infinity)<3200,'missed-hint worst ink <= 3200 ms');
 }
-run().then(result=>{running=false; writeFileSync(out,JSON.stringify(result,null,2)+'\n'); process.exit(0);},error=>{
-    running=false; console.error(error); process.exit(1);
+run().then(()=>{running=false; process.exit(0);},error=>{
+    running=false; console.error('QA_BOARD_FAILURE',phase,error.message,failures.slice(0,4)); process.exit(1);
 });

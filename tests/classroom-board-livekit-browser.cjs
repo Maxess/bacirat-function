@@ -1,6 +1,7 @@
 // Two real Chromium pages, the packaged room/SDK, and an isolated LiveKit SFU.
 // School admission/ink is deterministic HTTP here; MariaDB is tested separately.
 const assert = require('node:assert/strict');
+const {test} = require('node:test');
 const {createHmac} = require('node:crypto');
 const {spawn} = require('node:child_process');
 const {mkdtempSync, rmSync, writeFileSync} = require('node:fs');
@@ -13,11 +14,21 @@ const livekit = process.env.MPM_TEST_LIVEKIT;
 const key = 'qa_board_only_key', secret = 'disposable-board-browser-secret-never-in-a-deployment';
 const port=17880, udp=17882, url=`http://127.0.0.1:${port}`;
 const room = 'classroom-board-browser';
-function ticket(identity) {
+function signed(claims) {
     const encode = data => Buffer.from(JSON.stringify(data)).toString('base64url');
-    const body = encode({alg:'HS256',typ:'JWT'})+'.'+encode({iss:key,sub:identity,exp:Math.floor(Date.now()/1000)+180,
-        video:{roomJoin:true,room,canSubscribe:true,canPublish:false,canPublishData:identity==='teacher-1'}});
+    const body = encode({alg:'HS256',typ:'JWT'})+'.'+encode({iss:key,exp:Math.floor(Date.now()/1000)+180,
+        ...claims});
     return body+'.'+createHmac('sha256',secret).update(body).digest('base64url');
+}
+function ticket(identity) {
+    return signed({sub:identity,video:{roomJoin:true,room,canSubscribe:true,canPublish:false,canPublishData:identity==='teacher-1'}});
+}
+async function dataGrant(identity, allowed) {
+    const response=await fetch(url+'/twirp/livekit.RoomService/UpdateParticipant',{
+        method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+signed({video:{roomAdmin:true,room}})},
+        body:JSON.stringify({room,identity,permission:{canSubscribe:true,canPublish:false,canPublishData:allowed}})
+    });
+    assert.equal(response.status,200,await response.text());
 }
 async function isolatedSfu(t) {
     const dir=mkdtempSync(join(tmpdir(),'baci-board-sfu-'));
@@ -87,8 +98,8 @@ function observeRoom() {
     window.LivekitClient={...lk,Room:ObservedRoom};
 }
 
-test('real lossy notices wake a packaged pupil only after commit and recover when the channel loses the notice',
-    {skip:skip||!livekit, timeout:32_000}, async t => {
+test('real lossy board notices are commit-only, recover from loss and respect SID and data grants',
+    {skip:skip||!livekit, timeout:56_000}, async t => {
     await isolatedSfu(t);
     const fixture=packaged(t);
     const sdk = '/plugins/school-plugins.php?plugin=school-classroom&amp;route=asset&amp;name=assets/livekit-client.umd.js';
@@ -97,7 +108,7 @@ test('real lossy notices wake a packaged pupil only after commit and recover whe
     const staffHTML=render('teacher'), pupilHTML=render('student');
     const members = {}, ops = [], log = [];
     const lesson='qa-lesson', epoch='qa-epoch', owner='teacher-1', pupil='student-1';
-    let head=0, seq=0, unlock;
+    let head=0, seq=0, unlock, replay=false;
     const {browser,origin}=await serveBrowser(t,async (req,res,pageUrl)=>{
         if (pageUrl.pathname==='/teacher') return send(res,'text/html; charset=UTF-8',staffHTML);
         if (pageUrl.pathname==='/student') return send(res,'text/html; charset=UTF-8',pupilHTML);
@@ -111,10 +122,12 @@ test('real lossy notices wake a packaged pupil only after commit and recover whe
             const input=JSON.parse(raw);
             assert.equal(input.class,22);
             assert.equal(req.headers['x-classroom-csrf'],'fixture');
-            log.push({action:input.action,staff,at:performance.now()});
+            log.push({action:input.action,staff,sid:input.sid,ink:input.ink,at:performance.now()});
             const result={ok:true,phase:'live',lesson,epoch,ready:true,joinable:true,slot:11,mediaMode:'audio'};
             if (input.action==='ticket') Object.assign(result,{url:url.replace('http','ws'),token:ticket(identity)});
-            else if (input.action==='board-ink') {
+            else if (input.action==='leave') {
+                if (members[identity]===input.sid) delete members[identity];
+            } else if (input.action==='board-ink') {
                 assert.ok(staff && input.sid===members[owner] && input.board===1 && input.seq===seq+1);
                 if (unlock) await unlock;
                 const [op]=input.strokes;
@@ -128,10 +141,13 @@ test('real lossy notices wake a packaged pupil only after commit and recover whe
                 result.admitted=true;
                 const reset=input.board!==1;
                 const checkpoint=reset||input.checkpoint;
-                result.board={rev:1,cursor:head,head,more:false,write:staff,owner:staff?'e'.repeat(16):null,
+                const from=reset?0:input.ink;
+                const deltas=ops.filter(op=>op.seq>from).slice(0,(!staff && replay)?1:Infinity);
+                const cursor=deltas.at(-1)?.seq ?? from;
+                result.board={rev:1,cursor,head,more:cursor<head,write:staff,owner:staff?'e'.repeat(16):null,
                     notice:input.boardNotice===true,
                     presenter:members[owner]?{identity:owner,sid:members[owner]}:null,
-                    ops:ops.filter(op=>op.seq>(reset?0:input.ink)),
+                    ops:deltas,
                     ...(checkpoint?{doc:null,page:1,docs:[],reset,checkpoint:true,writeSeq:seq}:{}),...(staff?{navigate:true}:{})};
             }
             return send(res,'application/json',JSON.stringify(result),{'Cache-Control':'no-store'});
@@ -144,7 +160,7 @@ test('real lossy notices wake a packaged pupil only after commit and recover whe
         // Model two different active devices rather than two tabs with one foreground.
         await page.addInitScript(()=>Object.defineProperty(document,'hidden',{get:()=>false}));
         await page.goto(origin+path);
-        await page.waitForFunction(()=>window.boardQA?.widget?.position().board===1,{},{timeout:12_000});
+        await page.waitForFunction(()=>window.boardQA?.widget?.position().board===1,undefined,{timeout:12_000});
         return page;
     }
     const teacher=await open('/teacher'), student=await open('/student');
@@ -155,6 +171,7 @@ test('real lossy notices wake a packaged pupil only after commit and recover whe
     const sendStroke = (page, seq) => page.evaluate(seq=>window.boardQA.send('board-ink',{board:1,seq,strokes:[{
         tool:'pen',id:'e'.repeat(16)+seq.toString(16).padStart(16,'0'),part:0,end:true,size:12,color:'#d01091',points:[[400,100],[800,200]]}]}),seq);
     let commit;
+    t.after(()=>commit?.());
     unlock=new Promise(resolve=>{commit=resolve;});
     const writer=sendStroke(teacher,1);
     for (let i=0;i<35 && !log.some(r=>r.action==='board-ink'&&r.staff);i++) await delay(25);
@@ -172,5 +189,26 @@ test('real lossy notices wake a packaged pupil only after commit and recover whe
     await student.waitForFunction(()=>window.boardQA.widget.position().ink===4,{},{timeout:3000});
     assert.ok(await student.evaluate(()=>window.boardQA.dropped>0),'must really drop a data-channel notice');
     assert.ok(log.some(r=>r.action==='board-sync'&&!r.staff),'authoritative HTTP path still renders the delta');
-    t.diagnostic(`BACI_BOARD_RTC Chromium teacher+pupil; acknowledged end-to-end ink ${normal.toFixed(1)} ms; no-hint recovery ${(performance.now()-lostAt).toFixed(1)} ms`);
+    const lostMs=performance.now()-lostAt;
+
+    await student.evaluate(()=>{window.boardQA.drop=false;});
+    await dataGrant(owner,false);
+    await student.waitForFunction(owner=>window.boardQA.room.remoteParticipants.get(owner)?.permissions.canPublishData===false,owner,{timeout:5500});
+    const beforeRevoked=await student.evaluate(()=>window.boardQA.hints);
+    await sendStroke(teacher,3);
+    await student.waitForFunction(()=>window.boardQA.widget.position().ink===6,undefined,{timeout:3000});
+    assert.equal(await student.evaluate(()=>window.boardQA.hints),beforeRevoked,'revoked teacher stays on HTTPS/HTTP reads and writes');
+    await dataGrant(owner,true);
+    await student.waitForFunction(owner=>window.boardQA.room.remoteParticipants.get(owner)?.permissions.canPublishData===true,owner,{timeout:5500});
+
+    const oldSID=await student.evaluate(()=>window.boardQA.room.localParticipant.sid);
+    await student.close();
+    await sendStroke(teacher,4);
+    replay=true;
+    const rejoined=await open('/student');
+    const newSID=await rejoined.evaluate(()=>window.boardQA.room.localParticipant.sid);
+    assert.notEqual(oldSID,newSID);
+    await rejoined.waitForFunction(()=>window.boardQA.widget.position().ink===8,undefined,{timeout:3000});
+    for (const cursor of [0,2,4,6]) assert.ok(log.some(r=>!r.staff && r.sid===newSID && r.ink===cursor),`new SID consumes page after cursor ${cursor}`);
+    t.diagnostic(`BACI_BOARD_RTC Chromium teacher+pupil; ink after DB-ack fixture ${normal.toFixed(1)} ms; dropped recovery ${lostMs.toFixed(1)} ms; real permission revoke/restore, new SID, and paged checkpoints passed`);
 });
