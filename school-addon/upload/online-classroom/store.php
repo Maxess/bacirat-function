@@ -39,6 +39,28 @@ final class ClassroomStore
         return $result;
     }
 
+    public function scan(string $bucket, int $page = 128): Generator
+    {
+        $cursor = '';
+        while ($rows = $this->rows($bucket, $page, $cursor)) {
+            yield from $rows;
+            $cursor = (string)array_key_last($rows);
+        }
+    }
+
+    /** An index whose item key is also the target's key. Preserve missing rows to advance the cursor. */
+    public function linkedRows(string $index, string $bucket, int $limit, string $cursor): array
+    {
+        $rows = cl_query($this->db, "SELECT i.item,j.payload FROM `$this->table` i
+            LEFT JOIN `$this->table` j ON j.bucket=? AND j.item=i.item
+            WHERE i.bucket=? AND i.item>? ORDER BY i.item LIMIT " . max(1, min(1000, $limit)), [$bucket, $index, $cursor]);
+        $result = [];
+        while ($row = $rows->fetch(PDO::FETCH_ASSOC)) {
+            $result[$row['item']] = $row['payload'] === null ? null : json_decode($row['payload'], true, 32, JSON_THROW_ON_ERROR);
+        }
+        return $result;
+    }
+
     public function eraseInk(string $lesson): void
     {
         if (!preg_match('/^[a-f0-9]{32}$/D', $lesson)) throw new LogicException('Invalid lesson id');

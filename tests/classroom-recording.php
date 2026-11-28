@@ -49,7 +49,7 @@ $request = static function (string $url, array $params) use (&$checks, &$member)
 };
 $rpc = static function (string $method): array { ok($method === 'DeleteRoom', 'worker can only finalize known expired/closing rooms'); return []; };
 $worker = static fn(string $action, ?string $id, int $at, array $extra = []) => cl_rec_worker($s, $cfg,
-    ['action'=>$action,'protocol'=>2,'worker'=>str_repeat('a',32),'id'=>$id,'available'=>true] + $extra, $at, $rpc, $request);
+    ['action'=>$action,'protocol'=>2,'worker'=>str_repeat('a',32),'id'=>$id,'available'=>true] + $extra + ['plan_format'=>CL_REC_PAGED_PLAN], $at, $rpc, $request);
 $lesson = static function (int $stamp, int $number = 1, int $classId = 15) use ($s, $cfg, $class): array {
     $id = str_pad(dechex($number), 32, '0', STR_PAD_LEFT);
     $room = $cfg['room_prefix'] . '-v4-c' . $classId . '-' . str_pad(dechex($number), 24, '0', STR_PAD_LEFT);
@@ -107,6 +107,18 @@ deny(503, fn()=>cl_rec_start($s,$cfg,$class,$live,$admin,$t));
 deny(400, fn()=>cl_rec_worker($s,$cfg,['action'=>'poll','protocol'=>1,'worker'=>str_repeat('a',32)],$t,$rpc));
 deny(503, fn()=>cl_rec_start($s,$cfg,$class,$live,$admin,$t));
 ok(!$worker('maintenance',null,$t)['idle'], 'an open bell blocks maintenance even without a recording');
+$legacyId = str_repeat('d', 32);
+$s->put('recording',$legacyId,['id'=>$legacyId,'state'=>'recording','worker'=>str_repeat('a',32),'protocol'=>2]);
+$s->put('record-pending',$legacyId,['id'=>$legacyId]);
+$oldPlan = $worker('plan',null,$t,['plan_format'=>2]);
+ok(!isset($oldPlan['plan_format']) && $oldPlan['capture'] === [$legacyId], 'old worker can drain pre-upgrade jobs');
+deny(503, fn()=>cl_rec_start($s,$cfg,$class,$live,$admin,$t));
+$upgradedPlan = $worker('plan',null,$t,['native_release'=>CL_REC_RELEASE]);
+ok($upgradedPlan['plan_format'] === CL_REC_PAGED_PLAN && $upgradedPlan['capture'] === [$legacyId], 'same worker and v2 jobs survive plan upgrade');
+$s->delete('record-pending',$legacyId);
+$s->delete('recording',$legacyId);
+$worker('plan',null,$t,['available'=>false,'capture_space'=>false]);
+deny(503, fn()=>cl_rec_start($s,$cfg,$class,$live,$admin,$t));
 $worker('plan',null,$t,['native_release'=>CL_REC_RELEASE]);
 ok($worker('maintenance',null,$t)['native_ready'] && !$worker('maintenance',null,$t+19)['native_ready'], 'only the fresh native heartbeat confirms site readiness');
 ok($worker('plan',null,$t)['capture'] === [], 'signed deferred worker heartbeat');
@@ -345,27 +357,34 @@ foreach (['no','expiry','changed','left','uncertain'] as $i=>$scenario) {
 }
 // Simultaneous rooms and a new period can record while older jobs await their delay.
 $now = $t + 900;
+$members = [15,16,18,19,20,21,22,23,24];
+foreach (array_slice($members,4) as $cid) $db->exec("INSERT INTO classes VALUES ($cid,'کلاس $cid','1405/1406')");
 $classes = cl_classes($db, '1405/1406');
-foreach ([18,19] as $cid) cl_rec_set_link($s,$cfg,$classes[$cid],'bale:-201',$request);
+foreach (array_slice($members,2) as $cid) cl_rec_set_link($s,$cfg,$classes[$cid],'bale:-201',$request);
 $rooms = [];
 $worker('plan',null,$now);
-foreach ([15,16,18,19] as $i=>$cid) $rooms[$cid] = $lesson($now,100+$i,$cid);
-foreach ([15,16,18] as $cid) cl_rec_start($s,$cfg,$classes[$cid],$rooms[$cid],$teacher,$now);
-deny(409, fn()=>cl_rec_start($s,$cfg,$classes[19],$rooms[19],$teacher,$now));
-$ids = array_map(static fn($cid) => $rooms[$cid]['id'], [15,16,18]);
-ok($worker('plan',null,$now+5)['capture'] === $ids, 'three independent capture leases');
-foreach ($ids as $index=>$item) ok($worker('poll',$item,$now+5)['room'] === $rooms[[15,16,18][$index]]['room'], 'room-scoped capture');
+foreach ($members as $i=>$cid) {
+    $rooms[$cid] = $lesson($now,100+$i,$cid);
+    cl_rec_start($s,$cfg,$classes[$cid],$rooms[$cid],$teacher,$now);
+}
+$ids = array_values(array_map(static fn($cid) => $rooms[$cid]['id'], $members));
+ok($worker('plan',null,$now+5)['capture'] === $ids, 'nine independent capture leases');
+deny(409, fn()=> $worker('plan',null,$now+5,['plan_format'=>2]));
+foreach ($ids as $index=>$item) ok($worker('poll',$item,$now+5)['room'] === $rooms[$members[$index]]['room'], 'room-scoped capture');
+$worker('fault',$rooms[24]['id'],$now+6,['reason'=>'space']);
+ok($s->get('recording',$rooms[24]['id'])['reason'] === 'space' && count($worker('plan',null,$now+6)['capture']) === 8,
+    'capacity failure removes only the affected capture');
+ok($worker('poll',$rooms[19]['id'],$now+6)['command'] === 'record', 'other class renews as usual');
 $custom = array_replace($cfg,['recording_delay_minutes'=>90]);
 $first = cl_active($s,15);
 $first['recording_consent'] = cl_rec_close_choice($s,$custom,$first,$teacher,['recording'=>$first['id'],'sendRecording'=>true],$now+9) === 'queued';
 cl_close_lesson($s,$custom,$first,$now+9,$rpc);
-cl_rec_start($s,$cfg,$classes[19],$rooms[19],$teacher,$now+9);
-ok(count($worker('plan',null,$now+10)['capture']) === 3 && $s->get('recording',$first['id'])['not_before'] === $now+9+5400,
-    'approved bell frees source slot immediately, custom delay is pinned at close');
+ok(count($worker('plan',null,$now+10)['capture']) === 7 && $s->get('recording',$first['id'])['not_before'] === $now+9+5400,
+    'approved bell leaves live capture immediately, custom delay is pinned at close');
 $second = cl_active($s,19);
 $second['recording_consent'] = true;
 cl_close_lesson($s,$custom,$second,$now+15,$rpc);
-foreach ([16,18] as $cid) $close(cl_active($s,$cid),$teacher,false,$now+17);
+foreach ([16,18,20,21,22,23,24] as $cid) $close(cl_active($s,$cid),$teacher,false,$now+17);
 $queue = $worker('plan',null,$now+5500);
 ok($queue['work'] === $first['id'] && $queue['capture'] === [], 'oldest eligible closure renders first');
 ok($worker('poll',$second['id'],$now+5414)['command'] === 'hold', 'delay is evaluated per individual end time');
@@ -383,7 +402,7 @@ $practiceRpc = static function (string $method): array {
     return [];
 };
 $practiceWorker = static fn(string $action, ?string $id, int $at, array $extra = [], ?array $settings = null) => cl_rec_worker($s, $settings ?? $pilot,
-    ['action'=>$action,'protocol'=>2,'worker'=>str_repeat('a',32),'id'=>$id,'available'=>true] + $extra, $at, $practiceRpc, $request);
+    ['action'=>$action,'protocol'=>2,'worker'=>str_repeat('a',32),'id'=>$id,'available'=>true] + $extra + ['plan_format'=>CL_REC_PAGED_PLAN], $at, $practiceRpc, $request);
 $openDemo = static function (int $at) use ($s,$pilot,$class,$teacher,$practiceRpc): array {
     $live = cl_open_lesson($s,['write_runtime'=>static fn()=>null],$pilot,$class,$teacher + ['name'=>'دبیر نمونه'],
         ['slot'=>CL_FRIDAY_SLOT],$at,$practiceRpc);
@@ -453,4 +472,46 @@ foreach (['yes','no','revoked','limit','midnight'] as $i=>$scenario) {
     ok(isset($s->get('recording',$id)['cleaned']) && !$s->get('lesson',$id) && !$s->get('activity',$id), 'cleanup keeps only recording history, no demo session or files');
 }
 ok($s->rows('reports',100) === $reports && $s->rows('host-pending',100) === $notices, 'Friday recording never creates attendance or notices');
+// More rows than either the old 24-job cap or the DB helper's 1000-row page.
+$s->delete('record-pending');
+$stamp = $t + 1550;
+$template = $s->get('recording',$first['id']);
+$queueIds = [];
+for ($i=1; $i<=1027; ++$i) {
+    $key = sprintf('1%031x', $i);
+    $queueIds[] = $key;
+    $s->put('recording',$key,array_replace($template,['id'=>$key,'closed_at'=>$stamp-$i,'not_before'=>$stamp+60,
+        'expires'=>$stamp+10000]));
+    $s->put('record-pending',$key,['id'=>$key]);
+}
+$orphan = '0' . str_repeat('a',31);
+$s->put('record-pending',$orphan,['id'=>$orphan]);
+$busy = $queueIds[1001];
+$s->put('recording',$busy,$s->get('recording',$busy) + ['flight'=>['until'=>time()+60]]);
+deny(409, fn()=> cl_rec_set_link($s,$cfg,$class,'bale:-202',$request));
+$worker('plan',null,$stamp);
+$late = $lesson($stamp,999,15);
+// Make this live key fall beyond every early queue page.
+$new = array_replace($late,['id'=>str_repeat('f',32)]);
+$s->delete('lesson',$late['id']);
+$s->put('lesson',$new['id'],$new);
+$s->put('active','15',['id'=>$new['id']]);
+cl_rec_start($s,$cfg,$class,$new,$teacher,$stamp);
+$cursor = $worker('plan',null,$stamp+5);
+ok($cursor['work'] === null && $cursor['capture'] === [] && $cursor['next'] !== null, 'live room prevents finishing, independently of discovery page');
+$visited = $captureIds = [];
+do {
+    $visited = [...$visited,...$cursor['pending']];
+    $captureIds = [...$captureIds,...$cursor['capture']];
+    $after = $cursor['next'];
+    if ($after !== null) $cursor = $worker('plan-page',null,$stamp+5,['after'=>$after]);
+} while ($after !== null);
+ok($visited === [...$queueIds,$new['id']] && $captureIds === [$new['id']], 'keyset traversal covers every pending row, including live work after row 1000');
+ok($worker('poll',$new['id'],$stamp+5)['command'] === 'record', 'late page did not change the per-room lease');
+$close(cl_active($s,15),$teacher,false,$stamp+10);
+ok($worker('plan',null,$stamp+60)['work'] === $queueIds[1026], 'oldest eligible closure may be on the last page');
+for ($i=1000; $i<2001; ++$i) $s->put('active',(string)$i,['id'=>$orphan]);
+ok(cl_rec_offpeak($s,$cfg,$stamp+60), 'stale active markers across many pages do not block finishing');
+$lesson($stamp+60,2000,9999);
+ok(!cl_rec_offpeak($s,$cfg,$stamp+60) && $worker('plan',null,$stamp+60)['work'] === null, 'a live bell past row 1000 still blocks rendering');
 echo "classroom recording checks passed\n";

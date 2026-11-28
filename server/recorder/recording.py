@@ -334,8 +334,12 @@ class Runner(SpoolJob):
         await self.stop()
 
 
+PAGED_PLAN = 3
+PLAN_PAGE = 128  # Bound each reply, never the number of jobs or the number of pages.
+
+
 class DeferredRunner:
-    """A control loop, up to three independently leased sources, and one finishing task.
+    """Independent source leases, paged job discovery, and one finishing task.
 
     A slow upload/PDF/rpc cannot delay another room's lease. Nothing can render on
     cached consent alone: the short plan lease is checked before each output frame.
@@ -347,7 +351,9 @@ class DeferredRunner:
         self.captures, self.wanted, self.pending, self.due = {}, set(), set(), set()
         self.control = SpoolJob(school, root)
         self.work = self.finish_task = self.repair = self.repairing = None
-        self.scan_task = None
+        self.scan_task = self.discovery = None
+        self.paged, self.current_ok = False, False
+        self.settle_hints, self.missing_hints = set(), set()
         self.available, self.on_disk, self.receipts, self.unsettled = False, set(), set(), set()
         self.sampled = -float('inf')
         self.permit, self.until = None, 0
@@ -430,7 +436,7 @@ class DeferredRunner:
         try:
             if await asyncio.to_thread(lambda: path.is_symlink() or (path / '.capturing').exists() or (path / '.cleaned').exists()):
                 raise CaptureError('interrupted or expired source capture')
-            while not self.stopping and job in self.wanted:
+            while not self.stopping and (self.paged or job in self.wanted):
                 if not cap and (fault := await asyncio.to_thread(read_obj, path / '.fault.json')):
                     with suppress(ProtocolError):
                         await site.rpc('fault', reason=fault.get('reason'))
@@ -450,7 +456,7 @@ class DeferredRunner:
                 if cap and (op != 'record' or cap.room != room):
                     closing, cap = cap, None
                     await closing.stop(op != 'purge')
-                if op == 'purge' or op == 'retain' or (op == 'hold' and reply.get('state') != 'recording'):
+                if op in ('purge', 'retain', 'render', 'deliver') or (op == 'hold' and reply.get('state') != 'recording'):
                     return
                 if op == 'hold':
                     await asyncio.sleep(1.4)
@@ -463,7 +469,7 @@ class DeferredRunner:
                     continue
                 if cap:
                     await cap.renew(lease)
-                elif job in self.wanted and not self.stopping:
+                elif not self.stopping and (self.paged or job in self.wanted):
                     if not await asyncio.to_thread(self.budget.room, MIB):
                         raise SpaceError('no room in source spool')
                     if not isinstance(reply.get('token'), str):
@@ -486,7 +492,7 @@ class DeferredRunner:
                 await asyncio.sleep(1.25)
             if cap:
                 closing, cap = cap, None
-                await closing.stop(job in self.pending)
+                await closing.stop(self.paged or job in self.pending)
         except Exception as error:
             if cap:
                 with suppress(Exception):
@@ -494,7 +500,8 @@ class DeferredRunner:
             await self.fail(job, error)
 
     def authorized(self, job, expires):
-        if self.stopping or job in self.due or job not in self.pending or time.time() >= expires:
+        still_pending = self.current_ok if self.paged else job in self.pending and job not in self.due
+        if self.stopping or not still_pending or time.time() >= expires:
             raise WorkRevoked()
         return self.until if self.permit == job else 0
 
@@ -559,11 +566,45 @@ class DeferredRunner:
                 self.repairing = None
 
     @staticmethod
-    def ids(reply, name, limit=24):
+    def ids(reply, name, limit):
         values = reply.get(name)
         if not isinstance(values, list) or len(values) > limit or any(not isinstance(v, str) or not HEX.fullmatch(v) for v in values):
             raise ProtocolError()
-        return set(values)
+        ids = set(values)
+        if len(ids) != len(values):
+            raise ProtocolError()
+        return ids
+
+    @classmethod
+    def read_page(cls, reply, after=''):
+        if reply.get('plan_format') != PAGED_PLAN or 'next' not in reply:
+            raise ProtocolError()
+        wanted, pending, due = (cls.ids(reply, name, PLAN_PAGE) for name in ('capture', 'pending', 'settle'))
+        cursor = reply['next']
+        if (not wanted <= pending or not due <= pending or wanted & due or (pending and min(pending) <= after)
+                or (cursor is not None and (not isinstance(cursor, str) or not HEX.fullmatch(cursor)
+                                            or cursor <= after or (pending and cursor < max(pending))))):
+            raise ProtocolError()
+        return wanted, pending, due, cursor
+
+    def start_captures(self, wanted):
+        if self.stopping:
+            return
+        for job in sorted(wanted - self.captures.keys()):
+            self.captures[job] = asyncio.create_task(self.capture(job))
+
+    async def discover(self, cursor, unchecked):
+        try:
+            while cursor is not None and not self.stopping:
+                reply = await self.control.rpc('plan-page', after=cursor)
+                wanted, pending, due, cursor = self.read_page(reply, after=cursor)
+                self.start_captures(wanted)
+                self.settle_hints.update(due)
+                unchecked.difference_update(pending)
+        except ProtocolError:
+            return  # Retry from a fresh head. An incomplete traversal says nothing about missing jobs.
+        if cursor is None:
+            self.missing_hints.update(unchecked)
 
     async def tick(self):
         for job, task in list(self.captures.items()):
@@ -576,37 +617,68 @@ class DeferredRunner:
         if self.repair and self.repair.done():
             task, self.repair = self.repair, None
             task.result()
+        if self.discovery and self.discovery.done():
+            task, self.discovery = self.discovery, None
+            task.result()
         if self.scan_task and self.scan_task.done():
             task, self.scan_task = self.scan_task, None
             try:
                 self.available, self.on_disk, self.receipts, self.unsettled = task.result()
                 self.sampled = time.monotonic()
             except OSError:
-                self.available = False
+                self.available, self.sampled = False, -float('inf')
         if self.scan_task is None:
             busy = set(self.captures) | {self.work, self.repairing}
             self.scan_task = asyncio.create_task(asyncio.to_thread(self.inspect_storage, busy))
-        available = self.available and time.monotonic() - self.sampled < 5
+        sampled = time.monotonic() - self.sampled < 5
+        available = self.available and sampled
         if self.native:
             available = available and await renderer_ready(self.post_socket)
-        reply = await self.control.rpc('plan', available=available, current=self.work,
+        reply = await self.control.rpc('plan', available=available, current=self.work, plan_format=PAGED_PLAN,
+                                       capture_space=self.available if sampled else None,
                                        **({'native_release': VERSION} if self.native else {}))
-        wanted, pending, due = self.ids(reply, 'capture', 3), self.ids(reply, 'pending'), self.ids(reply, 'settle')
         work, lease = reply.get('work'), reply.get('lease')
-        if (not wanted <= pending or not due <= pending or type(lease) is not int
-                or (work is not None and (not isinstance(work, str) or work not in pending or work in wanted or work in due))):
+        if type(lease) is not int or (work is not None and (not isinstance(work, str) or not HEX.fullmatch(work))):
             raise ProtocolError()
-        self.wanted, self.pending, self.due = wanted, pending, due
+        if reply.get('plan_format') == PAGED_PLAN:
+            wanted, pending, due, cursor = self.read_page(reply)
+            if type(reply.get('current_ok')) is not bool or (work is not None and work in wanted | due):
+                raise ProtocolError()
+            self.paged = True
+            self.current_ok = reply['current_ok'] and work in (self.work, None)
+            # The head and continuation pages discover jobs; only each room's own
+            # poll renews or ends its capture. No partial list revokes another room.
+            self.start_captures(wanted)
+            self.settle_hints.update(due)
+            if self.discovery is None:
+                unchecked = (self.on_disk & self.unsettled) - pending
+                if cursor is None:
+                    self.missing_hints.update(unchecked)
+                else:
+                    self.discovery = asyncio.create_task(self.discover(cursor, unchecked))
+        else:
+            if self.paged or 'plan_format' in reply:
+                raise ProtocolError()
+            # Old sites can still be paired during rollout; their own admission limits apply.
+            wanted, pending, due = (self.ids(reply, name, 24) for name in ('capture', 'pending', 'settle'))
+            if (not wanted <= pending or not due <= pending or wanted & due
+                    or (work is not None and (work not in pending or work in wanted | due))):
+                raise ProtocolError()
+            self.wanted, self.pending, self.due = wanted, pending, due
+            self.start_captures(wanted)
         self.permit = work
         self.until = time.monotonic() + min(6, max(0, lease - time.time()))
-        for job in sorted(wanted - self.captures.keys())[:max(0, 3 - len(self.captures))]:
-            self.captures[job] = asyncio.create_task(self.capture(job))
         if work and not self.finish_task and work not in self.captures and work != self.repairing and time.monotonic() < self.until:
-            self.work = work
+            self.work, self.current_ok = work, True
             self.finish_task = asyncio.create_task(self.finish(work))
         if not self.repair:
-            terminal = (self.on_disk - pending) & self.unsettled
-            jobs = sorted(self.receipts) + sorted((due | terminal) - self.receipts)
+            if self.paged:
+                candidates = self.settle_hints | self.missing_hints
+                self.settle_hints.clear()
+                self.missing_hints.clear()
+            else:
+                candidates = self.due | ((self.on_disk - self.pending) & self.unsettled)
+            jobs = sorted(self.receipts) + sorted(candidates - self.receipts)
             if jobs:
                 self.repair = asyncio.create_task(self.maintain(jobs))
 
@@ -629,7 +701,7 @@ class DeferredRunner:
         finally:
             self.stopping = True
             self.permit, self.until = None, 0
-            await asyncio.gather(*self.captures.values(), *(task for task in (self.finish_task,self.repair,self.scan_task) if task),
+            await asyncio.gather(*self.captures.values(), *(task for task in (self.finish_task,self.repair,self.scan_task,self.discovery) if task),
                                  return_exceptions=True)
 
 

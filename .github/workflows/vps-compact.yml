@@ -4,13 +4,14 @@ on:
     paths:
       - .github/workflows/vps-compact.yml
       - server/offline/**
+      - server/install.py
       - scripts/test-vps-offline-vm.sh
       - scripts/vps-recording-rehearsal.sh
       - tests/fixtures/vps-record-*
       - tests/fixtures/vps-class-load.go
       - tests/fixtures/vps-offline-peer.py
       - tests/test_vps_offline.py
-      - artifacts/baci-classroom-recorder-*-r3.zip
+      - artifacts/baci-classroom-recorder-*-r4.zip
 permissions:
   contents: read
 jobs:
@@ -65,8 +66,9 @@ jobs:
           tar -xzf "$w/baseline-v1.2.0.tar.gz" -C "$w"
           p="$w/baci-classroom-vps-offline"
           cp server/offline/{apt-local.sh,setup.py,install.sh,compact-renderer.py,compact-ffmpeg.py} "$p/"
+          cp server/install.py "$p/vps_media.py"
           rm -f "$p/payload/baci-classroom-recorder-v0.4.23.zip" "$p/payload/baci-classroom-renderer-v0.4.23-r1.zip"
-          cp artifacts/baci-classroom-recorder-v0.4.23-r3.zip "$p/payload/"
+          cp artifacts/baci-classroom-recorder-v0.4.23-r4.zip "$p/payload/"
           cp server/recorder/transport.py "$p/payload/baci-classroom-recorder-school-http-v0.4.23.py"
           ( cd "$p"; find . -type f ! -name SHA256SUMS -printf '%P\0' | sort -z | xargs -0 sha256sum > SHA256SUMS )
           tar -cf - -C "$w" baci-classroom-vps-offline | gzip -n -1 > "$w/compact-trial.tar.gz"
@@ -84,7 +86,7 @@ jobs:
             echo "::error title=Compact VM rehearsal::${proof:0:3800}"
             exit "$rc"
           fi
-          grep -Fq 'QA_R3 profile=compact running services' "$log"
+          grep -Fq 'QA_R4 profile=compact running services' "$log"
           if [[ -n "$load" ]]; then grep -Fq 'QA_CAMERA uploaded MP4:' "$log"; fi
           proof=$(grep -E '^QA_|^VM memory|^VM passed|^Real ACME' "$log" | paste -sd '|')
           echo "::notice title=Compact VM measurements::${proof:0:4100}"

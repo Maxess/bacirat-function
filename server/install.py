@@ -8,6 +8,7 @@ from fractions import Fraction
 import hashlib
 import hmac
 import ipaddress
+import itertools
 import json
 from math import ceil
 import mmap
@@ -80,15 +81,20 @@ def write_private(file, content, mode=0o640, gid=0):
         out.write(content)
 
 
-def engine_config(ip, api_key, secret, *, camera=True):
+UDP_BATCH = '  batch_io:\n    batch_size: 64\n    max_flush_interval: 1ms\n'
+
+
+def engine_config(ip, api_key, secret, *, camera=True, udp_batch=True, bound_udp=False):
     video = '    - mime: video/VP8\n' if camera else ''
+    ips = f'  ips:\n    includes: [{ip}/32]\n' if bound_udp else ''
+    batch = UDP_BATCH if udp_batch else ''
     return f'''port: 7880
 bind_addresses: [127.0.0.1]
 rtc:
-  node_ip: {ip}
+{ips}  node_ip: {ip}
   use_external_ip: false
   udp_port: 7882
-  tcp_port: 7881
+{batch}  tcp_port: 7881
 room:
   auto_create: false
   max_participants: 4
@@ -172,15 +178,18 @@ WantedBy=multi-user.target
 '''
 
 
-def sfu_unit_config(*, legacy=False, one_core=False):
+def sfu_unit_config(*, legacy=False, one_core=False, network_online=False):
     description = 'School classroom LiveKit audio SFU' if legacy else 'School classroom LiveKit SFU'
     # The pinned release's Go runtime sizes its scheduler. Remove even a pin
     # inherited from the systemd manager, without touching the CPU allocation.
     environment = 'Environment=GOMAXPROCS=1\n' if one_core else 'UnsetEnvironment=GOMAXPROCS\n'
-    return unit(description, f'{APP}/livekit-server --config {CFG}/livekit.yaml', environment=environment)
+    text = unit(description, f'{APP}/livekit-server --config {CFG}/livekit.yaml', environment=environment)
+    return text.replace('After=network.target\n', 'Wants=network-online.target\nAfter=network-online.target\n', 1) if network_online else text
 
 
 def stock_sfu_unit(text):
+    if text == sfu_unit_config(network_online=True):
+        return False, False  # The offline installer waits for its assigned UDP address.
     for legacy in (False, True):
         for one_core in (False, True):
             if text == sfu_unit_config(legacy=legacy, one_core=one_core):
@@ -205,15 +214,16 @@ api:
 
 
 def installed_layout(current, deployment):
-    """Recognize only the exact stock audio or camera layout, including a managed webhook if present."""
+    """Recognize only exact stock layouts before and after UDP batching, including offline installs."""
     ip = re.search(r'^  node_ip: ([0-9.]+)$', current, re.MULTILINE)
     if not ip:
         raise ValueError('LiveKit configuration is not from this pilot installer; use the manual guide')
     ip = str(ipaddress.IPv4Address(ip[1]))
-    for camera in (False, True):
-        base = engine_config(ip, deployment['api_key'], deployment['api_secret'], camera=camera)
+    for camera, batch, bound in itertools.product((False, True), repeat=3):
+        layout = dict(camera=camera, udp_batch=batch, bound_udp=bound)
+        base = engine_config(ip, deployment['api_key'], deployment['api_secret'], **layout)
         if current == base:
-            return ip, camera, None
+            return ip, layout, None
         if not current.startswith(base + WEBHOOK_MARKER + '\n'):
             continue
         # A block edited by hand or pointing to another site must never be overwritten.
@@ -228,23 +238,27 @@ def installed_layout(current, deployment):
             raise ValueError('Unrecognized managed webhook block; no change made') from error
         if current != base + native_webhook_block(deployment['api_key'], old_url):
             raise ValueError('The managed webhook block was edited; no change made')
-        return ip, camera, previous_path
+        return ip, layout, previous_path
     raise ValueError('Existing/custom LiveKit configuration was left unchanged; use the manual guide')
 
 
 def registered_config(current, deployment, path):
-    ip, camera, previous_path = installed_layout(current, deployment)
-    base = engine_config(ip, deployment['api_key'], deployment['api_secret'], camera=camera)
+    ip, layout, previous_path = installed_layout(current, deployment)
+    base = engine_config(ip, deployment['api_key'], deployment['api_secret'], **layout)
     url = webhook_url(deployment['school_origin'], (previous_path or '') if path is None else path)
     return base + native_webhook_block(deployment['api_key'], url), url
 
 
+def update_engine_config(current, deployment, **change):
+    ip, layout, previous_path = installed_layout(current, deployment)
+    wanted = engine_config(ip, deployment['api_key'], deployment['api_secret'], **(layout | change))
+    if previous_path is not None:
+        wanted += native_webhook_block(deployment['api_key'], webhook_url(deployment['school_origin'], previous_path))
+    return wanted
+
+
 def camera_config(current, deployment):
-    ip, camera, _ = installed_layout(current, deployment)
-    if camera:
-        return current
-    audio = engine_config(ip, deployment['api_key'], deployment['api_secret'], camera=False)
-    return engine_config(ip, deployment['api_key'], deployment['api_secret']) + current[len(audio):]
+    return update_engine_config(current, deployment, camera=True)
 
 
 @contextlib.contextmanager
@@ -305,7 +319,7 @@ def replace_pilot_config(path, expected, new, info, *, private=True):
             os.fsync(stream.fileno())
         current, actual = read_pilot_file(path, private=private)
         if current != expected or (actual.st_uid, actual.st_gid, actual.st_mode) != (info.st_uid, info.st_gid, info.st_mode):
-            raise ValueError(f'LiveKit configuration changed concurrently ({path.name}); it was not overwritten')
+            raise ValueError(f'Managed file changed concurrently ({path.name}); it was not overwritten')
         os.replace(scratch, path)
     finally:
         Path(scratch).unlink(missing_ok=True)
@@ -681,6 +695,24 @@ def configure_camera(args):
         print(f'camera_configured=yes {result}')
 
 
+def configure_udp(args):
+    # Reuse the exact-config, idle-service check and restart rollback. No address,
+    # codec, credential, TCP fallback or webhook is changed by this command.
+    require_media_sudo()
+    with locked_config(args.apply):
+        deployment = pilot_deployment()
+        path = CFG / 'livekit.yaml'
+        before, info = read_pilot_file(path)
+        wanted = update_engine_config(before, deployment, udp_batch=not args.disable)
+        if not args.apply:
+            print(f'udp_batch={"off" if UDP_BATCH not in before else "on"} change_needed={"yes" if before != wanted else "no"}')
+        elif before == wanted:
+            print(f'udp_batch={"off" if args.disable else "on"} changed=no restarted=no')
+        else:
+            result = apply_pilot_change(path, before, wanted, info, deployment, True, 'udp')
+            print(f'udp_batch={"off" if args.disable else "on"} {result}')
+
+
 def checked_archive(destination, offline_archive):
     if offline_archive:
         shutil.copyfile(offline_archive, destination)
@@ -761,7 +793,7 @@ def install(args):
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
-    changes = {'webhook': configure_webhook, 'camera': configure_camera, 'cpu': configure_cpu}
+    changes = {'webhook': configure_webhook, 'camera': configure_camera, 'cpu': configure_cpu, 'udp': configure_udp}
     if argv and argv[0] in changes:
         change = argv[0]
         description = ('Inspect the running LiveKit Go build and CPU limits; optionally enable automatic sizing on the stock SFU.'
@@ -770,15 +802,17 @@ def main(argv=None):
         if change == 'webhook':
             parser.add_argument('--site-path', type=site_path, help='test school subpath; default keeps a managed URL, or uses / for new setup')
             parser.add_argument('--verify', action='store_true', help='verify the receiver with a signed read-only probe')
+        if change == 'udp':
+            parser.add_argument('--disable', action='store_true', help='restore stock UDP without batching')
         parser.add_argument('--apply', action='store_true', help='save the configuration after making a private backup; default is read-only')
         parser.add_argument('--restart', action='store_true', help='restart only the running, idle, unmodified pilot SFU unit; requires --apply')
         args, work = parser.parse_args(argv[1:]), changes[change]
         if args.restart and not args.apply:
             parser.error('--restart requires --apply')
-        if change == 'cpu' and args.apply and not args.restart:
-            parser.error('CPU changes require both --apply and --restart in a maintenance window')
+        if change in ('cpu', 'udp') and args.apply and not args.restart:
+            parser.error('This change requires both --apply and --restart in a maintenance window')
     else:
-        parser = argparse.ArgumentParser(description=__doc__, epilog='Existing pilot? See install.py {webhook,camera,cpu} --help.')
+        parser = argparse.ArgumentParser(description=__doc__, epilog='Existing pilot? See install.py {webhook,camera,cpu,udp} --help.')
         parser.add_argument('media_host', type=hostname)
         parser.add_argument('ipv4', type=public_ip)
         parser.add_argument('school_origin', type=school_origin)

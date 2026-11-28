@@ -1,0 +1,4 @@
+e984a1c6d9327aee19ad90721775d1865231fd7461068002a6327622fa12a8b1  baci-classroom-site-upgrade-v0.4.27.zip
+4fb2caebf8188f75701adb862a807abfc406d7d8fe849141e7d9a932b68a8ce2  baci-plugin-manager-update-v0.1.34.zip
+9a7b8fd30f07d2237446ed23d2d748f71b50380fec002ef9e39e1d4f56607ee2  baci-plugin-manager-v0.1.34.zip
+9c55fdcaab1339e1cc8a209882d0fbdbd7cd304cf2afb8d11d1dfa5f1e3004aa  school-classroom-plugin-v0.4.27.zip

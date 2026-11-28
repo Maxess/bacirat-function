@@ -2,7 +2,6 @@
 // Isolated QA only. Uses the shipping recording policy with a synthetic bell
 // and SQLite store. Never deploy this router or point it at a real school.
 declare(strict_types=1);
-require __DIR__ . '/../../school-addon/upload/online-classroom/events.php';
 
 const QA_BELLS = [
     'approve'=>'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
@@ -17,6 +16,7 @@ function qa_need(bool $ready, string $why): void {
 
 $dir = getenv('BACI_QA_DIR');
 qa_need(is_string($dir) && realpath($dir) === $dir, 'test directory required');
+require $dir . '/site/events.php';
 $pair = json_decode(file_get_contents($dir . '/pair.json'), true, 8, JSON_THROW_ON_ERROR);
 qa_need(in_array($pair['signal_url'], ['wss://media.example.test', 'wss://classroom-new.example.com'], true)
     && $pair['site'] === 'https://school.example.test/campus', 'isolated pair required');

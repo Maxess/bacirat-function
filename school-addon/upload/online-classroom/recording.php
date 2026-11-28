@@ -6,8 +6,9 @@ declare(strict_types=1);
 const CL_REC_PROTOCOL = 2;
 const CL_REC_RELEASE = '0.4.23';
 const CL_REC_RETENTION = 86400;
-const CL_REC_CAPTURE_LIMIT = 3;
-const CL_REC_QUEUE_LIMIT = 24;
+// The job/lease protocol stays at 2. Only discovery and admission negotiate the paged format.
+const CL_REC_PAGED_PLAN = 3;
+const CL_REC_PAGE = 128;
 const CL_REC_DELAY = 180; // Minutes after confirmed closure, not the timetable deadline.
 
 function cl_rec_delay(array $cfg): int
@@ -170,10 +171,18 @@ function cl_rec_health(ClassroomStore $s, array $cfg, int $now): bool
         && ($beat['available'] ?? false) === true && ($beat['at'] ?? 0) >= $now - 18;
 }
 
-function cl_rec_pending(ClassroomStore $s): array
+function cl_rec_pending_page(ClassroomStore $s, string $cursor = '', int $limit = CL_REC_PAGE): array
 {
-    return array_filter(array_map(static fn($row) => $s->get('recording', $row['id']),
-        $s->rows('record-pending', CL_REC_QUEUE_LIMIT)));
+    return $s->linkedRows('record-pending', 'recording', $limit, $cursor);
+}
+
+function cl_rec_pending(ClassroomStore $s): Generator
+{
+    $cursor = '';
+    while ($rows = cl_rec_pending_page($s, $cursor)) {
+        foreach ($rows as $id=>$job) if (($job['id'] ?? null) === $id) yield $id=>$job;
+        $cursor = (string)array_key_last($rows);
+    }
 }
 
 function cl_rec_terminal(ClassroomStore $s, array $job, string $state, string $reason = ''): void
@@ -214,20 +223,26 @@ function cl_rec_start(ClassroomStore $s, array $cfg, array $class, array $lesson
         throw new ClassroomError(409, 'مدیر مدرسه باید برای این کلاس یک گروه معتبر پیام‌رسان ثبت کند.');
     }
     cl_room_lock($s->db, $cfg['room_prefix'] . ':recorder', static function () use ($s, $cfg, $class, $lesson, $link, $now, $deadline, $friday) {
-        $pending = cl_rec_pending($s);
-        if (count(array_filter($pending, static fn($job) => $job['state'] === 'recording')) >= CL_REC_CAPTURE_LIMIT) {
-            throw new ClassroomError(409, 'سه ضبط هم‌زمان فعال است؛ برای شروع ضبط جای خالی لازم است.');
+        $beat = $s->get('record-worker', 'heartbeat');
+        if (($beat['protocol'] ?? null) !== CL_REC_PROTOCOL || ($beat['at'] ?? 0) < $now - 18) {
+            throw new ClassroomError(503, 'سرویس ضبط VPS آماده نیست. مدیر مدرسه وضعیت سرویس را بررسی کند.');
         }
-        if (count($pending) >= CL_REC_QUEUE_LIMIT) throw new ClassroomError(409, 'صف موقت فیلم‌ها پر است.');
-        if (!cl_rec_health($s, $cfg, $now)) throw new ClassroomError(503, 'سرویس ضبط VPS آماده نیست. مدیر مدرسه وضعیت سرویس را بررسی کند.');
+        if (($beat['plan_format'] ?? null) !== CL_REC_PAGED_PLAN) {
+            throw new ClassroomError(503, 'برای شروع ضبط تازه، Recorder روی VPS را هم به نسخهٔ هماهنگ به‌روزرسانی کنید.');
+        }
+        if (($beat['capture_space'] ?? null) === false) {
+            throw new ClassroomError(503, 'فضای موقت VPS برای شروع ضبط تازه کافی نیست.');
+        }
+        if (($beat['available'] ?? false) !== true) throw new ClassroomError(503, 'سرویس ضبط VPS آماده نیست. مدیر مدرسه وضعیت سرویس را بررسی کند.');
         // Pin the displayed names once so every part and reconnect of this recording agrees.
         $title = cl_rec_title($s, $lesson);
-        $worker = $s->get('record-worker', 'heartbeat')['worker'];
+        $worker = $beat['worker'];
         $s->tx(static function () use ($s, $class, $lesson, $link, $now, $title, $worker, $deadline, $friday) {
             $id = $lesson['id'];
             $s->put('recording', $id, ['id'=>$id,'class'=>$lesson['class_id'],'year'=>$lesson['year'], 'target'=>$link,
                 'teacher'=>$lesson['teacher'],'title'=>$title,'begin'=>$now + 5, 'deadline'=>$deadline,'expires'=>$deadline + CL_REC_RETENTION,
-                'state'=>'recording','live'=>false,'sent'=>0,'total'=>0,'worker'=>$worker,'protocol'=>CL_REC_PROTOCOL]
+                'state'=>'recording','live'=>false,'sent'=>0,'total'=>0,'worker'=>$worker,'protocol'=>CL_REC_PROTOCOL,
+                'plan_format'=>CL_REC_PAGED_PLAN]
                 + ($friday ? ['friday'=>true] : []));
             $s->put('lesson', $id, $lesson + ['recorder'=>'recorder-' . $id]);
             $s->put('record-pending', $id, ['id'=>$id]);
@@ -411,9 +426,7 @@ function cl_rec_worker_auth(array $cfg, mixed $authorization): void
 // bell cannot block the queue forever; the ordinary room cleanup still applies.
 function cl_rec_offpeak(ClassroomStore $s, array $cfg, int $now): bool
 {
-    $active = $s->rows('active', 1000);
-    if (count($active) >= 1000) return false;
-    foreach ($active as $row) {
+    foreach ($s->scan('active') as $row) {
         $lesson = $s->get('lesson', $row['id']);
         if ($lesson && !cl_lesson_expired($cfg, $lesson, $now)) return false;
     }
@@ -426,33 +439,85 @@ function cl_rec_eligible(array $job, int $now): bool
         && $job['expires'] > $now && !isset($job['flight']) && ($job['retry_at'] ?? 0) <= $now;
 }
 
+function cl_rec_needs_settlement(array $job, int $now): bool
+{
+    return $job['state'] !== 'recording' && ($job['expires'] <= $now || ($job['flight']['until'] ?? PHP_INT_MAX) <= $now);
+}
+
+function cl_rec_discovery(array $rows, string $worker, int $now): array
+{
+    $capture = $settle = $pending = [];
+    foreach ($rows as $id=>$job) {
+        if (($job['id'] ?? null) !== $id || ($job['worker'] ?? null) !== $worker) continue;
+        $pending[] = $id;
+        if ($job['state'] === 'recording') $capture[] = $id;
+        elseif (cl_rec_needs_settlement($job, $now)) $settle[] = $id;
+    }
+    return ['capture'=>$capture,'pending'=>$pending,'settle'=>$settle];
+}
+
+function cl_rec_plan_page(ClassroomStore $s, string $worker, int $now, string $cursor = ''): array
+{
+    $rows = cl_rec_pending_page($s, $cursor);
+    // This is a response-size bound, not a queue or capture bound. If the page is full,
+    // visit the next one even if this page contained only other/missing records.
+    return cl_rec_discovery($rows, $worker, $now) + ['plan_format'=>CL_REC_PAGED_PLAN,
+        'next'=>count($rows) === CL_REC_PAGE ? (string)array_key_last($rows) : null];
+}
+
+function cl_rec_work(ClassroomStore $s, string $worker, int $now, ?array $current): ?array
+{
+    if ($current && cl_rec_eligible($current, $now)) return $current;
+    $work = null;
+    foreach (cl_rec_pending($s) as $job) {
+        if (($job['worker'] ?? null) === $worker && cl_rec_eligible($job, $now)
+            && ($work === null || [$job['closed_at'],$job['id']] < [$work['closed_at'],$work['id']])) $work = $job;
+    }
+    return $work;
+}
+
 function cl_rec_plan(ClassroomStore $s, array $cfg, array $input, string $worker, int $now): array
 {
-    return cl_room_lock($s->db, $cfg['room_prefix'] . ':recorder', static function () use ($s, $cfg, $input, $worker, $now) {
+    $format = $input['plan_format'] ?? 2;
+    $currentId = $input['current'] ?? null;
+    if (!in_array($format, [2, CL_REC_PAGED_PLAN], true) || ($currentId !== null && !cl_rec_id($currentId))) {
+        throw new ClassroomError(400, 'نسخه یا شناسهٔ برنامهٔ ضبط معتبر نیست.');
+    }
+    $legacy = cl_room_lock($s->db, $cfg['room_prefix'] . ':recorder', static function () use ($s, $input, $worker, $now, $format) {
         $beat = $s->get('record-worker', 'heartbeat');
-        $pending = cl_rec_pending($s);
-        if (isset($beat['worker']) && $worker !== $beat['worker'] && ($pending || $beat['at'] >= $now - 18)) {
+        if (isset($beat['worker']) && $worker !== $beat['worker']
+            && ($beat['at'] >= $now - 18 || $s->rows('record-pending', 1) || $s->get('record-slot', 'current'))) {
             throw new ClassroomError(409, 'این مدرسه به سرویس ضبط دیگری متصل است.');
         }
-        $s->put('record-worker', 'heartbeat', ['at'=>$now,'worker'=>$worker,'protocol'=>CL_REC_PROTOCOL,
-            'available'=>($input['available'] ?? false) === true,
-            'native_release'=>($input['native_release'] ?? null) === CL_REC_RELEASE ? CL_REC_RELEASE : null]);
-        $capture = $settle = $owned = [];
-        $work = null;
-        $offpeak = cl_rec_offpeak($s, $cfg, $now);
-        foreach ($pending as $job) {
-            if ($job['worker'] !== $worker) continue;
-            $owned[] = $job['id'];
-            if ($job['state'] === 'recording') $capture[] = $job['id'];
-            elseif ($job['expires'] <= $now || ($job['flight']['until'] ?? PHP_INT_MAX) <= $now) $settle[] = $job['id'];
-            elseif ($offpeak && cl_rec_eligible($job, $now)) {
-                if ($work === null || $job['id'] === ($input['current'] ?? null)
-                    || ($work['id'] !== ($input['current'] ?? null) && [$job['closed_at'],$job['id']] < [$work['closed_at'],$work['id']])) $work = $job;
+        $old = null;
+        if ($format === 2) {
+            // Let a stock Recorder drain its previous jobs during a staged upgrade.
+            // Never send it a truncated list or silently switch it over with paged jobs pending.
+            $rows = cl_rec_pending_page($s, '', 25);
+            $old = cl_rec_discovery($rows, $worker, $now);
+            if (count($rows) > 24 || count($old['capture']) > 3 || array_filter($rows, static fn($job) =>
+                ($job['plan_format'] ?? null) === CL_REC_PAGED_PLAN)) {
+                throw new ClassroomError(409, 'کارهای ضبط به نسخهٔ تازهٔ Recorder نیاز دارند.');
             }
         }
-        return ['capture'=>$capture,'pending'=>$owned,'settle'=>$settle,'work'=>$work['id'] ?? null,
-            'lease'=>$work ? min($now + 6, $work['expires']) : 0];
+        $s->put('record-worker', 'heartbeat', ['at'=>$now,'worker'=>$worker,'protocol'=>CL_REC_PROTOCOL,'plan_format'=>$format,
+            'available'=>($input['available'] ?? false) === true,
+            'capture_space'=>is_bool($input['capture_space'] ?? null) ? $input['capture_space'] : null,
+            'native_release'=>($input['native_release'] ?? null) === CL_REC_RELEASE ? CL_REC_RELEASE : null]);
+        return $old;
     });
+    // The global lock protects admission and identity, not a scan of all recorded classes.
+    $current = $currentId !== null && $s->get('record-pending', $currentId) ? $s->get('recording', $currentId) : null;
+    if (($current['worker'] ?? null) !== $worker) $current = null;
+    $work = cl_rec_offpeak($s, $cfg, $now) ? cl_rec_work($s, $worker, $now, $current) : null;
+    $permit = ['work'=>$work['id'] ?? null,'lease'=>$work ? min($now + 6, $work['expires']) : 0];
+    if ($format === 2) {
+        // A closure may have happened after the legacy snapshot. Don't grant work outside that complete plan.
+        return $legacy + ($work && !in_array($work['id'], array_merge($legacy['capture'], $legacy['settle']), true)
+            && in_array($work['id'], $legacy['pending'], true) ? $permit : ['work'=>null,'lease'=>0]);
+    }
+    return $permit + ['current_ok'=>$current !== null && $current['state'] === 'queued' && !cl_rec_needs_settlement($current, $now)]
+        + cl_rec_plan_page($s, $worker, $now);
 }
 
 function cl_rec_worker(ClassroomStore $s, array $cfg, array $input, int $now, callable $rpc, ?callable $request = null): array
@@ -471,9 +536,19 @@ function cl_rec_worker(ClassroomStore $s, array $cfg, array $input, int $now, ca
         return ['release'=>CL_REC_RELEASE,
             'idle'=>cl_rec_offpeak($s, $cfg, $now) && !$s->rows('record-pending', 1) && !$s->get('record-slot', 'current'),
             'worker_ok'=>!$recent || $same,
-            'native_ready'=>$recent && $same && ($beat['native_release'] ?? null) === CL_REC_RELEASE && cl_rec_health($s, $cfg, $now)];
+            'native_ready'=>$recent && $same && ($beat['plan_format'] ?? null) === CL_REC_PAGED_PLAN
+                && ($beat['native_release'] ?? null) === CL_REC_RELEASE && cl_rec_health($s, $cfg, $now)];
     }
     if ($action === 'plan' && $id === null) return cl_rec_plan($s, $cfg, $input, $worker, $now);
+    if ($action === 'plan-page' && $id === null) {
+        $cursor = $input['after'] ?? null;
+        $beat = $s->get('record-worker', 'heartbeat');
+        if (!cl_rec_id($cursor) || ($beat['plan_format'] ?? null) !== CL_REC_PAGED_PLAN
+            || ($beat['worker'] ?? null) !== $worker || ($beat['at'] ?? 0) < $now - 18) {
+            throw new ClassroomError(409, 'برنامهٔ صفحه‌بندی‌شدهٔ ضبط تأیید نشده است.');
+        }
+        return cl_rec_plan_page($s, $worker, $now, $cursor);
+    }
     $record = $id !== null ? $s->get('recording', $id) : null;
     if (!$record) {
         if ($action !== 'poll') throw new ClassroomError(410, 'ضبط در دسترس نیست.');

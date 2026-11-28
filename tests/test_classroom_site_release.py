@@ -139,7 +139,6 @@ class Site26ReleaseTest(unittest.TestCase):
             self.assertTrue(all(complete.read(n) == updater.read(n) for n in updater.namelist()))
             self.assertEqual(complete.read('README-fa.md'), (ROOT / 'plugin-manager/README-fa.md').read_bytes())
             gateway = updater.read(GATEWAY)
-            self.assertEqual(gateway, (ROOT / 'plugin-manager' / GATEWAY).read_bytes())
             self.assertIn(b"const MPM_VERSION = '0.1.33';", gateway)
         with ZipFile(ARTIFACTS / plugin) as new, ZipFile(ARTIFACTS / 'school-classroom-plugin-v0.4.25.zip') as old:
             raw = new.read('plugin.json')
@@ -153,15 +152,57 @@ class Site26ReleaseTest(unittest.TestCase):
             for name, digest in current['files'].items():
                 data = new.read(name)
                 self.assertEqual(sha256(data).hexdigest(), digest, name)
-                source = ROOT / 'school-addon/upload/online-classroom' / name
-                if source.is_file():
-                    self.assertEqual(data, source.read_bytes(), name)
             for name in ('recording-api.php', 'assets/board.js', 'assets/livekit-client.umd.js', 'assets/pdf-resources.zip'):
                 self.assertEqual(new.read(name), old.read(name), name)
             source = new.read('recording.php')
             self.assertIn(b'CL_REC_PROTOCOL = 2;', source)
             self.assertIn(b"['archiveCamera']", source)
             self.assertIn(b"CL_REC_RELEASE = '0.4.23';", source)
+
+
+class Site27ReleaseTest(unittest.TestCase):
+    def test_upgrade_keeps_settings_routes_and_stock_media_assets(self):
+        plugin = 'school-classroom-plugin-v0.4.27.zip'
+        update = 'baci-plugin-manager-update-v0.1.34.zip'
+        full = 'baci-plugin-manager-v0.1.34.zip'
+        bundle = 'baci-classroom-site-upgrade-v0.4.27.zip'
+        guide = 'START-HERE-fa.txt'
+        expected = hashes((ARTIFACTS / 'SHA256SUMS-v0.4.27.txt').read_bytes())
+        self.assertEqual(set(expected), {plugin, update, full, bundle})
+        for name, digest in expected.items():
+            self.assertEqual(sha256((ARTIFACTS / name).read_bytes()).hexdigest(), digest, name)
+        with ZipFile(ARTIFACTS / bundle) as outer:
+            self.assertCountEqual(outer.namelist(), [plugin, update, guide, 'SHA256SUMS.txt'])
+            self.assertEqual(hashes(outer.read('SHA256SUMS.txt')), {
+                plugin: expected[plugin], update: expected[update], guide: sha256(outer.read(guide)).hexdigest(),
+            })
+            for name in (plugin, update):
+                self.assertEqual(sha256(outer.read(name)).hexdigest(), expected[name], name)
+            self.assertEqual(outer.read(guide), (ROOT / 'docs/baci-classroom-site-v0.4.27.fa.txt').read_bytes())
+        with ZipFile(ARTIFACTS / update) as updater, ZipFile(ARTIFACTS / full) as complete, \
+                ZipFile(ARTIFACTS / 'baci-plugin-manager-update-v0.1.33.zip') as previous:
+            self.assertCountEqual(updater.namelist(), previous.namelist())
+            self.assertEqual([n for n in updater.namelist() if updater.read(n) != previous.read(n)], [GATEWAY])
+            self.assertTrue(all(updater.read(n) == complete.read(n) for n in updater.namelist()))
+            gateway = updater.read(GATEWAY)
+            self.assertEqual(gateway, (ROOT / 'plugin-manager' / GATEWAY).read_bytes())
+            self.assertIn(b"const MPM_VERSION = '0.1.34';", gateway)
+        with ZipFile(ARTIFACTS / plugin) as new, ZipFile(ARTIFACTS / 'school-classroom-plugin-v0.4.26.zip') as old:
+            raw = new.read('plugin.json')
+            current, prior = json.loads(raw), json.loads(old.read('plugin.json'))
+            self.assertIn(f"'0.4.27' => '{sha256(raw).hexdigest()}'".encode('ascii'), gateway)
+            self.assertEqual(current['version'], '0.4.27')
+            self.assertEqual(current['settings'], prior['settings'])
+            self.assertEqual(current['routes'], prior['routes'])
+            self.assertEqual(current['preserve_settings_from'], prior['preserve_settings_from'] + ['0.4.26'])
+            self.assertCountEqual(new.namelist(), ['plugin.json', *current['files']])
+            self.assertEqual({n for n in current['files'] if new.read(n) != old.read(n)}, {'recording.php','store.php','deactivate.php'})
+            for name, digest in current['files'].items():
+                data = new.read(name)
+                self.assertEqual(sha256(data).hexdigest(), digest, name)
+                source = ROOT / 'school-addon/upload/online-classroom' / name
+                if source.is_file():
+                    self.assertEqual(data, source.read_bytes(), name)
 
 
 if __name__ == '__main__':

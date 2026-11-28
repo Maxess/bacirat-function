@@ -117,7 +117,7 @@ def main():
     p.add_argument('count',type=int,choices=[0,3,9])
     p.add_argument('quality',choices=['low','medium','high'])
     p.add_argument('seconds',type=int)
-    p.add_argument('trial',nargs='?',default='standard',choices=['standard','baseline','udp-batch'])
+    p.add_argument('trial',nargs='?',default='standard',choices=['standard','baseline','udp-batch','candidate'])
     a = p.parse_args()
     work = a.workdir
     rows = [json.loads(line) for line in (work/'counters.jsonl').read_text().splitlines()]
@@ -178,7 +178,7 @@ def main():
                   worst_receiver_late_audio_gap_pct=max(float(w['worst_audio_gap_pct']) for w in media), media_windows=len(media))
     print('QA_SCHOOL_OFFER', compact(bounds))
     a.output.write_text(json.dumps(dict(pupils=180,teachers=9,rooms=9,active_microphones=25,quality=a.quality,recordings=a.count,variant=a.trial,
-        profile='full',test_only_raised_capture_limit=a.count == 9,phases=results,media=bounds,films=films,
+        profile='full',test_only_raised_capture_limit=a.count == 9 and a.trial != 'candidate',phases=results,media=bounds,films=films,
         **{k:overview[k] for k in ('cpu_model','active_whiteboards','strokes_per_board','max_board_delta_json_bytes','capture_bytes_by_room')}),indent=2)+'\n')
 
 

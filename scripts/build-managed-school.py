@@ -18,8 +18,8 @@ HOST = ROOT / 'plugin-manager'
 SRC = ROOT / 'school-addon/upload/online-classroom'
 LEGACY = ARTIFACTS / 'school-classroom-pilot-v0.1.0.zip'
 LEGACY_SHA = 'bebc35a02f57346880373a034ee493b757a8017a12812a133ab957358d9de161'
-VERSION = '0.4.26'
-MANAGER_VERSION = '0.1.33'
+VERSION = '0.4.27'
+MANAGER_VERSION = '0.1.34'
 # The historical pairing companion through VPS 1.3.2 stays byte-for-byte frozen.
 PAIRING_CLASSROOM_VERSION = '0.4.24'
 PAIRING_MANAGER_VERSION = '0.1.31'
@@ -39,7 +39,9 @@ RENDERER_INSTALLER = f'repair-renderer-v{RECORDER_VERSION}-r1.py'
 AUDIO_REPAIR = f'baci-recorder-audio-repair-v{RECORDER_VERSION}-r2.py'
 AUDIO_REPAIR_SHA = '88776bf3a247f7bab482b33931c281d1bb3638e1b2981bc8738c6c5a8cb5df73'
 R1_SHA = '07d51104f5fa7bbfd90d6329931fa0e9d03967b9c8fc617c8fe08f10b4d38cfd'
-FRESH_RECORDER = f'baci-classroom-recorder-v{RECORDER_VERSION}-r3.zip'
+R3_RECORDER = f'baci-classroom-recorder-v{RECORDER_VERSION}-r3.zip'
+R3_RECORDER_SHA = '7f5863dd842fbcc3298d0605aa745b517a7e0298baae0c471215ab4df407cd26'
+FRESH_RECORDER = f'baci-classroom-recorder-v{RECORDER_VERSION}-r4.zip'
 MAINTENANCE_SHA = '2782b003fb54886777e2ea3e06b76d9587d1b3ef89bcc0e736e15283ca5782f6'
 # Go 1.26.2, linux/amd64, same bytes as the verified GitHub Actions build.
 NATIVE = {
@@ -142,7 +144,7 @@ def plugin_entries(pdf_archive):
         'report_menus': {role: 'حضور و غیاب کلاس مجازی' for role in ('teacher', 'admin', 'deputy')},
         'routes': {'page': 'index.php', 'api': 'api.php', 'content': 'content.php', 'events': 'events.php', 'job': 'job.php', 'recording': 'recording-api.php'},
         'store': True, 'pdf_resources': 'assets/pdf-resources.zip',
-        'preserve_settings_from': ['0.2.0', '0.2.1', '0.2.2', '0.2.3', '0.3.0', '0.4.0', '0.4.1', '0.4.2', '0.4.3', '0.4.4', '0.4.5', '0.4.6', '0.4.7', '0.4.8', '0.4.9', '0.4.10', '0.4.11', '0.4.12', '0.4.13', '0.4.14', '0.4.15', '0.4.16', '0.4.17', '0.4.18', '0.4.19', '0.4.20', '0.4.21', '0.4.22', '0.4.23', '0.4.24', '0.4.25'],
+        'preserve_settings_from': ['0.2.0', '0.2.1', '0.2.2', '0.2.3', '0.3.0', '0.4.0', '0.4.1', '0.4.2', '0.4.3', '0.4.4', '0.4.5', '0.4.6', '0.4.7', '0.4.8', '0.4.9', '0.4.10', '0.4.11', '0.4.12', '0.4.13', '0.4.14', '0.4.15', '0.4.16', '0.4.17', '0.4.18', '0.4.19', '0.4.20', '0.4.21', '0.4.22', '0.4.23', '0.4.24', '0.4.25', '0.4.26'],
         'hooks': {'deactivate': 'deactivate.php'},
         'settings': [
             {'key': 'signal_url', 'type': 'wss', 'label': 'آدرس رسانه (wss://)'},
@@ -286,12 +288,10 @@ def recorder_release(output_dir, native_build):
 
 
 def recorder_fresh(output_dir):
-    """Assemble the fresh VPS pack without changing the Recorder/LiveKit wire protocol."""
-    with frozen_recorder() as base, ZipFile(BytesIO(verified_release(RENDERER_REPAIR, R1_SHA))) as r1:
-        files = {name: base.read(name) for name in base.namelist()}
-        files.update({name: r1.read(name) for name in RENDERER_FIX})
-    files.update({name: (RECORDER_SRC / name).read_bytes()
-                  for name in ('README-fa.md', 'recording.py', 'frame.js', 'replay.js', 'transport.py')})
+    """Keep the reviewed r3 renderer, media receiver and HTTP client unchanged."""
+    with ZipFile(BytesIO(verified_release(R3_RECORDER, R3_RECORDER_SHA))) as r3:
+        files = {name: r3.read(name) for name in r3.namelist()}
+    files['recording.py'] = (RECORDER_SRC / 'recording.py').read_bytes()
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / FRESH_RECORDER
     write_zip(path, files)
@@ -348,7 +348,7 @@ def main():
     parser.add_argument('--output-dir', type=Path)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--recorder-only', action='store_true', help='rebuild the unchanged standalone VPS release')
-    mode.add_argument('--recorder-fresh', action='store_true', help='build the r3 Recorder pack for the fresh VPS installer')
+    mode.add_argument('--recorder-fresh', action='store_true', help='build the r4 Recorder pack for fresh installs and managed upgrades')
     mode.add_argument('--renderer-candidate', action='store_true', help='build an offline test ZIP, not a production upgrade')
     mode.add_argument('--renderer-repair', action='store_true', help='rebuild the pinned renderer-only r1 repair ZIP')
     mode.add_argument('--audio-repair', action='store_true', help='build the standalone renderer-only r2 audio repair for VPS 1.3.2')

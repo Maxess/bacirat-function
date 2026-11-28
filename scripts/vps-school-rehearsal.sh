@@ -6,13 +6,14 @@ run_school_rehearsal() (
     local php="$root/tests/fixtures/vps-school-record.php"
     local spool=/var/lib/school-classroom-recorder
     local results=${BACI_QA_SCHOOL_RESULTS:?}
-    local seconds=${BACI_QA_SCHOOL_SECONDS:-60} trial=${BACI_QA_SCHOOL_TRIAL:-}
+    local seconds=${BACI_QA_SCHOOL_SECONDS:-60} trial=${BACI_QA_SCHOOL_TRIAL:-} candidate=${BACI_QA_SCHOOL_CANDIDATE:-0}
     [[ "$seconds" =~ ^(60|90|120)$ && -d "$results" && "$VM_BENCH_CLIENT_CPUS" != '' ]]
     [[ "$quality" == low || "$quality" == medium || "$quality" == high ]]
     [[ "$count" == 0 || "$count" == 3 || "$count" == 9 ]]
     if [[ -n "$trial" ]]; then
         [[ "$quality" == high && "$count" == 9 && ( "$trial" == baseline || "$trial" == udp-batch ) ]]
     fi
+    if [[ "$candidate" == 1 ]]; then [[ "$count" == 9 && "$quality" == high && -z "$trial" ]]; fi
     mkdir -m 700 "$q"
     cp "$work/qa.crt" "$work/school.pem" "$work/school.key" "$q/"
     vm 'sudo cat /etc/school-classroom/site-pairing.json' > "$q/pair.json"
@@ -61,12 +62,22 @@ ip link set "$iface" up
 sed -i -E 's/^172\.30\.123\.2 school\.example\.test$/172.30.124.2 school.example.test/' /etc/hosts
 systemctl stop baci-fixture-peer
 GUEST
-    # Use the actual plugin ZIP carried by this public VPS archive. Compare the
-    # bytes before taking a disposable copy for the test-only cap increase.
+    # The historical experiments still use their immutable baseline and their
+    # explicitly labelled disposable cap edits. Never patch a candidate package.
     local site=baci-classroom-site-upgrade-v0.4.26.zip plugin=school-classroom-plugin-v0.4.26.zip
+    local digest=493b09e48376222001f728616d0fc0445a75c29951bdf488a1e8467acd35bebf
+    local patched=$count
+    if [[ "$candidate" == 1 ]]; then
+        site=baci-classroom-site-upgrade-v0.4.27.zip
+        plugin=school-classroom-plugin-v0.4.27.zip
+        digest=$(sha256sum "$root/artifacts/$site" | cut -d ' ' -f 1)
+        patched=0
+        vm 'sudo grep -Fxq "    batch_size: 64" /etc/school-classroom/livekit.yaml && sudo grep -Fxq "    max_flush_interval: 1ms" /etc/school-classroom/livekit.yaml && sudo grep -Fxq "  udp_port: 7882" /etc/school-classroom/livekit.yaml'
+        echo 'QA_SCHOOL_VARIANT shipping candidate: packaged Recorder r4, site 0.4.27, UDP batching enabled by installer; no cap/config overrides'
+    fi
     vm "cat baci-classroom-vps-offline/$site" > "$q/$site"
-    printf '%s  %s\n' 493b09e48376222001f728616d0fc0445a75c29951bdf488a1e8467acd35bebf "$q/$site" | sha256sum --strict -c
-    python3 - "$q" "$site" "$plugin" "$count" <<'PY_SITE'
+    printf '%s  %s\n' "$digest" "$q/$site" | sha256sum --strict -c
+    python3 - "$q" "$site" "$plugin" "$patched" <<'PY_SITE'
 import io
 from pathlib import Path, PurePosixPath
 import sys
@@ -85,7 +96,7 @@ if count == '9':
     assert text.count(old) == 1
     dest.write_text(text.replace(old, 'const CL_REC_CAPTURE_LIMIT = 9;'))
 PY_SITE
-    if [[ "$count" == 9 ]]; then
+    if [[ "$patched" == 9 ]]; then
         vm 'sudo /usr/bin/python3 -IB -' <<'PY_GUEST'
 from pathlib import Path
 import subprocess
@@ -232,7 +243,9 @@ PY_SFU
     fi
     phase halt
     wait "$sampler_pid"
-    vm "test -z \"\$(sudo find '$spool' \\( -name '*.baci' -o -name '*.mp4' \\) -print -quit)\"; grep -Eq '^oom_kill +0$' /proc/vmstat"
-    python3 "$root/tests/fixtures/vps-school-results.py" "$q" "$results/measurement.json" "$count" "$quality" "$seconds" "${trial:-standard}"
+    vm "set -e; test -z \"\$(sudo find '$spool' \\( -name '*.baci' -o -name '*.mp4' \\) -print -quit)\"; grep -Eq '^oom_kill +0$' /proc/vmstat"
+    local variant=${trial:-standard}
+    if [[ "$candidate" == 1 ]]; then variant=candidate; fi
+    python3 "$root/tests/fixtures/vps-school-results.py" "$q" "$results/measurement.json" "$count" "$quality" "$seconds" "$variant"
     echo 'QA_SCHOOL_PASS exact UDP workload and all planned receipts verified'
 )

@@ -1,0 +1,102 @@
+name: Packaged high-quality recording and capacity upgrade
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/vps-capacity-candidate.yml
+      - scripts/test-vps-offline-vm.sh
+      - scripts/vps-school-rehearsal.sh
+      - tests/fixtures/vps-school-*
+      - server/install.py
+      - server/offline/**
+      - artifacts/baci-classroom-site-upgrade-v0.4.27.zip
+      - artifacts/baci-classroom-recorder-v0.4.23-r4.zip
+permissions:
+  contents: read
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 24
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [high-nine, capacity-update]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        if: matrix.scenario == 'high-nine'
+        with:
+          go-version: '1.26.2'
+          cache-dependency-path: server/recorder/native/go.sum
+      - name: Repack the verified v1.3.3 Ubuntu dependency closure with exact candidate packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CGO_ENABLED: '0'
+          GOTOOLCHAIN: local
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/prepare.log"
+          trap 'proof=$(tail -15 "$log" | paste -sd "|"); echo "::error title=Candidate preparation::${proof:0:3500}"' ERR
+          (
+            sudo apt-get -q -o Acquire::Retries=3 -o APT::Update::Error-Mode=any update
+            sudo apt-get -qy -o Acquire::Retries=3 install --no-install-recommends qemu-system-x86 qemu-utils cloud-image-utils ffmpeg php8.3-cli php8.3-sqlite3 php8.3-curl
+            sudo chmod a+rw /dev/kvm
+            if [[ '${{ matrix.scenario }}' == high-nine ]]; then
+              (cd server/recorder/native && go build -mod=readonly -trimpath -o "$RUNNER_TEMP/school-load" "$GITHUB_WORKSPACE/tests/fixtures/vps-school-load.go")
+              php8.3 -l tests/fixtures/vps-school-record.php
+              php8.3 tests/classroom-recording.php
+            fi
+            name=baci-classroom-vps-offline-v1.3.3-ubuntu24.04-amd64.tar.gz
+            gh release download vps-offline-v1.3.3 --repo Maxess/bacirat-function --pattern "$name" --dir "$RUNNER_TEMP"
+            printf '%s  %s\n' 33f90e0fa350078bdfaa487adda3ba66f0182eb272f0f15e1b67a927ad3fe176 "$RUNNER_TEMP/$name" | sha256sum --strict -c
+            w="$RUNNER_TEMP/candidate"
+            mkdir "$w"
+            tar -xzf "$RUNNER_TEMP/$name" -C "$w"
+            bundle="$w/baci-classroom-vps-offline"
+            cp server/offline/{install.sh,setup.py,START-HERE-fa.md} "$bundle/"
+            cp server/install.py "$bundle/vps_media.py"
+            rm "$bundle"/payload/baci-classroom-recorder-v0.4.23-r3.zip "$bundle"/baci-classroom-site-upgrade-v0.4.26.zip
+            cp artifacts/baci-classroom-site-upgrade-v0.4.27.zip "$bundle/"
+            pack=baci-classroom-recorder-v0.4.23-r4.zip
+            cp "artifacts/$pack" "$bundle/payload/"
+            digest=$(sha256sum "artifacts/$pack" | cut -d ' ' -f1)
+            jq --arg sha "$GITHUB_SHA" --arg pack "$pack" --arg digest "$digest" \
+                '.version="1.3.4" | .git=$sha | .qa_dependency_base="1.3.3" | del(.pinned_payload_sha256["baci-classroom-recorder-v0.4.23-r3.zip"]) | .pinned_payload_sha256[$pack]=$digest' \
+                "$bundle/BUILD.json" > "$w/build.json"
+            mv "$w/build.json" "$bundle/BUILD.json"
+            ( cd "$bundle"; find . -type f ! -name SHA256SUMS -printf '%P\0' | sort -z | xargs -0 sha256sum > SHA256SUMS )
+            tar -cf - -C "$w" baci-classroom-vps-offline | gzip -n -1 > "$RUNNER_TEMP/capacity-candidate.tar.gz"
+            sha256sum "$RUNNER_TEMP/capacity-candidate.tar.gz" "artifacts/$pack" artifacts/baci-classroom-site-upgrade-v0.4.27.zip
+            printf 'BACI_BASELINE=%s\n' "$RUNNER_TEMP/$name" >> "$GITHUB_ENV"
+          ) > "$log" 2>&1
+          tail -8 "$log"
+      - name: Install the unchanged candidate in a 2 vCPU / 4 GiB Noble VM
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/capacity-candidate.tar.gz"
+          log="$RUNNER_TEMP/capacity.log"
+          export BACI_QA_SCHOOL_RESULTS="$RUNNER_TEMP/results"
+          mkdir "$BACI_QA_SCHOOL_RESULTS"
+          trap 'proof=$(grep -E "^QA_|^VM guest failure|^VM rehearsal|^Baci VPS:|[Ee]rror:" "$log" | tail -17 | paste -sd "|"); echo "::error title=Capacity candidate::${proof:0:3700}"' ERR
+          if [[ '${{ matrix.scenario }}' == high-nine ]]; then
+            BACI_QA_SCHOOL_CANDIDATE=1 BACI_QA_SCHOOL_QUALITY=high BACI_QA_SCHOOL_CAPTURES=9 BACI_QA_SCHOOL_SECONDS=60 \
+              bash scripts/test-vps-offline-vm.sh "$archive" files 4096 '' default "$RUNNER_TEMP/school-load" 2>&1 | tee "$log"
+            jq -e '.quality == "high" and .recordings == 9 and .variant == "candidate" and (.test_only_raised_capture_limit | not)
+                   and .phases.live.min_live_sources == 9 and (.films | length) == 9' "$BACI_QA_SCHOOL_RESULTS/measurement.json" > /dev/null
+            grep -E '^QA_SCHOOL_(VARIANT|RECEIPTS|METRICS phase=live|OFFER) ' "$log" | while read -r line; do echo "::notice title=Packaged high-nine::$line"; done
+            jq -c '{cpu_model, capture_bytes_by_room, films: (.films | map_values({duration_s,bytes,rendered_after_eligible_s}))}' \
+                "$BACI_QA_SCHOOL_RESULTS/measurement.json" | while read -r line; do echo "::notice title=Verified nine films::$line"; done
+          else
+            bash scripts/test-vps-offline-vm.sh "$archive" files 4096 '' capacity-update '' "$BACI_BASELINE" 2>&1 | tee "$log"
+            grep -E '^QA_CAPACITY_UPDATE |^QA_R4 |^VM passed' "$log" | while read -r line; do echo "::notice title=Capacity upgrade::$line"; done
+            grep -q '^QA_CAPACITY_UPDATE ' "$log"
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always() && matrix.scenario == 'high-nine'
+        with:
+          name: packaged-high-nine-evidence
+          path: ${{ runner.temp }}/results/
+          if-no-files-found: ignore
+          retention-days: 14

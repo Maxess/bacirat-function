@@ -11,6 +11,10 @@ run_recording_rehearsal() (
     chmod 600 "$q/pair.json"
     python3 "$root/tests/fixtures/vps-record-inputs.py" "$q"
     local php="$root/tests/fixtures/vps-record-school.php"
+    # Test historical workers against their matching shipped site policy.
+    local site_version=0.4.26
+    if vm 'grep -q "^PAGED_PLAN = 3$" /opt/school-classroom-recorder/releases/0.4.23/recording.py'; then site_version=0.4.27; fi
+    python3 -m zipfile -e "$root/artifacts/school-classroom-plugin-v$site_version.zip" "$q/site"
     in_net() { sudo ip netns exec "$net" "$@"; }
     as_runner() { in_net runuser -u "$(id -un)" -- env "BACI_QA_DIR=$q" "BACI_QA_PROVIDER=$provider" "SSL_CERT_FILE=$q/qa.crt" "$@"; }
     school() { as_runner php -d "curl.cainfo=$q/qa.crt" "$php" "$@"; }

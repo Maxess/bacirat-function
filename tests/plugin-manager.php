@@ -681,9 +681,19 @@ try {
     submit($db,$site,'prepare-update');
     expect(mpm_install($db,$dir,__DIR__ . '/../artifacts/school-classroom-plugin-v0.4.26.zip'), 'upgrade from the public .25 package');
     $row = mpm_row($db,$slug);
-    expect(MPM_VERSION === '0.1.33' && $row['version'] === '0.4.26' && $row['state'] === 'disabled'
+    expect($row['version'] === '0.4.26' && $row['state'] === 'disabled'
         && mpm_owned_row($db,$row)['settings'] === $paired && $row['owner'] === $migrated['owner'] && mpm_check_store($db,$row) === $store,
         'new webcam layout does not change pairing, settings or ownership');
+    submit($db,$site,'enable');
+    submit($db,$site,'prepare-update');
+    expect(mpm_install($db,$dir,__DIR__ . '/../artifacts/school-classroom-plugin-v0.4.27.zip'), 'upgrade from the public .26 package');
+    $row = mpm_row($db,$slug);
+    expect(MPM_VERSION === '0.1.34' && $row['version'] === '0.4.27' && $row['state'] === 'disabled'
+        && mpm_owned_row($db,$row)['settings'] === $paired && mpm_check_store($db,$row) === $store && $row['owner'] === $oldRow['owner']
+        && mpm_query($db,"SELECT payload FROM `$store` WHERE bucket='lesson' AND item=?",[$oldId])->fetchColumn() === $finishedBefore
+        && mpm_query($db,"SELECT payload FROM `$store` WHERE bucket='record-links' AND item=?",['1404/1405:22'])->fetchColumn() === $linkedGroup
+        && mpm_query($db,"SELECT payload FROM `$store` WHERE bucket='recording' AND item=?",[$historicId])->fetchColumn() === $historicRecording,
+        'paged plans do not change pairing, settings, authorized group, history or ownership');
     mpm_write_settings($db,$dir,$row,$savedAttendance);
     unset($GLOBALS['MPM_CLI_SITE_PATH']);
     if ($previousScript === null) unset($_SERVER['SCRIPT_NAME']); else $_SERVER['SCRIPT_NAME'] = $previousScript;

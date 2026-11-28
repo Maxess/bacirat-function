@@ -22,6 +22,8 @@ Profile: auto (default) installs recording (compact or full); never falls back t
   --profile compact  Local recording/MP4; a 512 MiB VPS also needs 512 MiB active swap.
   --profile full  Also install the Recorder and sandboxed MP4 renderer, with additional RAM.
 Existing managed idle live install: see --add-recorder [--check] in the guide.
+Existing managed r3 install: see --update-recorder [--check] in the guide.
+Existing managed SFU: --update-udp [--check] or --restore-udp [--check].
 After importing the private file and enabling recording: sudo baci-vps doctor --online --wait
 HELP
     exit

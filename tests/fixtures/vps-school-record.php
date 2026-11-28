@@ -126,7 +126,10 @@ try {
                 break;
             case 'start':
                 $count = (int)($argv[2] ?? -1);
-                need(in_array($count, [0,3,9], true) && CL_REC_CAPTURE_LIMIT === ($count === 9 ? 9 : 3), 'unexpected tested capacity');
+                $candidate = defined('CL_REC_PAGED_PLAN');
+                need($candidate ? $count === 9 : in_array($count, [0,3,9], true) && CL_REC_CAPTURE_LIMIT === ($count === 9 ? 9 : 3),
+                    'unexpected tested capacity');
+                if ($candidate) need(($s->get('record-worker','heartbeat')['plan_format'] ?? null) === CL_REC_PAGED_PLAN, 'shipped worker must negotiate paged plans');
                 $roster = cl_classes($db, '1405/1406');
                 $chosen = $count === 9 ? $classes : ($count === 3 ? [1,8,9] : []);
                 $start = static function (int $c) use ($s,$cfg,$roster,$now): array {

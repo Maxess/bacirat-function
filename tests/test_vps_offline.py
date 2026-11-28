@@ -1,5 +1,5 @@
 """Pure checks for the installer/pairing release; distinct from the disconnected VM rehearsal."""
-from contextlib import ExitStack, redirect_stdout, redirect_stderr
+from contextlib import ExitStack, redirect_stdout, redirect_stderr, nullcontext
 from email.message import Message
 from hashlib import sha256
 import importlib.util
@@ -488,15 +488,87 @@ class OfflineSetupTest(unittest.TestCase):
             self.assertFalse(p.with_name('fresh').exists())
 
     def test_fresh_pack_is_reproducible_and_matches_the_installer_and_site(self):
-        self.assertEqual(setup.VERSION, '1.3.3')
+        self.assertEqual(setup.VERSION, '1.3.4')
         self.assertEqual(sha256((ARTIFACTS / setup.REC_ASSET).read_bytes()).hexdigest(), setup.PAYLOAD[setup.REC_ASSET])
         with tempfile.TemporaryDirectory() as folder:
             subprocess.run(['python3', str(ROOT / 'scripts/build-managed-school.py'), '--recorder-fresh',
                             '--output-dir', folder], check=True, capture_output=True, timeout=20)
             self.assertEqual((Path(folder) / setup.REC_ASSET).read_bytes(), (ARTIFACTS / setup.REC_ASSET).read_bytes())
+        with ZipFile(ARTIFACTS / setup.REC_ASSET) as candidate, \
+                ZipFile(ARTIFACTS / 'baci-classroom-recorder-v0.4.23-r3.zip') as published:
+            self.assertCountEqual(candidate.namelist(), published.namelist())
+            self.assertEqual([n for n in candidate.namelist() if candidate.read(n) != published.read(n)], ['recording.py'])
+            self.assertEqual(sha256(published.read('recording.py')).hexdigest(), setup.R3_RECORDING_SHA)
+            self.assertEqual(candidate.read('recording.py'), (ROOT / 'server/recorder/recording.py').read_bytes())
         with ZipFile(ARTIFACTS / build.SITE) as site:
-            self.assertCountEqual(site.namelist(), ['baci-plugin-manager-update-v0.1.33.zip',
-                'school-classroom-plugin-v0.4.26.zip', 'START-HERE-fa.txt', 'SHA256SUMS.txt'])
+            self.assertCountEqual(site.namelist(), ['baci-plugin-manager-update-v0.1.34.zip',
+                'school-classroom-plugin-v0.4.27.zip', 'START-HERE-fa.txt', 'SHA256SUMS.txt'])
+
+    def test_new_managed_yaml_keeps_bound_udp_ports_and_webhook(self):
+        config = dict(ipv4='203.0.113.50', origin='https://school.fixture.test', site_path='/campus')
+        keys = dict(api_key='test-media-1234', api_secret='test-secret-'*4)
+        deployment = keys | {'school_origin': config['origin']}
+        with patch.object(setup, 'local_ipv4', return_value=True):
+            current = setup.sfu_config(config, keys)
+        self.assertIn('includes: [203.0.113.50/32]', current)
+        self.assertIn(setup.media.UDP_BATCH, current)
+        self.assertIn('  tcp_port: 7881\n', current)
+        self.assertIn('/campus/plugins/', current)
+        self.assertEqual(setup.media.update_engine_config(current, deployment, udp_batch=False),
+                         current.replace(setup.media.UDP_BATCH, ''))
+
+    def test_recorder_update_preflights_pinned_stock_file_and_rolls_back_failed_restart(self):
+        with tempfile.TemporaryDirectory() as folder:
+            top = Path(folder).resolve()
+            rec, spool = top/'rec', top/'spool'
+            program = rec/'releases/0.4.23'
+            program.mkdir(parents=True)
+            for path in (spool, top/'payload', top/'systemd'):
+                path.mkdir()
+            pack = ARTIFACTS/setup.REC_ASSET
+            (top/'payload'/setup.REC_ASSET).write_bytes(pack.read_bytes())
+            with ZipFile(ARTIFACTS/'baci-classroom-recorder-v0.4.23-r3.zip') as old:
+                before = old.read('recording.py')
+                (program/'transport.py').write_bytes(old.read('transport.py'))
+            path = program/'recording.py'
+            path.write_bytes(before)
+            path.chmod(0o644)
+            site, secret, identity = 'https://fixture.example.test/campus', 'a'*64, 'b'*32
+            pair, config_path, credential = (top/n for n in ('pair','config','credential'))
+            for file, data in ((pair,{'site':site,'recording_secret':secret}),
+                               (config_path,{'site':site,'secret':secret}),(credential,{'site':site,'secret':secret}),
+                               (spool/'worker.json',{'id':identity})):
+                file.write_text(json.dumps(data))
+                file.chmod(0o600)
+            cfg = {'version':'1.3.3','profile':'full','school':site}
+            with patch.multiple(setup, HERE=top, REC=rec, REC_PROGRAM=program, PAIR=pair, REC_CFG=config_path,
+                                REC_CREDENTIAL=credential, SPOOL=spool, SYSTEMD=top/'systemd'), \
+                    patch.object(setup, 'verify_payloads'), patch.object(setup, 'managed'), \
+                    patch.object(setup.media, 'locked_config', return_value=nullcontext()), \
+                    patch.object(setup.media.os, 'fchown'), patch.object(setup, 'recorder_update_unit'), \
+                    patch.object(setup, 'recorder_idle') as idle, patch.object(setup, 'run') as command, patch.object(setup, 'wait_ready'):
+                path.write_bytes(before + b'# custom\n')
+                with self.assertRaisesRegex(setup.Refused, 'differs'):
+                    setup.update_recorder(cfg, check=False)
+                self.assertEqual(path.read_bytes(), before + b'# custom\n')
+                idle.assert_not_called()
+                path.write_bytes(before)
+                setup.update_recorder(cfg, check=True)
+                command.assert_not_called()
+                self.assertEqual(list(program.glob('*.bak')), [])
+                command.side_effect = [setup.Refused('fixture restart error'), None]
+                with self.assertRaisesRegex(setup.Refused, 'restored'):
+                    setup.update_recorder(cfg, check=False)
+                self.assertEqual(path.read_bytes(), before)
+                self.assertTrue(all(c.args == ('systemctl','restart',setup.RECORDER) for c in command.call_args_list))
+                self.assertEqual(len(list(program.glob('*.bak'))), 1)
+                command.side_effect = None
+                command.reset_mock()
+                setup.update_recorder(cfg, check=False)
+                self.assertNotEqual(path.read_bytes(), before)
+                self.assertEqual(command.call_count, 1)
+                setup.update_recorder(cfg, check=False)
+                self.assertEqual(command.call_count, 1, 'already updated, no extra restart')
 
     def test_historical_pairing_is_frozen(self):
         pairing = ARTIFACTS / 'baci-classroom-site-pairing-v0.1.31.zip'

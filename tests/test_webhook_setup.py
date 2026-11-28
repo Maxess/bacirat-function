@@ -228,10 +228,59 @@ class WebhookSetupTest(unittest.TestCase):
 
     def test_new_pilot_enables_vp8_but_no_other_settings_change(self):
         stock = installer.engine_config('203.0.113.50', DEPLOYMENT['api_key'], DEPLOYMENT['api_secret'])
-        self.assertEqual(stock.replace('    - mime: video/VP8\n', ''), self.base)
+        self.assertEqual(stock.replace('    - mime: video/VP8\n', '').replace(installer.UDP_BATCH, ''), self.base)
         after, _ = installer.registered_config(stock, DEPLOYMENT, '/school-test')
         self.assertTrue(after.startswith(stock + installer.WEBHOOK_MARKER))
         self.assertEqual(installer.camera_config(after, DEPLOYMENT), after)
+
+    def test_udp_change_preserves_offline_address_codecs_key_and_managed_webhook(self):
+        for camera in (False, True):
+            for bound in (False, True):
+                for path in (None, '', '/campus'):
+                    with self.subTest(camera=camera, bound=bound, callback=path):
+                        before = installer.engine_config('203.0.113.50', DEPLOYMENT['api_key'], DEPLOYMENT['api_secret'],
+                                                         camera=camera, bound_udp=bound, udp_batch=False)
+                        if path is not None:
+                            before = installer.registered_config(before, DEPLOYMENT, path)[0]
+                        after = installer.update_engine_config(before, DEPLOYMENT, udp_batch=True)
+                        self.assertEqual(after, before.replace('  udp_port: 7882\n', '  udp_port: 7882\n' + installer.UDP_BATCH))
+                        self.assertEqual(installer.update_engine_config(after, DEPLOYMENT, udp_batch=False), before)
+                        self.assertIn(installer.UDP_BATCH, installer.camera_config(after, DEPLOYMENT))
+                        self.assertIn(installer.UDP_BATCH, installer.registered_config(after, DEPLOYMENT, '/other')[0])
+
+    def test_udp_apply_refuses_busy_or_custom_then_changes_only_the_running_offline_sfu(self):
+        self.service.write_text(installer.sfu_unit_config(network_online=True))
+        self.systemctl_idle([{'name': 'in-use'}])
+        installer.main(['udp'])
+        self.assertIn('udp_batch=off change_needed=yes', self.output.getvalue())
+        with self.assertRaisesRegex(ValueError, 'open rooms'):
+            installer.configure_udp(SimpleNamespace(disable=False, apply=True, restart=True))
+        self.assertEqual(self.path.read_text(), self.base)
+        custom = self.base.replace('  udp_port: 7882\n', '  udp_port: 9000\n')
+        self.write_private(self.path, custom)
+        with self.assertRaisesRegex(ValueError, 'custom'):
+            installer.configure_udp(SimpleNamespace(disable=False, apply=True, restart=True))
+        self.assertEqual(self.path.read_text(), custom)
+        self.assertEqual(list(self.config_dir.glob('*.bak')), [])
+        self.write_private(self.path, self.base)
+        self.systemctl_idle([])
+        installer.main(['udp', '--apply', '--restart'])
+        self.assertEqual(len(list(self.config_dir.glob('livekit.yaml.before-udp-*.bak'))), 1)
+        self.assertIn(installer.UDP_BATCH, self.path.read_text())
+        self.assertEqual(self.systemctl.call_args.args[0], ['systemctl', 'restart', installer.SFU_SERVICE])
+        self.systemctl.reset_mock()
+        installer.main(['udp', '--apply', '--restart'])
+        self.systemctl.assert_not_called()
+        self.assertNotIn(DEPLOYMENT['api_secret'], self.output.getvalue())
+        installer.main(['udp', '--disable', '--apply', '--restart'])
+        self.assertEqual(self.path.read_text(), self.base)
+
+    def test_udp_restart_failure_retains_exact_old_layout(self):
+        self.systemctl_idle([])
+        self.systemctl.side_effect = [self.systemctl.return_value, subprocess.CalledProcessError(1, ['systemctl','restart']), None]
+        with self.assertRaisesRegex(ValueError, 'previous configuration and service restored'):
+            installer.configure_udp(SimpleNamespace(disable=False, apply=True, restart=True))
+        self.assertEqual(self.path.read_text(), self.base)
 
     def test_signed_probe_binds_body_without_room_side_effects(self):
         def check(url, body, mime, auth, timeout):

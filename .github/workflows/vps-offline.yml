@@ -26,7 +26,7 @@ on:
       - tests/plugin-manager.php
       - artifacts/*pairing*.zip
       - artifacts/baci-classroom-site-upgrade-*.zip
-      - artifacts/baci-classroom-recorder-*-r3.zip
+      - artifacts/baci-classroom-recorder-*-r4.zip
       - server/recorder/frame.js
       - server/recorder/replay.js
       - server/recorder/recording.py
@@ -123,9 +123,9 @@ jobs:
           grep -Fq 'QA_RECORD received and decoded an approved MP4;' "$log"
           grep -Fq 'QA_RECORD approved MP4 after the one-minute delay:' "$log"
           grep -Fq 'VM passed: 1024 MiB profile=compact tls=files' "$log"
-          grep -Fq 'QA_R3 profile=compact running services' "$log"
+          grep -Fq 'QA_R4 profile=compact running services' "$log"
           grep -Fq 'QA_CAMERA uploaded MP4:' "$log"
-          proof=$(grep -E '^QA_APT |^QA_RECORD |^QA_R3 |^QA_CAMERA |^VM baseline|^VM memory|^VM passed|^No VM Internet' "$log" | paste -sd '|')
+          proof=$(grep -E '^QA_APT |^QA_RECORD |^QA_R4 |^QA_CAMERA |^VM baseline|^VM memory|^VM passed|^No VM Internet' "$log" | paste -sd '|')
           echo "::notice title=Packaged GA Server recording::${proof:0:4100}"
       - name: Verify 512 MiB live and full installs, both TLS modes and WebRTC
         run: |
@@ -136,8 +136,8 @@ jobs:
               trap 'while IFS= read -r line; do echo "::error title=VPS $ram $mode rehearsal::$line"; done < <(grep -E "^VM guest failure|^VM memory|^MemAvailable|^oom_kill|Out of memory|^Test CA|^Baci VPS:|^Traceback|^.*Error:|start request repeated|Failed to |\"error\":|^VM rehearsal|^VM WebRTC" "$log" | tail -14)' ERR
               bash scripts/test-vps-offline-vm.sh "$RUNNER_TEMP"/vps-release/*amd64.tar.gz "$mode" "$ram" "$RUNNER_TEMP/vps-live-media" 2>&1 | tee "$log"
               grep -Fq 'Two live WebRTC peers exchanged bidirectional Opus and teacher VP8' "$log"
-              if [[ "$ram" == 4096 ]]; then grep -Fq 'QA_R3 profile=full running services' "$log"; fi
-              proof=$(grep -E '^QA_R3 |^VM passed:|^VM full test:|^VM memory|^VM before reboot|^No VM Internet|^Real ACME|^Two live WebRTC' "$log" | paste -sd ' ')
+              if [[ "$ram" == 4096 ]]; then grep -Fq 'QA_R4 profile=full running services' "$log"; fi
+              proof=$(grep -E '^QA_R4 |^VM passed:|^VM full test:|^VM memory|^VM before reboot|^No VM Internet|^Real ACME|^Two live WebRTC' "$log" | paste -sd ' ')
               echo "::notice title=Isolated VPS $ram $mode test::$proof"
             done
           done

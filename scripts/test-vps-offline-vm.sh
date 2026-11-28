@@ -26,8 +26,9 @@ if [[ "$resilience" == 1 ]]; then
     [[ -x "${BACI_QA_CHROMIUM:?}" && -d "${BACI_QA_PLAYWRIGHT:?}" ]]
 fi
 [[ "$swap_mib" == 0 || "$swap_mib" == 512 ]]
-[[ "$scenario" == default || "$scenario" == compact || "$scenario" == upgrade ]]
-if [[ "$scenario" == upgrade ]]; then original=$(realpath "$original"); fi
+[[ "$scenario" == default || "$scenario" == compact || "$scenario" == upgrade || "$scenario" == capacity-update ]]
+if [[ "$scenario" == upgrade || "$scenario" == capacity-update ]]; then original=$(realpath "$original"); fi
+if [[ "$scenario" == capacity-update ]]; then [[ "$mode" == files && "$ram" == 4096 && -z "$capacity" ]]; fi
 if [[ -n "$capacity" ]]; then capacity=$(realpath "$capacity"); fi
 [[ "$mode" == files || "$mode" == auto ]]
 [[ "$ram" == 512 || "$ram" == 1024 || "$ram" == 4096 ]]
@@ -36,7 +37,7 @@ profile=full
 if [[ "$ram" != 4096 ]]; then cpus=1; profile=live; fi
 if [[ "$scenario" == compact ]]; then profile=compact; fi
 if [[ "$scenario" == upgrade ]]; then profile=live; fi
-if [[ "$scenario" != default ]]; then test "$ram" != 4096; fi
+if [[ "$scenario" == compact || "$scenario" == upgrade ]]; then test "$ram" != 4096; fi
 vm_affinity=()
 if [[ -n "$school_captures" ]]; then
     # For capacity comparisons never fall back to software emulation or run
@@ -207,7 +208,7 @@ for target in "${targets[@]}"; do
         -extfile "$work/$target.ext" -out "$work/$target.pem" >/dev/null 2>&1
 done
 wait_vm
-if [[ "$scenario" == upgrade ]]; then
+if [[ "$scenario" == upgrade || "$scenario" == capacity-update ]]; then
     cp -- "$archive" "$work/recorder-candidate.tar.gz"
     send "$work/recorder-candidate.tar.gz"
     archive=$original
@@ -533,6 +534,35 @@ if [[ -x ./vps-live-media ]]; then
         | sudo ip netns exec schoolqa timeout 70 ./vps-live-media
     sudo baci-vps doctor
 fi
+if [[ "$SCENARIO" == capacity-update ]]; then
+    mkdir candidate
+    tar -xzf recorder-candidate.tar.gz -C candidate
+    update=(sudo bash candidate/baci-classroom-vps-offline/install.sh)
+    sudo sha256sum /etc/school-classroom/{site-pairing.json,admission.json,Caddyfile,offline-vps.json,tls/privkey.pem} \
+        /etc/school-classroom-recorder.json /var/lib/school-classroom-recorder/worker.json > update.before
+    sudo sha256sum /etc/school-classroom/livekit.yaml > sfu-yaml.before
+    stable=(school-classroom-{admission,https,postprocess}.service)
+    sudo systemctl show -p InvocationID "${stable[@]}" > stable.before
+    vm_spool=/var/lib/school-classroom-recorder/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    sudo mkdir "$vm_spool"
+    if "${update[@]}" --update-recorder > early-refusal.log 2>&1; then exit 1; fi
+    grep -Fq 'Local Recorder spool still has jobs' early-refusal.log
+    sudo rmdir "$vm_spool"
+    "${update[@]}" --update-recorder --check | grep -F 'recorder_update=preflight_ok'
+    "${update[@]}" --update-recorder | grep -F 'recorder_update=ok changed=yes restarted=yes'
+    "${update[@]}" --update-recorder | grep -Fx 'recorder_update=ok changed=no restarted=no'
+    sudo sha256sum --check sfu-yaml.before
+    sudo systemctl show -p InvocationID --value school-classroom-sfu | cmp sfu.before -
+    "${update[@]}" --update-udp --check | grep -Fx 'udp_batch=off change_needed=yes'
+    "${update[@]}" --update-udp | grep -Fx 'udp_batch=on changed=yes restarted=yes'
+    "${update[@]}" --restore-udp | grep -Fx 'udp_batch=off changed=yes restarted=yes'
+    sudo sha256sum --check sfu-yaml.before
+    "${update[@]}" --update-udp | grep -Fx 'udp_batch=on changed=yes restarted=yes'
+    sudo sha256sum --check update.before
+    sudo systemctl show -p InvocationID "${stable[@]}" | cmp stable.before -
+    sudo baci-vps doctor --online --wait | grep -Fx 'school_recorder=ready'
+    echo 'QA_CAPACITY_UPDATE v1.3.3 r3→r4; busy spool refused; UDP applied and reverted byte-for-byte; pairing, HTTPS, renderer and worker unchanged.'
+fi
 if [[ "$SCENARIO" == upgrade ]]; then
     mkdir candidate
     tar -xzf recorder-candidate.tar.gz -C candidate
@@ -569,9 +599,11 @@ fi
 if [[ "$PROFILE" != live ]]; then
     units+=(school-classroom-postprocess.service)
     payload=baci-classroom-vps-offline/payload
-    if [[ "$SCENARIO" == upgrade ]]; then payload=candidate/$payload; fi
-    if [[ -f "$payload/baci-classroom-recorder-v0.4.23-r3.zip" ]]; then
-        sudo /usr/bin/python3 -IB - "$payload/baci-classroom-recorder-v0.4.23-r3.zip" "$PROFILE" <<'PY_PROGRAM'
+    if [[ "$SCENARIO" == upgrade || "$SCENARIO" == capacity-update ]]; then payload=candidate/$payload; fi
+    for revision in 3 4; do
+        pack="$payload/baci-classroom-recorder-v0.4.23-r$revision.zip"
+        [[ -f "$pack" ]] || continue
+        sudo /usr/bin/python3 -IB - "$pack" "$PROFILE" "$revision" <<'PY_PROGRAM'
 from pathlib import Path
 import subprocess
 import sys
@@ -587,9 +619,9 @@ with ZipFile(sys.argv[1]) as pack:
         assert pid > 1
         for name in names:
             assert (Path(f'/proc/{pid}/root') / program / name).read_bytes() == pack.read(name), name
-print(f'QA_R3 profile={sys.argv[2]} running services see the pinned camera and audio renderer without a repair step.')
+print(f'QA_R{sys.argv[3]} profile={sys.argv[2]} running services see the pinned Recorder and renderer without a repair step.')
 PY_PROGRAM
-    fi
+    done
 fi
 for unit in "${units[@]}"; do
     test "$(systemctl show -p NRestarts --value "$unit")" -eq 0

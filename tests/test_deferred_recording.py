@@ -17,7 +17,7 @@ SRC = ROOT / 'server/recorder'
 sys.path.insert(0, str(SRC))
 from archive import ArchiveRenderer, Budget, SourceCapture, SpaceError, Timeline, duration, events, sources
 from movie import render
-from recording import DeferredRunner, SpoolJob, WorkRevoked, atomic
+from recording import DeferredRunner, PAGED_PLAN, PLAN_PAGE, SpoolJob, WorkRevoked, atomic
 from test_recorder_browser import make_pdf
 from transport import ProtocolError
 
@@ -107,6 +107,118 @@ class SchedulingTest(unittest.IsolatedAsyncioTestCase):
             r.stopping = True
             await asyncio.gather(*r.captures.values())
             self.assertFalse(occupied)
+
+    async def test_large_backlog_discovery_and_offpeak_permit_are_independent(self):
+        jobs = [f'{i:032x}' for i in range(1, 1041)]
+        active = set(jobs[-9:])
+        work = jobs[-10]
+        visited = []
+        r = DeferredRunner(None, self.root, None, None, None)
+        admitted, finished, settled = set(), [], set()
+        all_started, waiting = asyncio.Event(), asyncio.Event()
+
+        async def rpc(action, **data):
+            cursor = data.get('after')
+            block = jobs[(jobs.index(cursor)+1 if cursor else 0):][:PLAN_PAGE]
+            out = {'plan_format':PAGED_PLAN, 'pending':block, 'capture':sorted(set(block) & active),
+                   'settle':list(set(block) & {jobs[-11]}), 'next':block[-1] if len(block) == PLAN_PAGE else None}
+            if action == 'plan':
+                self.assertEqual(data['plan_format'], PAGED_PLAN)
+                return out | {'work':None if active else work, 'current_ok':not active, 'lease':int(time.time())+6}
+            self.assertEqual(action, 'plan-page')
+            visited.append(cursor)
+            return out
+
+        async def capture(job):
+            admitted.add(job)
+            if admitted == active:
+                all_started.set()
+            await waiting.wait()
+
+        async def finish(job):
+            await asyncio.wait_for(r.eligible(job, time.time()+60), .5)
+            finished.append(job)
+
+        async def maintain(todo):
+            settled.update(todo)
+
+        r.control.rpc = rpc
+        r.capture, r.finish, r.maintain = capture, finish, maintain
+        await r.tick()
+        await asyncio.wait_for(all_started.wait(), 1)
+        self.assertEqual(admitted, active)
+        self.assertEqual(visited, jobs[PLAN_PAGE-1::PLAN_PAGE])
+        self.assertFalse(finished, 'live work preempts finishing')
+        waiting.set()
+        await asyncio.gather(*r.captures.values())
+        active.clear()
+        await r.tick()
+        await asyncio.gather(r.finish_task, r.repair, r.discovery, r.scan_task)
+        self.assertEqual(finished, [work], 'selected film can be outside the first page')
+        self.assertIn(jobs[-11], settled, 'expired work is found on later pages too')
+
+    async def test_paged_capture_leases_survive_failed_page_and_another_rooms_disk_fault(self):
+        wanted = [f'{i:032x}' for i in range(1, 10)]
+        broken = wanted[4]
+        renewed, occupied, faults = set(), set(), []
+        paged = True
+        later_failed = False
+
+        def school(action, job, **args):
+            if action == 'plan':
+                head = {'capture':wanted[:4], 'pending':wanted[:4], 'settle':[], 'work':None, 'lease':0}
+                return head | ({'plan_format':PAGED_PLAN,'next':wanted[3],'current_ok':False} if paged else {})
+            if action == 'plan-page':
+                if later_failed:
+                    raise ProtocolError(503)
+                return {'plan_format':PAGED_PLAN, 'next':None, 'pending':wanted[4:], 'capture':wanted[4:], 'settle':[]}
+            if action == 'fault':
+                faults.append((job,args['reason']))
+                return {}
+            if action == 'poll':
+                if any(job == key for key, _ in faults):
+                    return {'command':'purge'}
+                return {'command':'record','id':job,'token':'fixture','lease':int(time.time())+8,'expires':int(time.time())+600,
+                        'room':f'test-{"a"*20}-v4-c{int(job,16)}-{"d"*24}'}
+            self.fail(action)
+
+        class Ingest:
+            def __init__(self, browser, renderer, school, directory, room, budget):
+                self.job, self.room = directory.name, room
+            async def start(self, reply):
+                if self.job == broken:
+                    raise SpaceError('fixture-disk-pressure')
+                occupied.add(self.job)
+                return True
+            async def status(self):
+                return {'running':True}
+            async def renew(self, lease):
+                renewed.add(self.job)
+            async def stop(self, seal):
+                occupied.discard(self.job)
+
+        runner = DeferredRunner(school, self.root, None, None, None)
+        with patch('recording.SourceCapture', Ingest):
+            try:
+                await runner.tick()
+                await runner.discovery
+                self.assertEqual(set(runner.captures), set(wanted))
+                later_failed = True
+                await runner.tick()
+                await runner.discovery
+                self.assertEqual(runner.missing_hints, set(), 'an incomplete scan is not authoritative')
+                paged = False
+                with self.assertRaises(ProtocolError):
+                    await runner.tick()
+                await asyncio.sleep(1.45)
+                survivors = set(wanted) - {broken}
+                self.assertEqual(faults, [(broken,'space')])
+                self.assertEqual(occupied, survivors)
+                self.assertEqual(renewed, survivors, 'per-job renewals do not depend on the global plan or paging')
+            finally:
+                runner.stopping = True
+                await asyncio.gather(*runner.captures.values(), *(t for t in (runner.discovery, runner.scan_task) if t))
+        self.assertEqual(occupied, set())
 
     async def test_expired_work_releases_finishing_slot_even_during_pause(self):
         path = self.fixture(A)

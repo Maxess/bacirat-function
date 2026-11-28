@@ -30,7 +30,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))  # python -I: only the verified staging or root-owned install directory.
 import vps_media as media
 
-VERSION = '1.3.3'
+VERSION = '1.3.4'
 APP, CFG, SYSTEMD = media.APP, media.CFG, media.SYSTEMD
 REC = Path('/opt/school-classroom-recorder')
 RECORDER_RELEASE = '0.4.23'
@@ -66,13 +66,14 @@ CHROME = BROWSER / BROWSER_TOP / 'chrome-headless-shell'
 CADDY_VERSION = '2.11.9'
 CADDY_ASSET = f'caddy_{CADDY_VERSION}_linux_amd64.tar.gz'
 CHROME_ASSET = BROWSER_TOP + '.zip'
-REC_ASSET = 'baci-classroom-recorder-v0.4.23-r3.zip'
+REC_ASSET = 'baci-classroom-recorder-v0.4.23-r4.zip'
+R3_RECORDING_SHA = 'fe11f7dad4574aeac594cf8d023844d3841de4491b2d933dd865722b01f1f9fa'
 SCHOOL_HTTP_ASSET = 'baci-classroom-recorder-school-http-v0.4.23.py'
 PAYLOAD = {
     media.ASSET: media.SHA256,
     CADDY_ASSET: '5b8cb7faf8726a2028ad96a66e54e6e81e8f361bc6175e5d22bbd997cc5177fb',
     CHROME_ASSET: '88817c574c1838a39f88fda0bbd043b4481fd385fb10e92c323e230844d636ce',
-    REC_ASSET: '7f5863dd842fbcc3298d0605aa745b517a7e0298baae0c471215ab4df407cd26',
+    REC_ASSET: 'fd1889a15638ff8092b75b183eeba8211b5fa80b0632a1bed3d4833e0bb5a8bd',
     SCHOOL_HTTP_ASSET: '72550ec6cb374a0e86e618e65b84a455fbeb506a7b8cafdf4c5c8e6736c953c4',
 }
 ENV = {'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LC_ALL': 'C', 'HOME': '/root'}
@@ -85,6 +86,7 @@ COMPACT_NOSWAP_RAM_KIB = 896 * 1024
 COMPACT_SWAP_KIB = 500 * 1024  # A nominal 512 MiB swapfile loses a small header.
 PROFILES = ('live', 'compact', 'full')
 LIVE_DEBS = ('ca-certificates', 'openssl', 'python3')
+COMPACT_CAPTURE = '[Service]\nMemoryHigh=112M\nMemoryMax=160M\nMemorySwapMax=0\n'
 
 
 class Refused(Exception):
@@ -368,11 +370,9 @@ def local_ipv4(address):
 
 def sfu_config(config, keys):
     address = config['ipv4']
-    text = media.engine_config(address, keys['api_key'], keys['api_secret'])
-    if local_ipv4(address):
-        # With multiple interfaces, the UDP mux may otherwise rewrite identical
-        # candidates to the public address while retaining the wrong UDP socket.
-        text = text.replace('rtc:\n', f'rtc:\n  ips:\n    includes: [{address}/32]\n', 1)
+    # With multiple interfaces, constrain the UDP mux to the managed local IPv4
+    # when assigned; otherwise retain the original NAT-compatible layout.
+    text = media.engine_config(address, keys['api_key'], keys['api_secret'], bound_udp=local_ipv4(address))
     return text + media.native_webhook_block(keys['api_key'], media.webhook_url(config['origin'], config['site_path']))
 
 
@@ -468,7 +468,7 @@ def renderer_program():
                 units[name] = archive.read(name)
             elif name != 'transport.py':
                 write(REC_PROGRAM / name, archive.read(name), 0o755 if name == 'baci-native-receiver' else 0o644)
-    # r3 installs the already repaired renderer and replay in both profiles.
+    # The renderer and replay are the unchanged, reviewed r3 artifacts.
     # Keep the same pinned HTTP transport here and in read-only add-on preflight.
     write(REC_PROGRAM / 'transport.py', school_http_bytes(HERE / 'payload' / SCHOOL_HTTP_ASSET))
     return units
@@ -669,7 +669,7 @@ class Fresh:
                 f'ExecStart={REC}/venv/bin/python -Esu {program}\nEnvironment=XDG_CACHE_HOME=/tmp/baci-font-cache\n'
                 'CPUQuota=100%\nMemoryHigh=infinity\n'
                 f'MemoryMax={resident}\nMemorySwapMax={swap}\n')
-            units[RECORDER + '.d/80-compact.conf'] = '[Service]\nMemoryHigh=112M\nMemoryMax=160M\nMemorySwapMax=0\n'
+            units[RECORDER + '.d/80-compact.conf'] = COMPACT_CAPTURE
         browser_files()
         venv_install()
         if profile_needed():
@@ -711,8 +711,7 @@ class Fresh:
         save_json(PAIR, keys)
         write(CFG / 'Caddyfile', edge_config(config))
         units = {
-            SFU: media.sfu_unit_config().replace('After=network.target\n',
-                                                'Wants=network-online.target\nAfter=network-online.target\n', 1),
+            SFU: media.sfu_unit_config(network_online=True),
             GATE: media.unit('School classroom signaling admission', f'/usr/bin/python3 -IB {APP}/admission.py {CFG}/admission.json'),
             HTTPS: edge_unit(),
         }
@@ -798,9 +797,73 @@ def replacement(path, data, mode):
         os.replace(scratch, path)
 
 
+def recorder_update_unit(config, pack):
+    unit = SYSTEMD / RECORDER
+    dropin = SYSTEMD / (RECORDER + '.d')
+    managed(dropin, stat.S_ISDIR)
+    expected = {name: pack.read(name) for name in pack.namelist() if name == RECORDER or name.startswith(dropin.name + '/')}
+    if config['profile'] == 'compact':
+        expected[dropin.name + '/80-compact.conf'] = COMPACT_CAPTURE.encode()
+    for name, data in expected.items():
+        actual, _ = media.read_pilot_file(SYSTEMD / name, private=False)
+        need(actual.encode() == data, 'Customized Recorder systemd unit; nothing was overwritten.')
+    keys = ('FragmentPath', 'DropInPaths', 'ActiveState', 'NeedDaemonReload')
+    values = run('systemctl', 'show', RECORDER, '--all', '--property=' + ','.join(keys), output=True, timeout=10).decode()
+    props = dict(line.split('=', 1) for line in values.splitlines() if '=' in line)
+    dropins = {str(SYSTEMD / n) for n in expected if n != RECORDER}
+    need(props.get('FragmentPath') == str(unit) and set(props.get('DropInPaths', '').split()) == dropins
+         and props.get('ActiveState') == 'active' and props.get('NeedDaemonReload') == 'no',
+         'Expected the running stock Recorder unit with no extra overrides; nothing was overwritten.')
+
+
+def update_recorder(config, *, check):
+    """Replace only the reviewed r3 scheduler, keeping program path and worker identity."""
+    need(config.get('recorder_bundle', config.get('version')) in ('1.3.3', VERSION)
+         and config.get('profile') in ('full', 'compact'), 'This update requires a managed VPS with the r3 or r4 Recorder installed.')
+    verify_payloads()
+    with media.locked_config(not check):
+        path = REC_PROGRAM / 'recording.py'
+        for folder in (REC, REC_PROGRAM, SYSTEMD):
+            managed(folder, stat.S_ISDIR)
+        with ZipFile(HERE / 'payload' / REC_ASSET) as pack:
+            wanted = pack.read(path.name).decode()
+            recorder_update_unit(config, pack)
+        before, file_info = media.read_pilot_file(path, private=False)
+        need(before == wanted or hashlib.sha256(before.encode()).hexdigest() == R3_RECORDING_SHA,
+             'Scheduler differs from the reviewed r3/r4 file; nothing was overwritten.')
+        keys = json_file(PAIR)
+        identity = json_file(SPOOL / 'worker.json')['id']
+        need(isinstance(identity, str) and re.fullmatch(r'[a-f0-9]{32}', identity)
+             and keys['site'] == config['school']
+             and json_file(REC_CFG) == json_file(REC_CREDENTIAL) == {'site': keys['site'], 'secret': keys['recording_secret']},
+             'Pairing or Recorder worker identity does not match the managed service.')
+        school_http_bytes(REC_PROGRAM / 'transport.py')
+        need(not any(re.fullmatch(r'[a-f0-9]{32}', child.name) for child in SPOOL.iterdir()),
+             'Local Recorder spool still has jobs. Wait for it to settle; do not delete any recordings.')
+        recorder_idle(config, keys, identity)
+        if check or before == wanted:
+            print(f'recorder_update={"preflight_ok" if check else "ok"} changed=no restarted=no')
+            return
+        backup = REC_PROGRAM / (path.name + '.before-r4-' + secrets.token_hex(6) + '.bak')
+        write(backup, before, 0o600)
+        media.replace_pilot_config(path, before, wanted, file_info, private=False)
+        try:
+            run('systemctl', 'restart', RECORDER, timeout=80, label='Recorder restart')
+            wait_ready(lambda: program_checks(config), 15, 'Recorder readiness not confirmed after restart.')
+        except (Refused, OSError, ValueError, KeyboardInterrupt):
+            try:
+                media.replace_pilot_config(path, wanted, before, file_info, private=False)
+                run('systemctl', 'restart', RECORDER, timeout=80, label='Recorder recovery')
+                wait_ready(lambda: program_checks(config), 15, 'Previous Recorder did not become ready.')
+            except (Refused, OSError, ValueError):
+                raise Refused(f'Recorder recovery could not be verified; keep private backup {backup}.') from None
+            raise Refused('Recorder update failed; previous scheduler and service restored.') from None
+        print(f'recorder_update=ok changed=yes restarted=yes backup={backup}')
+
+
 def addition_preflight(config, requested, worker):
-    need(config.get('version') in ('1.2.0', '1.3.0', '1.3.1', '1.3.2', VERSION) and config.get('profile') == 'live' and config.get('tls_mode') in ('files','auto'),
-         'This add-on is only for a completed Baci offline live install (v1.2.0, v1.3.0–v1.3.2 or this release).')
+    need(config.get('version') in ('1.2.0', '1.3.0', '1.3.1', '1.3.2', '1.3.3', VERSION) and config.get('profile') == 'live' and config.get('tls_mode') in ('files','auto'),
+         'This add-on is only for a completed Baci offline live install (v1.2.0, v1.3.0–v1.3.3 or this release).')
     meminfo = Path('/proc/meminfo').read_text()
     total_kib = check_memory(meminfo)
     profile = install_profile(requested, total_kib, swap_size(meminfo))
@@ -988,7 +1051,11 @@ def main(argv=None):
         parser.add_argument('--profile', choices=('auto', *PROFILES), default='auto',
                             help='auto selects compact/full with recording; choose live explicitly for live classes without recording')
         parser.add_argument('--check', action='store_true', help='read-only install or add-on preflight')
-        parser.add_argument('--add-recorder', action='store_true', help='add recording to an idle offline live install; reuse pairing and HTTPS')
+        change = parser.add_mutually_exclusive_group()
+        change.add_argument('--add-recorder', action='store_true', help='add recording to an idle offline live install; reuse pairing and HTTPS')
+        change.add_argument('--update-recorder', action='store_true', help='update an idle managed r3 Recorder without replacing keys, TLS or media')
+        change.add_argument('--update-udp', action='store_true', help='enable UDP batching on an idle, unmodified managed SFU')
+        change.add_argument('--restore-udp', action='store_true', help='restore the exact stock UDP layout without batching')
     args = parser.parse_args(argv)
     if installed and args.action == 'doctor' and args.wait and not args.online:
         parser.error('--wait requires --online')
@@ -1000,6 +1067,19 @@ def main(argv=None):
             config = json_file(STATE)
             if installed and args.action == 'export':
                 return 0 if export_pair() else 1
+            if not installed and (args.update_udp or args.restore_udp):
+                need(args.profile == 'auto' and all(getattr(args, k) is None for k in ('site', 'media', 'ipv4', 'tls', 'cert', 'key')),
+                     'The UDP update reuses the existing addresses and configuration; do not pass new inputs.')
+                try:
+                    media.configure_udp(argparse.Namespace(apply=not args.check, restart=not args.check, disable=args.restore_udp))
+                except ValueError as error:
+                    raise Refused(str(error)) from None
+                return 0
+            if not installed and args.update_recorder:
+                need(args.profile == 'auto' and all(getattr(args, k) is None for k in ('site', 'media', 'ipv4', 'tls', 'cert', 'key')),
+                     '--update-recorder reuses the existing profile, addresses and TLS; do not pass new inputs.')
+                update_recorder(config, check=args.check)
+                return 0
             if not installed and args.add_recorder:
                 need(all(getattr(args, k) is None for k in ('site', 'media', 'ipv4', 'tls', 'cert', 'key')),
                      '--add-recorder uses the existing addresses and TLS; do not pass new inputs.')
@@ -1024,7 +1104,7 @@ def main(argv=None):
                     return 1
                 return 0 if doctor(config, False) else 1
             return 0 if doctor(config, args.online, wait=args.wait) else 1
-        need(not installed and not args.add_recorder, 'No completed offline installation was found.')
+        need(not installed and not (args.add_recorder or args.update_recorder or args.update_udp or args.restore_udp), 'No completed offline installation was found.')
         total_kib, profile = fresh_preflight(args.profile)
         verify_payloads()
         if profile == 'live':

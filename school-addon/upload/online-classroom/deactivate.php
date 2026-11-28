@@ -8,13 +8,14 @@ $context = cl_context();
 $cfg = array_replace(cl_config(), ['notify_school_bale'=>false,'notify_school_telegram'=>false,'notify_school_rubika'=>false]);
 $s = cl_store();
 // Even a previously approved send must not resume after an operator disables the plugin.
-$pending = cl_rec_pending($s);
-if (($slot = $s->get('record-slot', 'current')) && ($legacy = $s->get('recording', $slot['id']))) $pending[$legacy['id']] = $legacy;
-foreach ($pending as $job) cl_rec_terminal($s, $job, isset($job['flight']) ? 'uncertain' : 'discarded', 'disabled');
+foreach (cl_rec_pending($s) as $job) cl_rec_terminal($s, $job, isset($job['flight']) ? 'uncertain' : 'discarded', 'disabled');
+if (($slot = $s->get('record-slot', 'current')) && ($legacy = $s->get('recording', $slot['id']))) {
+    cl_rec_terminal($s, $legacy, isset($legacy['flight']) ? 'uncertain' : 'discarded', 'disabled');
+}
 $s->delete('record-worker', 'heartbeat');
 $rpc = static fn(string $method, string $room, array $data): array => cl_rpc($cfg, $room, $method, $data);
 $failed = null;
-foreach ($s->rows('active', 1000) as $classId=>$unused) {
+foreach ($s->scan('active') as $classId=>$unused) {
     try { if ($lesson = cl_active($s, (int)$classId)) cl_close_lesson($s, $cfg, $lesson, time(), $rpc); }
     catch (ClassroomError $error) { $failed = $error; }
 }
