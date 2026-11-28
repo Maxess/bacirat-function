@@ -373,6 +373,23 @@ must($pupilFrame['view'] === $frame && $pupilFrame['write'] && !isset($pupilFram
     && $recordFrame['view'] === $frame && !$recordFrame['write'] && !isset($recordFrame['navigate'],$recordFrame['owner']),
     'pupil and read-only recorder get the same frame without navigation permission');
 must(!isset($readBoardAt($epochChanged,$student,$read)['view']), 'an old transport cannot leak its crop into a resumed session');
+// Board invalidations are negotiated by both ends, limited to confirmed single-writer rooms.
+$solo = array_replace($cueLesson, ['staff'=>['teacher-1'=>'PA_Teacher'], 'access'=>[],
+    'pulses'=>['teacher-1'=>['sid'=>'PA_Teacher','at'=>$t+8,'board_wire'=>true]]]);
+$noticeOpts = $read + ['wire'=>1,'boardNotice'=>true];
+$notice = static fn(array $lesson, array $opts, ?array $actor = null) => cl_board_view($s,$lesson['id'],$actor,
+    $opts, cl_activity($s,$lesson['id']),$lesson,$t+10);
+must(!isset($notice($solo,$noticeOpts,$student)['notice']), 'wire 1 alone does not declare notice support');
+$solo = cl_touch($s,$solo,$teacher,$noticeOpts,$t+10);
+must(($notice($solo,$noticeOpts,$student)['notice'] ?? false) === true, 'current single presenter and pupil opt in');
+must(!isset($notice($solo,$read+['wire'=>1],$student)['notice'],$notice($solo,$noticeOpts)['notice']), 'old clients and Recorder are unchanged');
+foreach ([['all'=>true],['members'=>['student-1'=>true]]] as $rule) {
+    $granted = array_replace($solo,['access'=>['board'=>$rule]]);
+    must(!isset($notice($granted,$noticeOpts,$student)['notice']), 'pupil pen grant falls back to existing fast polling');
+}
+$two = array_replace($solo,['staff'=>$solo['staff']+['admin-1'=>'PA_Admin']]);
+must(!isset($notice($two,$noticeOpts,$student)['notice']), 'additional staff can write without sending notices');
+
 $changed = cl_activity($s,$cueLesson['id']);
 $changed['view']['at'] -= 2;
 $changed['docs'][$sampleDoc = str_repeat('c',32)] = ['id'=>$sampleDoc,'pages'=>1];

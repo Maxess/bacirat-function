@@ -29,6 +29,8 @@
     const lk = window.LivekitClient;
     const fridaySlot = 'friday-test';
     const boardWire = 1, boardCueTopic = 'baci.board.cue.v1', boardCueLimit = 512;
+    const headTopic = 'baci.board.head.v1', headPace = 220, headTTL = 5000, headRecovery = 2200;
+    const headLaser = 1, headAccess = 2;
     const snapshotPeriod = 12000;
     const confirmationTimeout = 38000; // Last resort if status goes away; the server's startup cutoff remains authoritative.
     const openTimeout = 75000; // At most the original startup and one fresh transport.
@@ -65,7 +67,7 @@
     let wanted = true, autoStart = staff, optedIntoTest = false, opening = null;
     let state = {phase:'idle', ready:null}, chatCursor = 0, seconds = {}, admitted = false;
     let pollTimer, flow = 0, retryAt = 0, attempts = 0;
-    let statusAt = 0, inkAt = Infinity, aimAt = Infinity, inkRead = 0, inkRetryAt = 0, checkpointAt = Infinity;
+    let statusAt = 0, inkAt = Infinity, inkWakeAt = Infinity, aimAt = Infinity, inkRead = 0, inkRetryAt = 0, checkpointAt = Infinity;
     let peopleKey = '', peopleRows = new Map(), speakersKey = '', slotKey = null;
     const cameraTiles = new Map();
     const cameraPreview = el('camera-preview'), previewVideo = el('camera-preview-video');
@@ -170,6 +172,94 @@
         board.remoteCue(mode,points,person.identity);
     }
 
+    function headOf(view) {
+        return [view?.rev, view?.head, view?.viewSeq ?? 0];
+    }
+    function validHead(head) {
+        return head.every(n => Number.isSafeInteger(n) && n >= 0 && n <= 2147483647) && head[0] > 0;
+    }
+    function advertiseHead(link, head, flags = 0) {
+        const person = link.room.localParticipant;
+        if (active !== link || document.hidden || !hasAccess() || (!state.board?.notice && !(flags & headAccess))
+            || !cueOwner(person) || typeof person.publishData !== 'function' || !validHead(head)) return;
+        // At most one in-flight send and one coalesced next head. No peer may
+        // send deltas, grants, or ink; all values are only wake-up hints.
+        const queued = link.headQueued;
+        if (!queued || head[0] > queued[0]) link.headQueued = head;
+        else if (head[0] === queued[0]) link.headQueued = [head[0],Math.max(head[1],queued[1]),Math.max(head[2],queued[2])];
+        link.headFlags = (link.headFlags ?? 0) | flags;
+        if (link.headTimer || link.headSending) return;
+        const sid = person.sid;
+        const publish = () => {
+            link.headTimer = null;
+            const ready = link.headQueued, signals = link.headFlags;
+            link.headQueued = null;
+            link.headFlags = 0;
+            if (active !== link || document.hidden || !hasAccess() || person.sid !== sid || !cueOwner(person)
+                || (!state.board?.notice && !(signals & headAccess))) return;
+            link.headSending = true;
+            link.headAt = performance.now() + headPace;
+            const seq = link.headSeq = (link.headSeq ?? 0)+1;
+            const payload = new TextEncoder().encode(JSON.stringify([link.epoch,sid,seq,...ready,signals]));
+            person.publishData(payload,{reliable:false,topic:headTopic}).catch(() => {}).finally(() => {
+                link.headSending = false;
+                const next = link.headQueued, flags = link.headFlags;
+                link.headQueued = null; link.headFlags = 0;
+                if (next) advertiseHead(link,next,flags);
+            });
+        };
+        const wait = (link.headAt ?? 0)-performance.now();
+        if (wait > 0) link.headTimer = setTimeout(publish,wait);
+        else publish();
+    }
+    function receiveBoardHead(link, payload, person, kind) {
+        const current = state.board;
+        if (active !== link || !hasAccess() || document.hidden || kind !== lk.DataPacket_Kind?.LOSSY
+            || !current?.notice || current.write || !cueOwner(person) || !(payload instanceof Uint8Array)
+            || !payload.byteLength || payload.byteLength > 256) return;
+        const now = performance.now();
+        if (now < (link.headReadAt ?? 0)) return;
+        let value;
+        try { value = JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(payload)); } catch { return; }
+        if (!Array.isArray(value) || value.length !== 7) return;
+        const [epoch,sid,seq,rev,ink,viewSeq,flags] = value, head = [rev,ink,viewSeq];
+        const old = link.headSeen?.sid === sid ? link.headSeen : null;
+        if (epoch !== link.epoch || sid !== person.sid || !validHead(head) || rev < current.rev
+            || !Number.isSafeInteger(seq) || seq <= (old?.seq ?? 0) || seq > 2147483647
+            || !Number.isInteger(flags) || flags < 0 || flags > (headLaser | headAccess)) return;
+        const nextView = current.viewSeq ?? 0;
+        if (rev === current.rev && (ink < current.head || viewSeq < nextView) && !flags) return;
+        link.headReadAt = now + 75;
+        const ahead = rev > current.rev || ink > current.head || viewSeq > nextView;
+        if ((flags & headAccess) || ((flags & headLaser) && !board.hasFastLaser?.(person.identity))
+            || (ahead && !head.every((n,i) => n === old?.head[i]))) {
+            // Never apply a peer's state. Only wake the authorized HTTPS reader.
+            link.headWakeAt = Math.min(link.headWakeAt ?? Infinity,now+20);
+        }
+        link.headSeen = {sid,seq,head:flags & headAccess ? [] : head,at:now};
+        schedulePoll();
+    }
+
+    function boardRecoveryAt() {
+        const view = state.board, hint = active?.headSeen, owner = view?.presenter;
+        const person = owner && active?.room.remoteParticipants.get(owner.identity);
+        const laser = view?.laser;
+        if (!view?.notice || view.write || view.more || board.position().board !== view.rev
+            || (laser && !board.hasFastLaser?.(laser.by)) || !hint || hint.sid !== owner?.sid || !cueOwner(person)
+            || performance.now()-hint.at >= headTTL || !headOf(view).every((n,i) => n === hint.head[i])) return inkAt;
+        // Split idle wake-ups across tabs. A periodic authoritative read is
+        // still needed for a missed final hint, handoff or newly granted writer.
+        return Math.max(inkAt, Math.min(inkRead + headRecovery + (active.headJitter ??= Math.random()*180), hint.at + headTTL));
+    }
+
+    function forgetBoardHead(link, person) {
+        if (active !== link || link.headSeen?.sid !== person?.sid || !link.headSeen) return;
+        // An expired data path falls back immediately, not at the old recovery timer.
+        link.headSeen = null;
+        link.headWakeAt = Infinity;
+        schedulePoll();
+    }
+
     const board = window.ClassroomBoard(root, {
         canEdit: hasAccess,
         notice: note,
@@ -183,7 +273,7 @@
             attention.expand(value);
         },
         publishCue:publishBoardCue,
-        resync() { inkAt = Math.min(inkAt, performance.now()+85); schedulePoll(); },
+        resync() { inkWakeAt = Math.min(inkWakeAt, performance.now()+85); schedulePoll(); },
         aimSoon() {
             aimAt = Math.min(aimAt, performance.now()+25);
             schedulePoll();
@@ -201,10 +291,18 @@
                     form.set('file', file);
                     reply = await request(root, 'upload', form, {multipart:true});
                 } else reply = await api(action, {...local, ...data, wire:boardWire});
+                if (staff && active === link && local.sid === scope().sid) {
+                    const view = state.board;
+                    if (Number.isSafeInteger(reply?.boardRev) && reply.boardRev > (view?.rev ?? 0)) {
+                        advertiseHead(link,[reply.boardRev,0,0]);
+                    } else if (action === 'board-ink' && data.board === view?.rev && Number.isSafeInteger(reply?.ink)) {
+                        advertiseHead(link,[view.rev,Math.max(view.head,reply.ink),view.viewSeq ?? 0]);
+                    }
+                }
                 return reply;
             } finally {
                 if (active === link && local.sid === scope().sid && hasAccess()) {
-                    inkAt = Math.min(inkAt, Math.max(performance.now()+30, inkRead+(action==='board-ink' ? 245 : 65)));
+                    inkWakeAt = Math.min(inkWakeAt, Math.max(performance.now()+30, inkRead+(action==='board-ink' ? 245 : 65)));
                     schedulePoll();
                 }
             }
@@ -229,6 +327,7 @@
                 const result = await api('set-access', {...local, feature, enabled, identity});
                 if (active !== link || !hasAccess() || scope().sid !== local.sid) return;
                 flow++; // Discard reads made before this acknowledged permission change.
+                if (feature === 'board') advertiseHead(link,headOf(state.board),headAccess);
                 state = {...state, access:result.access};
             } finally { refresh(); }
         });
@@ -799,8 +898,13 @@
             el('chat-text').value = '';
             board.reset();
         }
-        if (active) { active.speakers = []; stopCamera(active); stopScreen(active); }
-        admitted = false; inkAt = aimAt = checkpointAt = Infinity; inkRetryAt = 0;
+        if (active) {
+            active.speakers = [];
+            active.headSeen = null;
+            active.headWakeAt = Infinity;
+            stopCamera(active); stopScreen(active);
+        }
+        admitted = false; inkAt = inkWakeAt = aimAt = checkpointAt = Infinity; inkRetryAt = 0;
         chatCursor = 0; seconds = {};
         delete state.profiles; delete state.profilesRev;
         delete state.quality; delete state.qualityRev;
@@ -809,6 +913,8 @@
         if (!link || active !== link) return;
         const current = scope(link);
         active = null;
+        clearTimeout(link.headTimer);
+        link.headQueued = null;
         stopCamera(link); stopScreen(link);
         clearActivity();
         flow++;
@@ -902,7 +1008,10 @@
                 room.on(event, () => { if (active === link) render(); });
             }
             if (lk.RoomEvent.DataReceived && lk.DataPacket_Kind?.LOSSY !== undefined) {
-                room.on(lk.RoomEvent.DataReceived, (payload, person, kind, topic) => receiveBoardCue(link,payload,person,kind,topic));
+                room.on(lk.RoomEvent.DataReceived, (payload, person, kind, topic) => {
+                    if (topic === headTopic) receiveBoardHead(link,payload,person,kind);
+                    else receiveBoardCue(link,payload,person,kind,topic);
+                });
             }
             room.on(lk.RoomEvent.ActiveSpeakersChanged, speakers => {
                 if (active !== link || !connected()) return;
@@ -921,13 +1030,14 @@
                 if (active === link && track.source === cameraSource) renderCameras();
                 if (active === link && track.source === screenSource) renderScreen();
             });
+            room.on(lk.RoomEvent.ParticipantDisconnected, person => forgetBoardHead(link,person));
             room.on(lk.RoomEvent.ParticipantPermissionsChanged, (_before, person) => {
                 if (active !== link) return;
                 if (person === room.localParticipant) {
                     if (!maySpeak(person) && person.isMicrophoneEnabled) person.setMicrophoneEnabled(false).catch(() => {});
                     if (!mayCamera(person)) stopCamera(link);
                     if (!mayScreen(person)) stopScreen(link);
-                }
+                } else if (person?.permissions?.canPublishData !== true) forgetBoardHead(link,person);
                 render();
             });
             const retrying = () => {
@@ -977,7 +1087,7 @@
         const presenterChanged = staff && (view.navigate === true) !== (state.board?.navigate === true);
         if (board.sync(view, local, requestedAt) === false) {
             delete state.board; // Never authorize cues or page controls from a rejected delta.
-            inkAt = performance.now()+100;
+            inkWakeAt = performance.now()+100;
             return;
         }
         state.board = view;
@@ -1002,11 +1112,23 @@
         const local = connected() ? scope() : {};
         const requestedAt = performance.now();
         try {
-            const position = {...board.position(), compact:true, wire:boardWire, checkpoint:requestedAt >= checkpointAt || undefined};
+            // Hints arriving during this read can schedule a follow-up, still rate limited below.
+            inkWakeAt = Infinity;
+            if (active) active.headWakeAt = Infinity;
+            const position = {...board.position(), compact:true, wire:boardWire, boardNotice:true,
+                checkpoint:requestedAt >= checkpointAt || undefined};
             if (boardOnly) {
                 aimAt = Infinity;
-                const result = await api('board-sync', {...local, ...position, ...board.takeAim(), ...board.takeView()});
-                if (captured === flow && !stopped && hasAccess() && local.sid === scope().sid) receiveBoard(result.board, local, requestedAt);
+                const mutation = board.takeView(), aim = board.takeAim();
+                const result = await api('board-sync', {...local, ...position, ...aim, ...mutation});
+                if (captured === flow && !stopped && hasAccess() && local.sid === scope().sid) {
+                    receiveBoard(result.board, local, requestedAt);
+                    const view = result.board;
+                    if (view && view === state.board && (mutation.view || aim.aim)) {
+                        const mirrored = aim.aim && view.laser?.by === active.room.localParticipant.identity;
+                        advertiseHead(active,headOf(view),mirrored ? headLaser : 0);
+                    }
+                }
                 return;
             }
             const people = !document.hidden && !el('people-panel').hidden;
@@ -1040,6 +1162,7 @@
                 render();
                 attention.snapshot(result.profiles, pushChat(result.chat), result.chatMore, active.room.localParticipant.identity);
                 receiveBoard(result.board, scope(), requestedAt);
+                if (state.board && state.board === result.board) advertiseHead(active,headOf(result.board));
                 needsRefresh ||= !!result.chatMore;
             } else {
                 clearActivity();
@@ -1105,7 +1228,8 @@
         if (stopped || permanent || polling || (connecting && !active)) return;
         const now = performance.now();
         const heartbeat = needsRefresh ? 30 : Math.max(0,statusAt-now);
-        const requested = Math.min(inkAt, Math.max(aimAt,inkRead+260));
+        const requested = Math.min(boardRecoveryAt(), inkWakeAt, Math.max(aimAt,inkRead+260),
+            Math.max(active?.headWakeAt ?? Infinity,inkRead+260));
         const read = !document.hidden && hasAccess() ? Math.max(0,requested-now,inkRetryAt-now) : Infinity;
         // One reader per tab, so a late ink response cannot undo a newer page or admission state.
         const quick = !needsRefresh && read + 100 < heartbeat;

@@ -149,7 +149,18 @@ function cl_board_view(ClassroomStore $s, string $id, ?array $actor, array $inpu
     $checkpoint = $wire && ($reset || ($input['checkpoint'] ?? false) === true);
     if ($wire) {
         $shared['head'] = $clock;
-        if ($actor && $lesson) $shared['presenter'] = cl_board_data_owner($lesson, $at ?? (int)$now);
+        if ($actor && $lesson) {
+            $shared['presenter'] = cl_board_data_owner($lesson, $at ?? (int)$now);
+            // Only the presenter has the LiveKit data grant. Keep quick HTTP polling
+            // when any other staff member or granted pupil may change durable ink.
+            $rule = $lesson['access']['board'] ?? [];
+            $owner = $shared['presenter']['identity'] ?? null;
+            if (($input['boardNotice'] ?? null) === true && $owner !== null
+                && ($lesson['pulses'][$owner]['board_notice'] ?? false) === true && count($lesson['staff']) === 1
+                && empty($rule['all']) && !array_filter($rule['members'] ?? [])) {
+                $shared['notice'] = true;
+            }
+        }
         if ($checkpoint) {
             $shared['checkpoint'] = true;
             if ($write) $shared['writeSeq'] = cl_board_writer($s, $lesson, $state, $actor['identity'], $input['sid'] ?? null)['seq'];

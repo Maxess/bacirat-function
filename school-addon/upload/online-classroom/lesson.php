@@ -155,7 +155,8 @@ function cl_touch(ClassroomStore $s, array $lesson, array $actor, array $input, 
                 unset($lesson['pulses'][$id], $lesson['staff'][$id], $lesson['seen'][$id]);
             }
             if ($lesson['phase'] === 'live' && !cl_has_staff($lesson, $now)) cl_pause($lesson);
-            else $lesson['pulses'][$id] = ['sid'=>$sid, 'at'=>$now] + (cl_board_wire($input) ? ['board_wire'=>true] : []);
+            else $lesson['pulses'][$id] = ['sid'=>$sid, 'at'=>$now] + (cl_board_wire($input)
+                ? ['board_wire'=>true] + (cl_is_staff($actor) && ($input['boardNotice'] ?? null) === true ? ['board_notice'=>true] : []) : []);
             $s->put('lesson', $lesson['id'], $lesson);
         }
     }

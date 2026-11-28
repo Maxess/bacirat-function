@@ -1,0 +1,91 @@
+name: Packaged board PHP and SQL A/B
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/classroom-board-ab.yml
+      - tests/fixtures/vps-board-*.php
+      - tests/fixtures/vps-board-*.cjs
+      - artifacts/school-classroom-plugin-v0.4.28.zip
+permissions:
+  contents: read
+jobs:
+  matched:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    services:
+      db:
+        image: mariadb:11.4
+        env:
+          MARIADB_RANDOM_ROOT_PASSWORD: '1'
+          MARIADB_DATABASE: baci_board_qa
+          MARIADB_USER: board_qa
+          MARIADB_PASSWORD: disposable-QA
+        ports:
+          - '127.0.0.1:13306:3306'
+        options: --health-cmd "healthcheck.sh --connect --innodb_initialized" --health-interval 5s --health-retries 12
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - name: Verify the packages and the real PHP permission path
+        run: |
+          set -euo pipefail
+          sudo apt-get -q -o Acquire::Retries=3 -o APT::Update::Error-Mode=any update
+          sudo apt-get -qy -o Acquire::Retries=3 install --no-install-recommends php8.3-cli php8.3-zip php8.3-sqlite3 php8.3-mysql php8.3-curl
+          (cd artifacts && sha256sum --strict -c SHA256SUMS-v0.4.27.txt && sha256sum --strict -c SHA256SUMS-v0.4.28.txt)
+          python3 tests/test_classroom_site_release.py
+          php8.3 -l tests/fixtures/vps-board-http.php
+          php8.3 tests/classroom-lessons.php
+          php8.3 tests/classroom-recording.php
+          node --test tests/classroom-ui.cjs tests/classroom-board.cjs
+      - name: Replay equal single-writer and missed-notice workloads on one server
+        env:
+          BACI_BOARD_QA_DSN: 'mysql:host=127.0.0.1;port=13306;dbname=baci_board_qa;charset=utf8mb4'
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/board-evidence"
+          mkdir -p "$out"
+          mapfile -t cpus < <(python3 -c 'import os; print(*sorted(os.sched_getaffinity(0)),sep="\n")')
+          test "${#cpus[@]}" -ge 4
+          for v in 0.4.27 0.4.28; do
+            export BACI_BOARD_QA_SITE="$RUNNER_TEMP/site-$v"
+            mkdir "$BACI_BOARD_QA_SITE"
+            unzip -q "artifacts/school-classroom-plugin-v$v.zip" -d "$BACI_BOARD_QA_SITE"
+            php8.3 tests/fixtures/vps-board-http.php init
+            PHP_CLI_SERVER_WORKERS=2 setsid taskset -c "${cpus[0]},${cpus[1]}" php8.3 -S 127.0.0.1:18392 tests/fixtures/vps-board-http.php > "$RUNNER_TEMP/board-$v.log" 2>&1 &
+            pid=$!
+            trap 'kill -TERM -- "-$pid" 2>/dev/null || true' EXIT
+            sleep 1
+            if ! taskset -c "${cpus[2]},${cpus[3]}" node tests/fixtures/vps-board-load.cjs "$BACI_BOARD_QA_SITE/assets/classroom.js" "$out/$v.json" "$pid"; then
+              tail -18 "$RUNNER_TEMP/board-$v.log"
+              proof=$(grep 'QA board:' "$RUNNER_TEMP/board-$v.log" | tail -10 | paste -sd '|') || true
+              echo "::error title=Board PHP $v::${proof:0:3000}"
+              exit 1
+            fi
+            kill -TERM -- "-$pid"
+            wait "$pid" || true
+            trap - EXIT
+            jq -c 'to_entries[]' "$out/$v.json" | while read -r line; do echo "::notice title=Board $v::$line"; done
+          done
+          python3 - "$out" <<'PY'
+          import json, sys
+          from pathlib import Path
+          p = Path(sys.argv[1])
+          b, a = [json.loads((p/(v+'.json')).read_text()) for v in ('0.4.27','0.4.28')]
+          assert b['idle']['head_publishes'] == 0 and a['idle']['head_publishes'] > 0
+          for phase, limit in [('idle',.75),('writing',.85)]:
+              before, after = b[phase], a[phase]
+              assert before['cursor_observations'] == after['cursor_observations']
+              assert after['requests_per_s'] < before['requests_per_s'] * limit, phase
+              assert after['sql_per_s'] < before['sql_per_s'] * limit, phase
+          assert a['writing']['ink_p95_ms'] <= b['writing']['ink_p95_ms'] + 100
+          print('::notice title=Board A/B::Equal stroke/cursor counts; fewer PHP requests and SQL calls; no normal-path p95 regression over 100 ms.')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: board-ab-evidence
+          path: ${{ runner.temp }}/board-evidence
+          if-no-files-found: ignore
+          retention-days: 14
